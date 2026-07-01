@@ -18,6 +18,12 @@ import argparse
 import sys
 from pathlib import Path
 
+# profile.py in this dir shadows stdlib `profile` (imported by cProfile via
+# torchvision->torch._dynamo when the torch backend loads); drop the scripts dir from
+# the front of sys.path so stdlib wins when this runs standalone.
+_scripts_dir = str(Path(__file__).resolve().parent)
+sys.path[:] = [p for p in sys.path if p not in ("", _scripts_dir)]
+
 import cv2
 import numpy as np
 import tensorrt as trt

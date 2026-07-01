@@ -25,6 +25,14 @@ import json
 import sys
 from pathlib import Path
 
+# This script lives in trt-files/scripts alongside profile.py, whose name shadows the
+# stdlib `profile` module that cProfile (pulled in by torchvision -> torch._dynamo)
+# imports. Drop the scripts dir from the front of sys.path so stdlib wins; this script
+# imports no sibling module, so removing it is safe. (Not an issue pre-M1 when there was
+# no profile.py to shadow.)
+_scripts_dir = str(Path(__file__).resolve().parent)
+sys.path[:] = [p for p in sys.path if p not in ("", _scripts_dir)]
+
 import torch
 import torch.nn as nn
 

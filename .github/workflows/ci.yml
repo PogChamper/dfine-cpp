@@ -1,54 +1,186 @@
 name: CI
 
-# This is hosted (GPU-less) CI: lint/format/shell checks only. D-FINE-cpp is a
-# C++/TensorRT inference library — the real build+run validation (build.sh,
-# dfine_smoke, mAP checks) needs an NVIDIA GPU + TensorRT and does not run here.
-# See CONTRIBUTING.md / docs/HANDOFF.md for the full local validation workflow.
+# Hosted (GPU-less) CI. What runs here:
+#   lint          — ruff / shellcheck / clang-format (static checks only)
+#   compile-cuda  — full C++/CUDA compile + link in the NGC TensorRT container,
+#                   plus the app --help paths (no CUDA calls executed)
+#   python-nogpu  — the pytest subset whose fixtures don't need libdfine/engine/GPU
+#   wheel         — builds libdfine.so and packages the dfine wheel artifact
+# GPU-dependent behavior (inference, mAP, benchmarks, CUDA graphs, sanitizer
+# runs) is NOT verified here — see CONTRIBUTING.md / docs/HANDOFF.md for the
+# local validation workflow, and the disabled self-hosted stub at the bottom.
 
 on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash  # -eo pipefail for every run step, incl. container jobs
+
 jobs:
   lint:
-    name: ruff (trt-files/scripts)
+    name: lint (ruff + shellcheck + clang-format)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install ruff
-        run: pip install ruff
-      - name: ruff check
-        run: ruff check trt-files/scripts
+      - name: Install pinned linters
+        # ruff pin matches .pre-commit-config.yaml; clang-format is pinned
+        # because formatting output drifts across major versions.
+        run: pip install ruff==0.6.9 clang-format==18.1.8
 
-  shell:
-    name: shellcheck (bash scripts)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      # python/dfine is fully clean — no exclusions there. The per-file ignores
+      # carry pre-existing debt only (E401/E702/E731/F401/F541/F841/I001 in
+      # trt-files/scripts, one F401 in test_detector.py), scoped per path so
+      # any NEW rule or any violation in python/dfine still fails the job.
+      - name: ruff
+        run: >
+          ruff check trt-files/scripts python/dfine python/tests
+          --extend-per-file-ignores
+          'trt-files/scripts/*:E401,trt-files/scripts/*:E702,trt-files/scripts/*:E731,trt-files/scripts/*:F401,trt-files/scripts/*:F541,trt-files/scripts/*:F841,trt-files/scripts/*:I001,python/tests/test_detector.py:F401'
+
       - name: shellcheck
-        run: shellcheck build.sh trt-files/scripts/overnight_bench.sh || true
+        # shellcheck is preinstalled on ubuntu-latest runners.
+        run: |
+          # Fully clean scripts — no exclusions.
+          shellcheck build.sh cmake/cuda_host_ccbin.sh python/build_wheel.sh
+          # overnight_bench.sh predates gating: SC2086 ($PY/$SUBSET_ARGS/... rely
+          # on intentional word splitting), SC2015 (`A && B || C` used as
+          # success/failure logging). Both info-level; excluded for this file only.
+          shellcheck --exclude=SC2086,SC2015 trt-files/scripts/overnight_bench.sh
 
-  cpp-format:
-    name: clang-format --dry-run
+      - name: clang-format --dry-run --Werror
+        # Gating. Known-red as of authoring, for two reasons that need source
+        # fixes outside this workflow: (1) .clang-format contains two YAML
+        # documents both "Language: Cpp", which clang-format rejects outright
+        # ("Error reading .clang-format") — merge the second document's
+        # `Standard: c++17` into the first; (2) the tree has never been
+        # bulk-reformatted (~970 diffs under the fixed config, all 32 files).
+        # Goes green after the config fix + a one-time `clang-format -i`.
+        run: |
+          git ls-files src include apps examples \
+            | grep -E '\.(c|h|cpp|hpp|cu|cuh)$' \
+            | xargs -r clang-format --dry-run --Werror
+
+  compile-cuda:
+    name: C++/CUDA compile + link (TRT container)
+    runs-on: ubuntu-latest
+    # nvcr.io/nvidia/tensorrt:24.10-py3 ships nvcc + TensorRT dev headers/libs;
+    # compiling and linking needs no GPU. Anonymous pull, but the image is
+    # multi-GB — expect a slow first pull on each runner.
+    container: nvcr.io/nvidia/tensorrt:24.10-py3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain deps
+        # Mirrors Dockerfile: jammy's apt cmake (3.22) satisfies >=3.20; the
+        # system nlohmann/json header keeps CMake off its FetchContent fallback
+        # (which would clone from GitHub mid-configure).
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake build-essential nlohmann-json3-dev
+      - name: Configure
+        # CMAKE_CUDA_ARCHITECTURES must be an explicit SM here: build.sh's
+        # 'native' default probes a GPU, and there is none on hosted runners.
+        # third_party/tensorrt is gitignored (absent from a checkout), so
+        # cmake/FindTensorRT.cmake resolves headers AND libs from the
+        # container's /usr install — a matched pair, no header/lib skew.
+        run: >
+          cmake -B build -S .
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+          -DCUDAToolkit_ROOT=/usr/local/cuda
+          -DCMAKE_CUDA_ARCHITECTURES=89
+          -DDFINE_WARNINGS_AS_ERRORS=ON
+      - name: Build (all targets)
+        # No build cache: the image has no ccache, and actions/cache of build/
+        # without it does not survive cmake's timestamp checks — omitted.
+        run: cmake --build build -j"$(nproc)"
+      - name: CPU-only smokes (--help paths)
+        # dfine_detect and dfine_bench return 0 from -h/--help before any CUDA
+        # or TensorRT API call (apps/dfine_detect.cpp:28, apps/dfine_bench.cpp:247)
+        # — this only exercises linking/loading of libdfine + libnvinfer +
+        # libcudart. dfine_inspect is deliberately NOT run: it has no --help
+        # path (argv[1] is unconditionally an engine path, so "--help" exits
+        # nonzero — see apps/dfine_inspect.cpp and the Dockerfile CMD note).
+        run: |
+          export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+          ./build/dfine_detect --help
+          ./build/dfine_bench --help
+
+  python-nogpu:
+    name: python bindings (no-GPU pytest subset)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install clang-format
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package + test deps
+        run: pip install -e "python/[dev]"
+      - name: pytest
+        # conftest.py fixtures skip per-test when libdfine.so, an engine, or a
+        # GPU is missing. In a bare checkout (no build/, engines gitignored)
+        # exactly one test executes — test_package_version_is_static — and the
+        # other 13 skip at the `lib` fixture. Measured under these conditions:
+        # "1 passed, 13 skipped". pytest already fails the job on collection
+        # errors and on zero collected tests (exit 5); the grep additionally
+        # rejects an all-skipped run where nothing passed.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-format
-      # Existing C++ files are intentionally NOT bulk-reformatted to this style
-      # yet (see .clang-format / CONTRIBUTING.md "Style") — only new/changed
-      # code is expected to be clang-format-clean. Until a one-time repo-wide
-      # reformat lands, this check is informational only (continue-on-error),
-      # so it will not fail the build.
-      - name: clang-format --dry-run --Werror
-        continue-on-error: true
+          pytest python/tests -rs | tee pytest-nogpu.log
+          grep -qE '[1-9][0-9]* passed' pytest-nogpu.log
+
+  wheel:
+    name: wheel (bundled libdfine.so, linux_x86_64)
+    runs-on: ubuntu-latest
+    # Independent of compile-cuda: builds only the `dfine` library target in
+    # the same TRT container, then packages it.
+    container: nvcr.io/nvidia/tensorrt:24.10-py3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain deps
         run: |
-          clang-format --dry-run --Werror $(git ls-files "*.cpp" "*.hpp" "*.cu" "*.cuh" | grep -v third_party)
+          apt-get update
+          apt-get install -y --no-install-recommends cmake build-essential nlohmann-json3-dev
+      - name: Build libdfine.so
+        # sm_89 SASS + compute_89 PTX: runs on Ada as-is and JIT-compiles on
+        # newer arches; older GPUs (sm_75/86) need a rebuild with their arch.
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+            -DCUDAToolkit_ROOT=/usr/local/cuda \
+            -DCMAKE_CUDA_ARCHITECTURES=89 \
+            -DDFINE_BUILD_APPS=OFF
+          cmake --build build --target dfine -j"$(nproc)"
+      - name: Package wheel
+        # Same flow as python/build_wheel.sh minus the native build step:
+        # cp -L dereferences the .so symlink chain (wheels/zip cannot hold
+        # symlinks; _ffi.py loads the literal name libdfine.so), then retag.
+        # linux_x86_64, not manylinux: libdfine.so links CUDA/TensorRT libs
+        # that are non-redistributable and outside the manylinux policy, so a
+        # manylinux tag can never be audit-clean. At runtime the target machine
+        # must provide TensorRT 10.x + CUDA 12 (e.g. pip install tensorrt==10.13.*).
+        run: |
+          cp -L build/libdfine.so python/dfine/libdfine.so
+          python3 -m pip install build wheel
+          python3 -m build --wheel --outdir dist python/
+          python3 -m wheel tags --platform-tag linux_x86_64 --remove dist/dfine-*-py3-none-any.whl
+      - name: Smoke-install (import only — no GPU, native lib not loaded)
+        run: |
+          python3 -m pip install dist/*.whl
+          python3 -c "import dfine, pathlib; p = pathlib.Path(dfine.__file__).parent / 'libdfine.so'; assert p.exists(), p; print(dfine.__version__, p)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dfine-wheel
+          path: dist/*.whl
+          if-no-files-found: error
 
   # gpu-build:
   #   name: build.sh WERROR=ON + dfine_smoke
@@ -63,3 +195,9 @@ jobs:
   #       run: WERROR=ON ./build.sh
   #     - name: Smoke test
   #       run: ./build/dfine_smoke
+  #     - name: C-ABI smoke + parity vs the C++ detector
+  #       run: ./build/dfine_capi_smoke && ./build/dfine_capi_parity
+  #     - name: Python bindings (full suite — needs an engine + GPU)
+  #       run: |
+  #         pip install -e "python/[dev]"
+  #         pytest python/tests -rs

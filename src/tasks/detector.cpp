@@ -1,0 +1,414 @@
+#include "dfine/tasks/detector.hpp"
+
+#include "dfine/core/engine_meta.hpp"
+#include "dfine/core/log.hpp"
+#include "dfine/core/postprocess.hpp"
+#include "internal/cuda_check.hpp"
+#include "internal/cuda_preprocess.cuh"
+#include "internal/trt_session.hpp"
+
+#include "internal/cuda_raii.hpp"
+
+#include <NvInferRuntime.h>
+#include <cuda_runtime_api.h>
+
+#include <chrono>
+#include <cstddef>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace dfine {
+
+struct DFineDetector::Impl {
+    TrtSession                         session;
+    EngineMeta                         meta;
+    std::unique_ptr<ImagePreprocessor> preprocessor;
+    DetectorOptions                    opts;
+
+    std::string input_name;
+    const BindingInfo* b_logits{nullptr};
+    const BindingInfo* b_boxes{nullptr};
+    int N{0};  // num_queries
+    int C{0};  // num_classes
+    int in_h_{640};
+    int in_w_{640};
+    bool input_dynamic_{false};  // batch axis is dynamic (-1)
+    int  max_batch_{1};          // enforced upper bound for detect_batch
+
+    std::vector<float> h_logits;
+    std::vector<float> h_boxes;
+
+    PostprocessParams pp;
+    Timings           timings;
+
+    // --- CUDA-graph replay state (opt-in via DetectorOptions.use_cuda_graph) ------
+    // One instantiated graph per batch size, each capturing enqueueV3 + the output
+    // D2H copies into detector-owned pinned buffers. The graph bakes device/host
+    // addresses, so we record them and re-capture if a buffer realloc moves them.
+    struct GraphEntry {
+        CudaGraphExec exec;
+        void* d_input{nullptr};
+        void* d_logits{nullptr};
+        void* d_boxes{nullptr};
+        void* p_logits{nullptr};
+        void* p_boxes{nullptr};
+    };
+    std::unordered_map<int, GraphEntry> graphs_;
+    HostPtr     pinned_logits_;
+    HostPtr     pinned_boxes_;
+    std::size_t pinned_logits_cap_{0};
+    std::size_t pinned_boxes_cap_{0};
+    int  graph_ctx_batch_{-1};      // batch the context is configured + flushed for
+    bool graph_supported_{false};   // FP32 outputs and no aux streams
+    bool graph_disabled_{false};    // a capture attempt failed unrecoverably; stop trying
+    bool graph_warned_{false};
+
+    Impl(const std::filesystem::path& engine_path, const std::filesystem::path& meta_path,
+         const DetectorOptions& options)
+        : session(engine_path), opts(options) {
+        // Resolve the sidecar: the given path, else `<engine-stem>.json` (the
+        // convention the Python build_engine.py writes, e.g. dfine_m_fp32.json).
+        std::filesystem::path mp = meta_path;
+        if (!std::filesystem::is_regular_file(mp)) {
+            std::filesystem::path alt = engine_path;
+            alt.replace_extension(".json");
+            if (std::filesystem::is_regular_file(alt)) mp = alt;
+        }
+        bool have_meta = false;
+        if (std::filesystem::is_regular_file(mp)) {
+            meta = EngineMeta::from_json_file(mp);
+            have_meta = true;
+        } else {
+            log_message(LogSeverity::kWarning,
+                        "no meta sidecar found; assuming D-FINE defaults "
+                        "(/255, RGB, dims/classes read from engine bindings)");
+        }
+
+        // Resolve the input tensor name (sidecar, else first input binding).
+        input_name = meta.input_names.empty() ? std::string{"images"} : meta.input_names.front();
+        const BindingInfo* in_b = session.find(input_name);
+        if (!in_b) {
+            const auto& ins = session.input_indices();
+            if (ins.empty()) throw std::runtime_error("dfine: engine has no input tensor");
+            in_b = &session.bindings()[ins.front()];
+            input_name = in_b->name;
+        }
+        // The CUDA preprocess writes float32 straight into the input device buffer,
+        // so a non-FP32 input binding would be a size mismatch / out-of-bounds write.
+        if (in_b->dtype != nvinfer1::DataType::kFLOAT) {
+            throw std::runtime_error("dfine: input tensor '" + input_name +
+                "' is not FP32; rebuild the engine with an FP32 (fp32:chw) input.");
+        }
+
+        // Trust the engine bindings for shape facts — a stale/absent sidecar must
+        // not silently misconfigure preprocessing or leave a dynamic input unset.
+        input_dynamic_ = in_b->shape.nbDims >= 1 && in_b->shape.d[0] < 0;
+        if (in_b->shape.nbDims == 4) {
+            if (in_b->shape.d[2] > 0) in_h_ = static_cast<int>(in_b->shape.d[2]);
+            if (in_b->shape.d[3] > 0) in_w_ = static_cast<int>(in_b->shape.d[3]);
+        } else {
+            in_h_ = meta.input_h;
+            in_w_ = meta.input_w;
+        }
+        max_batch_ = (have_meta && meta.dynamic_batch) ? meta.max_batch : (input_dynamic_ ? 0 : 1);
+
+        resolve_outputs_();
+
+        // num_queries / num_classes are batch-independent — read from the (possibly
+        // still dynamic-batch) logits binding: shape [*, N, C].
+        const int nb = b_logits->shape.nbDims;
+        N = (nb >= 2) ? static_cast<int>(b_logits->shape.d[nb - 2]) : meta.num_queries;
+        C = (nb >= 1) ? static_cast<int>(b_logits->shape.d[nb - 1]) : meta.num_classes;
+        if (N <= 0) N = meta.num_queries;
+        if (C <= 0) C = meta.num_classes;
+
+        preprocessor = std::make_unique<ImagePreprocessor>(in_h_, in_w_);
+        preprocessor->set_mean(meta.mean[0], meta.mean[1], meta.mean[2]);
+        preprocessor->set_std(meta.std[0], meta.std[1], meta.std[2]);
+
+        pp.num_queries = N;
+        pp.num_classes = C;
+        pp.topk        = N;
+        pp.threshold   = opts.threshold;
+
+        h_logits.resize(static_cast<std::size_t>(N) * C);
+        h_boxes.resize(static_cast<std::size_t>(N) * 4);
+
+        // CUDA graph is only viable when both outputs are FP32 (the graph does a raw
+        // D2H, no dtype conversion) and the engine spawns no auxiliary streams that a
+        // ThreadLocal capture would miss (P12 §5c). Otherwise we silently use the
+        // plain enqueueV3 path, which handles FP16 outputs via get_output_f32.
+        graph_supported_ = b_logits->dtype == nvinfer1::DataType::kFLOAT &&
+                           b_boxes->dtype == nvinfer1::DataType::kFLOAT &&
+                           session.num_aux_streams() == 0;
+    }
+
+    // Locate the logits/boxes output bindings by name, falling back to shape
+    // (the box tensor is the output whose last dim == 4).
+    void resolve_outputs_() {
+        b_logits = session.find("logits");
+        b_boxes  = session.find("boxes");
+        if (meta.output_names.size() >= 2) {
+            if (!b_logits) b_logits = session.find(meta.output_names[0]);
+            if (!b_boxes)  b_boxes  = session.find(meta.output_names[1]);
+        }
+        if (!b_logits || !b_boxes) {
+            const auto& outs = session.output_indices();
+            if (outs.size() < 2) throw std::runtime_error("dfine: engine has fewer than 2 outputs");
+            const BindingInfo* a = &session.bindings()[outs[0]];
+            const BindingInfo* b = &session.bindings()[outs[1]];
+            auto last_dim = [](const BindingInfo* x) {
+                return x->shape.nbDims > 0 ? x->shape.d[x->shape.nbDims - 1] : -1;
+            };
+            if (last_dim(a) == 4) { b_boxes = a; b_logits = b; }
+            else                  { b_boxes = b; b_logits = a; }
+        }
+    }
+
+    // Set the dynamic input shape for batch B (or validate a static engine).
+    void set_batch_(int B) {
+        if (input_dynamic_) {
+            if (max_batch_ > 0 && B > max_batch_) {
+                throw std::runtime_error("dfine: batch size " + std::to_string(B) +
+                                         " exceeds engine max_batch " + std::to_string(max_batch_));
+            }
+            session.set_input_shape(input_name, nvinfer1::Dims4{B, 3, in_h_, in_w_});
+        } else if (B != 1) {
+            throw std::runtime_error(
+                "dfine: engine is static-batch; rebuild with a dynamic batch profile for B>1");
+        }
+    }
+
+    // Grow the detector-owned pinned output buffers to hold at least the given sizes.
+    void ensure_pinned_(std::size_t logits_bytes, std::size_t boxes_bytes) {
+        if (pinned_logits_cap_ < logits_bytes) {
+            void* p = nullptr;
+            DFINE_CUDA_CHECK(cudaMallocHost(&p, logits_bytes));
+            pinned_logits_.reset(p);
+            pinned_logits_cap_ = logits_bytes;
+        }
+        if (pinned_boxes_cap_ < boxes_bytes) {
+            void* p = nullptr;
+            DFINE_CUDA_CHECK(cudaMallocHost(&p, boxes_bytes));
+            pinned_boxes_.reset(p);
+            pinned_boxes_cap_ = boxes_bytes;
+        }
+    }
+
+    // A cached graph is stale once any baked device/host address moves (a grow-only
+    // buffer realloc after a larger batch was seen). Cheap 5-pointer check per replay.
+    bool graph_stale_(const GraphEntry& g) const {
+        return g.d_input  != session.device_buffer(input_name) ||
+               g.d_logits != session.device_buffer(b_logits->name) ||
+               g.d_boxes  != session.device_buffer(b_boxes->name) ||
+               g.p_logits != pinned_logits_.get() ||
+               g.p_boxes  != pinned_boxes_.get();
+    }
+
+    // Capture enqueueV3 + output D2H for the current (already-set, already-flushed)
+    // batch B into a replayable graph. Returns false on any capture failure, leaving
+    // the context usable for the plain enqueueV3 path. H2D/preprocess stay outside.
+    bool capture_graph_(int B) {
+        const std::size_t logits_bytes = static_cast<std::size_t>(B) * N * C * sizeof(float);
+        const std::size_t boxes_bytes  = static_cast<std::size_t>(B) * N * 4 * sizeof(float);
+        ensure_pinned_(logits_bytes, boxes_bytes);
+
+        void* d_input  = session.device_buffer(input_name);
+        void* d_logits = session.device_buffer(b_logits->name);
+        void* d_boxes  = session.device_buffer(b_boxes->name);
+        cudaStream_t stream = session.stream();
+        auto* ctx = session.context();
+
+        ctx->setEnqueueEmitsProfile(false);  // profiling is not capturable (P12 §5b)
+
+        // Warm-up: >=2 full enqueue cycles at this exact shape flush TRT's deferred
+        // shape setup, which would otherwise sync-abort the capture (P12 §5a).
+        const int warm = opts.graph_warmup_iters < 2 ? 2 : opts.graph_warmup_iters;
+        for (int w = 0; w < warm; ++w) {
+            if (!ctx->enqueueV3(stream)) return false;
+            DFINE_CUDA_CHECK(cudaMemcpyAsync(pinned_logits_.get(), d_logits, logits_bytes,
+                                             cudaMemcpyDeviceToHost, stream));
+            DFINE_CUDA_CHECK(cudaMemcpyAsync(pinned_boxes_.get(), d_boxes, boxes_bytes,
+                                             cudaMemcpyDeviceToHost, stream));
+        }
+        DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
+            cudaGetLastError();  // clear sticky error
+            return false;
+        }
+        const bool enq_ok = ctx->enqueueV3(stream);
+        cudaMemcpyAsync(pinned_logits_.get(), d_logits, logits_bytes, cudaMemcpyDeviceToHost, stream);
+        cudaMemcpyAsync(pinned_boxes_.get(), d_boxes, boxes_bytes, cudaMemcpyDeviceToHost, stream);
+        cudaGraph_t graph_raw = nullptr;
+        const cudaError_t end_err = cudaStreamEndCapture(stream, &graph_raw);
+        if (!enq_ok || end_err != cudaSuccess || graph_raw == nullptr) {
+            cudaGetLastError();
+            if (graph_raw) cudaGraphDestroy(graph_raw);
+            return false;
+        }
+        CudaGraph graph(graph_raw);
+
+        cudaGraphExec_t exec_raw = nullptr;
+        if (cudaGraphInstantiate(&exec_raw, graph.get(), 0) != cudaSuccess || exec_raw == nullptr) {
+            cudaGetLastError();
+            return false;
+        }
+        GraphEntry e;
+        e.exec = CudaGraphExec(exec_raw);
+        e.d_input = d_input; e.d_logits = d_logits; e.d_boxes = d_boxes;
+        e.p_logits = pinned_logits_.get(); e.p_boxes = pinned_boxes_.get();
+        graphs_[B] = std::move(e);
+        return true;
+    }
+
+    // Try to run inference for batch B via graph replay. Returns true if the graph
+    // path produced the outputs (into h_logits/h_boxes); false means the caller must
+    // use the plain enqueueV3 path. Only replays when the context shape is stable
+    // (== last flushed batch), so a graph never runs against an unflushed shape.
+    bool try_graph_infer_(int B) {
+        if (B != graph_ctx_batch_) return false;  // shape just (re)set; let enqueueV3 flush it
+
+        auto it = graphs_.find(B);
+        if (it != graphs_.end() && graph_stale_(it->second)) {
+            graphs_.erase(it);
+            it = graphs_.end();
+        }
+        if (it == graphs_.end()) {
+            if (!capture_graph_(B)) { graph_disabled_ = true; return false; }
+            it = graphs_.find(B);
+        }
+
+        DFINE_CUDA_CHECK(cudaGraphLaunch(it->second.exec.get(), session.stream()));
+        DFINE_CUDA_CHECK(cudaStreamSynchronize(session.stream()));
+
+        const std::size_t logits_n = static_cast<std::size_t>(B) * N * C;
+        const std::size_t boxes_n  = static_cast<std::size_t>(B) * N * 4;
+        if (h_logits.size() < logits_n) h_logits.resize(logits_n);
+        if (h_boxes.size()  < boxes_n)  h_boxes.resize(boxes_n);
+        std::memcpy(h_logits.data(), it->second.p_logits, logits_n * sizeof(float));
+        std::memcpy(h_boxes.data(),  it->second.p_boxes,  boxes_n * sizeof(float));
+        return true;
+    }
+
+    std::vector<Detections> run_batch(const std::vector<ImageU8>& images, float threshold) {
+        const int B = static_cast<int>(images.size());
+        if (B == 0) return {};
+        using Clock = std::chrono::steady_clock;
+        const auto t0 = Clock::now();
+
+        set_batch_(B);
+
+        const std::size_t single = static_cast<std::size_t>(3) * in_h_ * in_w_;
+        float* d_input = static_cast<float*>(session.device_buffer(input_name));
+        for (int i = 0; i < B; ++i) {
+            preprocessor->process(images[i], d_input + i * single, session.stream());
+        }
+
+        // Preprocess/H2D stayed outside; the graph (if any) covers enqueueV3 + D2H.
+        bool used_graph = false;
+        if (opts.use_cuda_graph) {
+            if (graph_supported_ && !graph_disabled_) {
+                used_graph = try_graph_infer_(B);
+                if (!used_graph && graph_disabled_ && !graph_warned_) {
+                    graph_warned_ = true;
+                    log_message(LogSeverity::kWarning,
+                                "dfine: CUDA-graph capture failed; using enqueueV3 "
+                                "(correct, no graph speedup)");
+                }
+            } else if (!graph_supported_ && !graph_warned_) {
+                graph_warned_ = true;
+                log_message(LogSeverity::kWarning,
+                            "dfine: use_cuda_graph set but engine isn't graph-capturable "
+                            "(needs FP32 outputs and 0 aux streams); using enqueueV3");
+            }
+        }
+        if (!used_graph) {
+            session.infer();  // enqueueV3 + sync; also flushes any deferred shape setup
+            const std::size_t logits_n = static_cast<std::size_t>(B) * N * C;
+            const std::size_t boxes_n  = static_cast<std::size_t>(B) * N * 4;
+            if (h_logits.size() < logits_n) h_logits.resize(logits_n);
+            if (h_boxes.size()  < boxes_n)  h_boxes.resize(boxes_n);
+            session.get_output_f32(b_logits->name, h_logits.data(), logits_n);
+            session.get_output_f32(b_boxes->name,  h_boxes.data(),  boxes_n);
+            graph_ctx_batch_ = B;  // context now enqueued/flushed for this shape
+        }
+        const auto t1 = Clock::now();
+
+        pp.threshold = (threshold >= 0.0f) ? threshold : opts.threshold;
+        std::vector<Detections> results;
+        results.reserve(static_cast<std::size_t>(B));
+        for (int i = 0; i < B; ++i) {
+            const float* l = h_logits.data() + static_cast<std::size_t>(i) * N * C;
+            const float* b = h_boxes.data()  + static_cast<std::size_t>(i) * N * 4;
+            results.push_back(decode_detections(l, b, images[i].width, images[i].height, pp));
+        }
+        const auto t2 = Clock::now();
+
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        timings.preprocess_ms  = 0.0;  // merged into infer_ms (async on the stream)
+        timings.infer_ms       = ms(t0, t1);
+        timings.postprocess_ms = ms(t1, t2);
+        timings.total_ms       = ms(t0, t2);
+        return results;
+    }
+};
+
+DFineDetector::DFineDetector(const std::filesystem::path& engine_path,
+                             const DetectorOptions& opts) {
+    init_(engine_path, engine_path.string() + ".json", opts);
+}
+
+DFineDetector::DFineDetector(const std::filesystem::path& engine_path,
+                             const std::filesystem::path& meta_path, const DetectorOptions& opts) {
+    init_(engine_path, meta_path, opts);
+}
+
+void DFineDetector::init_(const std::filesystem::path& engine_path,
+                          const std::filesystem::path& meta_path, const DetectorOptions& opts) {
+    impl_ = std::make_unique<Impl>(engine_path, meta_path, opts);
+}
+
+DFineDetector::~DFineDetector() = default;
+DFineDetector::DFineDetector(DFineDetector&&) noexcept = default;
+DFineDetector& DFineDetector::operator=(DFineDetector&&) noexcept = default;
+
+Detections DFineDetector::detect(const ImageU8& image, float threshold) {
+    if (!impl_) throw std::runtime_error("dfine: DFineDetector: moved-from object");
+    if (!image.data) throw std::runtime_error("dfine: DFineDetector::detect: empty image");
+    std::vector<ImageU8> one{image};
+    return std::move(impl_->run_batch(one, threshold).front());
+}
+
+std::vector<Detections> DFineDetector::detect_batch(const std::vector<ImageU8>& images,
+                                                    float threshold) {
+    if (!impl_) throw std::runtime_error("dfine: DFineDetector: moved-from object");
+    if (images.empty()) return {};
+    for (const auto& img : images) {
+        if (!img.data) throw std::runtime_error("dfine: detect_batch: image in batch is empty");
+    }
+    return impl_->run_batch(images, threshold);
+}
+
+const std::string& DFineDetector::variant()     const noexcept { return impl_->meta.variant; }
+int                DFineDetector::input_h()      const noexcept { return impl_->in_h_; }
+int                DFineDetector::input_w()      const noexcept { return impl_->in_w_; }
+int                DFineDetector::num_queries()  const noexcept { return impl_->N; }
+int                DFineDetector::num_classes()  const noexcept { return impl_->C; }
+int                DFineDetector::max_batch()    const noexcept {
+    // 0 = dynamic engine whose profile max is unknown (no/partial sidecar);
+    // detect_batch then defers the bound to TensorRT's setInputShape.
+    return impl_->input_dynamic_ ? impl_->max_batch_ : 1;
+}
+
+const DFineDetector::Timings& DFineDetector::last_timings() const noexcept {
+    return impl_->timings;
+}
+
+}  // namespace dfine

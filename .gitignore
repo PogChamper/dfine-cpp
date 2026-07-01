@@ -1,0 +1,15 @@
+# Build outputs (regenerate via trt-files/scripts/)
+trt-files/onnx/*.onnx
+trt-files/onnx/*.json
+trt-files/engines/*.engine
+trt-files/engines/*.json
+*.timing.cache
+third_party/
+# Python
+__pycache__/
+*.pyc
+# Weights
+*.pt
+*.pth
+# C++ build
+build/

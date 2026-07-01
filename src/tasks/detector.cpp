@@ -383,19 +383,23 @@ struct DFineDetector::Impl {
         const auto o_temp  = arena->sub(cub_bytes);
         arena->commit();
 
+        // Commit-last: run the only throwing setup (fill seg_off + sync) on LOCAL
+        // pointers first, so a throw here unwinds the local `arena` while gdec_,
+        // gdec_arena_, and gdec_cap_batch_ all still reference the prior valid arena.
+        int* seg = arena->at<int>(o_seg);
+        gpu_decode_fill_segoff(seg, cap, n_cand, session.stream());
+        DFINE_CUDA_CHECK(cudaStreamSynchronize(session.stream()));  // seg_off ready before first use
+
         gdec_.keys           = arena->at<float>(o_keys);
         gdec_.vals           = arena->at<uint32_t>(o_vals);
         gdec_.keys_out       = arena->at<float>(o_ko);
         gdec_.vals_out       = arena->at<uint32_t>(o_vo);
-        gdec_.seg_off        = arena->at<int>(o_seg);
+        gdec_.seg_off        = seg;
         gdec_.out            = arena->at<DetectionGPU>(o_out);
         gdec_.counts         = arena->at<uint32_t>(o_cnt);
         gdec_.scale_wh       = arena->at<float2>(o_scale);
         gdec_.cub_temp       = arena->at(o_temp);
         gdec_.cub_temp_bytes = cub_bytes;
-
-        gpu_decode_fill_segoff(gdec_.seg_off, cap, n_cand, session.stream());
-        DFINE_CUDA_CHECK(cudaStreamSynchronize(session.stream()));  // seg_off ready before first use
 
         gdec_arena_ = std::move(arena);  // frees the previous block (grow-only replacement)
         gdec_host_out_.resize(static_cast<std::size_t>(cap) * N);
@@ -417,7 +421,13 @@ struct DFineDetector::Impl {
             im.width = in_w_;
             im.channels = 3;
         }
-        (void)run_batch(imgs, opts.threshold);  // settles binding + decode allocations
+        // Warm enough to settle every grow-only allocation. CUDA-graph capture is
+        // deferred to the 2nd enqueue at a batch (the 1st flushes the shape), and it
+        // allocates pinned buffers + a graph exec, so warm 3x when it's enabled to
+        // complete capture before locking — otherwise the first real frame would
+        // allocate. gpu_decode settles in a single pass.
+        const int warm = opts.use_cuda_graph ? 3 : 1;
+        for (int w = 0; w < warm; ++w) (void)run_batch(imgs, opts.threshold);
         session.freeze();                        // binding grow -> throw hereafter
         frozen_ = true;                          // gpu-decode grow -> throw hereafter
         if (gdec_arena_) gdec_arena_->lock();

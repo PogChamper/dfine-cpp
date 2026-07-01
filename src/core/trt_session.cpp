@@ -173,20 +173,26 @@ const BindingInfo* TrtSession::find(std::string_view name) const noexcept {
 }
 
 void TrtSession::update_binding_shape_(int idx, const nvinfer1::Dims& dims) {
-    BindingInfo& b = bindings_[idx];
-    b.shape = dims;
-    b.element_count = volume(dims);
-    b.bytes = (b.element_count > 0)
-                  ? static_cast<std::size_t>(b.element_count) * dtype_bytes(b.dtype)
-                  : 0;
+    BindingInfo&      b         = bindings_[idx];
+    const int64_t     new_elems = volume(dims);
+    const std::size_t new_bytes =
+        (new_elems > 0) ? static_cast<std::size_t>(new_elems) * dtype_bytes(b.dtype) : 0;
+
+    // Evaluate the frozen-grow guard BEFORE caching `dims`: if we threw after caching
+    // the oversized shape, set_input_shape's de-dup fast path would later match it and
+    // skip re-checking, so the next call would run with an undersized buffer (OOB).
+    if (new_bytes > buffer_capacity_[idx] && frozen_) {
+        throw std::runtime_error(
+            "dfine: TrtSession is frozen but binding '" + b.name + "' must grow to " +
+            std::to_string(new_bytes) + " bytes (shape/batch exceeds the frozen maximum; "
+            "warm up at the max shape before freeze())");
+    }
+
+    b.shape         = dims;
+    b.element_count = new_elems;
+    b.bytes         = new_bytes;
 
     if (b.bytes > buffer_capacity_[idx]) {
-        if (frozen_) {
-            throw std::runtime_error(
-                "dfine: TrtSession is frozen but binding '" + b.name + "' must grow to " +
-                std::to_string(b.bytes) + " bytes (shape/batch exceeds the frozen maximum; "
-                "warm up at the max shape before freeze())");
-        }
         // Grow-only: free old buffers first (RAII reset), then re-allocate.
         device_buffers_[idx].reset();
         host_buffers_[idx].reset();

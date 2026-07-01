@@ -1,0 +1,58 @@
+# Unified Python environment for the D-FINE-cpp helper scripts (export / engine-build /
+# convert / eval / profile). Managed with uv:
+#
+#   uv venv && uv pip install -e ".[gpu,torch]"     # full (needs an NVIDIA GPU + CUDA 12)
+#   uv pip install -e ".[cpu]"                       # ONNX-graph tooling only (no GPU wheels)
+#
+# Notes / hard requirements (see docs/HANDOFF.md "Environment"):
+#   • TensorRT 10.13 and the matching CUDA-12 runtime must be present. The `tensorrt` wheel
+#     pulls the libs; at C++ runtime, LD_LIBRARY_PATH must point at `.../tensorrt_libs`.
+#   • onnxruntime-gpu is pinned to the CUDA-12 wheel (1.24.4); 1.27 needs CUDA 13.
+#   • The ONNX **export** (export_dfine_onnx.py) additionally needs the D-FINE-seg source
+#     package on PYTHONPATH for build_model — it is NOT a pip dependency. Everything else
+#     (build_engine / convert_fp16 / convert_int8 / profile / coco_eval) is self-contained.
+[project]
+name = "dfine-cpp-tools"
+version = "0.2.0"
+description = "Export / build / convert / eval / profile scripts for the D-FINE-cpp TensorRT runtime"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "numpy",
+    "onnx>=1.16",
+    "onnxconverter-common>=1.14",
+    "onnxsim>=0.4.36",
+    "pycocotools>=2.0.7",
+    "opencv-python-headless>=4.9",
+]
+
+[project.optional-dependencies]
+cpu = []                                              # ONNX-graph tooling works with the base deps
+gpu = [
+    "onnxruntime-gpu==1.24.4",                        # CUDA-12 wheel (NOT 1.27 = CUDA-13)
+    "tensorrt==10.13.*",
+    "socksio",                                        # SOCKS proxy for HF weight downloads
+]
+torch = ["torch==2.9.1"]                              # via the cu128 index below
+
+[tool.uv]
+# torch + onnxruntime-gpu ship as GPU-specific wheels; point uv at the right indexes.
+# Adjust the CUDA tag (cu128) to your toolkit if not on CUDA 12.8.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+extend-select = ["I"]        # import sorting
+ignore = ["E402"]            # scripts intentionally set sys.path before some imports
+
+[tool.setuptools]
+py-modules = []              # this is a scripts collection, not an importable package

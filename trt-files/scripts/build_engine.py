@@ -81,12 +81,12 @@ def build(args: argparse.Namespace) -> None:
     out_path = Path(args.output).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if args.fp16 and args.fp16_decoder_fp32:
-        raise SystemExit("--fp16 (naive global) and --fp16-decoder-fp32 are mutually exclusive")
-    if args.fp16_decoder_fp32 and args.strongly_typed:
+    if sum(bool(x) for x in (args.fp16, args.fp16_decoder_fp32, args.bf16_decoder_fp32, args.int8)) > 1:
+        raise SystemExit("--fp16, --fp16-decoder-fp32, --bf16-decoder-fp32 and --int8 are mutually exclusive")
+    if (args.fp16_decoder_fp32 or args.bf16_decoder_fp32) and args.strongly_typed:
         # Per-layer setPrecision is rejected on a strongly-typed network (types come
         # from the ONNX). The mixed build is weakly-typed by construction.
-        raise SystemExit("--fp16-decoder-fp32 needs a weakly-typed network; drop --strongly-typed")
+        raise SystemExit("mixed-precision pinning needs a weakly-typed network; drop --strongly-typed")
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -146,24 +146,39 @@ def build(args: argparse.Namespace) -> None:
     if (args.fp16 or args.fp16_decoder_fp32) and not builder.platform_has_fast_fp16:
         print("[build] WARNING: platform reports no fast FP16")
 
+    if args.int8:
+        # Explicit QDQ: the ONNX (from convert_int8.py) already carries the Q/DQ nodes
+        # and their calibrated scales, so no IInt8Calibrator is set (that is the
+        # deprecated implicit path). TRT honours the QDQ placement; the decoder has no
+        # Q/DQ, so it runs FP32. No kFP16 here — that would let TRT drop the decoder to
+        # FP16.
+        if not builder.platform_has_fast_int8:
+            print("[build] WARNING: platform reports no fast INT8")
+        config.set_flag(trt.BuilderFlag.INT8)
+        print("[build] INT8 enabled (explicit QDQ from ONNX; decoder stays FP32)")
+
     if args.fp16:
         config.set_flag(trt.BuilderFlag.FP16)
         print("[build] FP16 enabled (weakly-typed, whole-graph — timing only, not production)")
-    elif args.fp16_decoder_fp32:
-        config.set_flag(trt.BuilderFlag.FP16)
-        # Pin the decoder to FP32, then tell TRT to honour the constraint. OBEY is a
-        # hard guarantee (build fails if unsatisfiable); PREFER is a soft hint TRT may
-        # override — we default to OBEY because M0 showed TRT will happily sneak FP16
-        # into the decoder if merely asked nicely.
+    elif args.fp16_decoder_fp32 or args.bf16_decoder_fp32:
+        # BF16 keeps FP32's exponent range (no overflow) with less mantissa precision;
+        # FP16 is more precise but overflows on some activations. For D-FINE the encoder
+        # attention overflows in FP16 on some images, so BF16 is the safer low-precision.
+        low = trt.BuilderFlag.BF16 if args.bf16_decoder_fp32 else trt.BuilderFlag.FP16
+        low_name = "BF16" if args.bf16_decoder_fp32 else "FP16"
+        config.set_flag(low)
+        # Pin the FP-sensitive layers to FP32, then tell TRT to honour it. OBEY is a hard
+        # guarantee (build fails if unsatisfiable); PREFER is a soft hint TRT may override —
+        # default OBEY because TRT will otherwise sneak low precision into pinned layers.
         constraint = (trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS if args.constraints == "obey"
                       else trt.BuilderFlag.PREFER_PRECISION_CONSTRAINTS)
         config.set_flag(constraint)
         prefixes = tuple(p for p in args.decoder_prefixes.split(",") if p)
         n = pin_decoder_fp32(network, prefixes, args.verbose)
         if n == 0:
-            raise RuntimeError(f"no decoder layers matched prefixes {list(prefixes)} — "
+            raise RuntimeError(f"no layers matched prefixes {list(prefixes)} — "
                                "check the ONNX layer naming (see docs/HANDOFF M2.1)")
-        print(f"[build] FP16 mixed: backbone+encoder FP16, decoder FP32 "
+        print(f"[build] {low_name} mixed: unpinned layers {low_name}, {n} pinned FP32 "
               f"({args.constraints.upper()}_PRECISION_CONSTRAINTS)")
 
     plan = builder.build_serialized_network(network, config)
@@ -177,9 +192,17 @@ def build(args: argparse.Namespace) -> None:
         meta = json.loads(sidecar.read_text())
         # precision is the engine's dominant compute type; the mixed build is an FP16
         # engine (backbone+encoder) whose decoder is pinned FP32 — recorded separately.
+        if args.int8:
+            precision = "int8"
+        elif args.bf16_decoder_fp32:
+            precision = "bf16"
+        elif args.fp16 or args.fp16_decoder_fp32:
+            precision = "fp16"
+        else:
+            precision = "fp32"
         meta.update({
-            "precision": "fp32" if not (args.fp16 or args.fp16_decoder_fp32) else "fp16",
-            "fp16_decoder_fp32": bool(args.fp16_decoder_fp32),
+            "precision": precision,
+            "fp16_decoder_fp32": bool(args.fp16_decoder_fp32 or args.bf16_decoder_fp32),
             "cuda_graph_compat": bool(args.cuda_graph),
             "trt_version": trt.__version__,
             "opt_batch": args.opt_batch,
@@ -202,7 +225,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fp16", action="store_true",
                    help="naive whole-graph FP16 (anti-example: corrupts the decoder, timing only)")
     p.add_argument("--fp16-decoder-fp32", action="store_true",
-                   help="production FP16: backbone+encoder FP16, decoder pinned FP32")
+                   help="mixed FP16: unpinned layers FP16, --decoder-prefixes layers pinned FP32")
+    p.add_argument("--bf16-decoder-fp32", action="store_true",
+                   help="mixed BF16 (no overflow, less mantissa): unpinned BF16, pinned FP32")
+    p.add_argument("--int8", action="store_true",
+                   help="INT8 from an explicit-QDQ ONNX (convert_int8.py); decoder stays FP32")
     p.add_argument("--decoder-prefixes", default="/model/decoder,model.decoder",
                    help="comma-separated layer-name prefixes identifying the decoder to pin FP32")
     p.add_argument("--constraints", choices=["obey", "prefer"], default="obey",

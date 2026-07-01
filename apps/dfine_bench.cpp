@@ -91,6 +91,7 @@ int main(int argc, char** argv) {
     int warmup = 20, iters = 200, src_w = 640, src_h = 480;
     float threshold = 0.001f;
     bool cuda_graph = false;
+    bool graph_compare = false;
     std::filesystem::path json_out;
     try {
         for (int i = 1; i < argc; ++i) {
@@ -111,6 +112,7 @@ int main(int argc, char** argv) {
             else if (starts_with(a, "--threshold"))    threshold = parse_float(next_value(argc, argv, i, "--threshold"), "--threshold");
             else if (starts_with(a, "--json"))         json_out = next_value(argc, argv, i, "--json");
             else if (a == "--cuda-graph")              cuda_graph = true;
+            else if (a == "--graph-compare")           { cuda_graph = true; graph_compare = true; }
             else if (starts_with(a, "--src-size")) {
                 std::string v = next_value(argc, argv, i, "--src-size");
                 const auto x = v.find('x');
@@ -270,6 +272,57 @@ int main(int argc, char** argv) {
                     std::printf("(cuda-graph capture failed for batch %d — using enqueueV3)\n", B);
                 else
                     for (int w = 0; w < 3; ++w) one_iter(a, bb, c, d);  // prime the replay
+            }
+
+            if (graph_compare) {
+                if (!graph_exec) { std::printf("[graph-compare] batch %d: capture failed, skipping\n", B); continue; }
+                // Rigorous same-run comparison. Per iteration, run BOTH the enqueueV3+D2H path
+                // and the graph-replay path back-to-back (microseconds apart → identical GPU-clock
+                // state; drift cancels). Time each on the CPU (dispatch/launch cost — exactly what
+                // the graph removes) and on the stream (GPU wall). The graph only wins end-to-end
+                // when CPU dispatch is on the critical path (GPU starved); when the GPU is busy the
+                // dispatch overlaps and is hidden.
+                using Clock = std::chrono::steady_clock;
+                auto cpu_ms = [](Clock::time_point x, Clock::time_point y) {
+                    return std::chrono::duration<double, std::milli>(y - x).count();
+                };
+                std::vector<double> ng_cpu, g_cpu, ng_wall, g_wall, ng_gpu, g_gpu;
+                for (int it = 0; it < iters; ++it) {
+                    for (int b = 0; b < B; ++b) pre.process(base, d_input + b * single, stream);
+                    DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));  // exclude preprocess from both
+                    // no-graph: enqueueV3 + D2H
+                    DFINE_CUDA_CHECK(cudaEventRecord(e0, stream));
+                    const auto c0 = Clock::now();
+                    if (!session.context()->enqueueV3(stream)) throw std::runtime_error("enqueueV3 failed");
+                    DFINE_CUDA_CHECK(cudaMemcpyAsync(h_logits.data(), d_logits, logits_bytes, cudaMemcpyDeviceToHost, stream));
+                    DFINE_CUDA_CHECK(cudaMemcpyAsync(h_boxes.data(), d_boxes, boxes_bytes, cudaMemcpyDeviceToHost, stream));
+                    const auto c1 = Clock::now();               // CPU dispatch done (work is async)
+                    DFINE_CUDA_CHECK(cudaEventRecord(e1, stream));
+                    DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
+                    const auto c1s = Clock::now();              // full wall done
+                    // graph: single replay (enqueueV3+D2H fused)
+                    DFINE_CUDA_CHECK(cudaEventRecord(e2, stream));
+                    const auto c2 = Clock::now();
+                    DFINE_CUDA_CHECK(cudaGraphLaunch(graph_exec.get(), stream));
+                    const auto c3 = Clock::now();               // CPU dispatch done
+                    DFINE_CUDA_CHECK(cudaEventRecord(e3, stream));
+                    DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
+                    const auto c3s = Clock::now();
+                    ng_cpu.push_back(cpu_ms(c0, c1));   g_cpu.push_back(cpu_ms(c2, c3));
+                    ng_wall.push_back(cpu_ms(c0, c1s)); g_wall.push_back(cpu_ms(c2, c3s));
+                    ng_gpu.push_back(ev_ms(e0, e1));    g_gpu.push_back(ev_ms(e2, e3));
+                }
+                const Stats nc = summarize(ng_cpu), gc = summarize(g_cpu);
+                const Stats nw = summarize(ng_wall), gw = summarize(g_wall);
+                const Stats ng = summarize(ng_gpu),  gg = summarize(g_gpu);
+                std::printf("[graph-compare] batch %d (%d iters, p50 ms):\n", B, iters);
+                std::printf("  CPU dispatch : enqueueV3 %.3f  vs graphLaunch %.3f   -> graph removes %.3f ms of CPU launch\n",
+                            nc.p50, gc.p50, nc.p50 - gc.p50);
+                std::printf("  GPU wall     : no-graph  %.3f  vs graph       %.3f   (Δ %.3f)\n",
+                            ng.p50, gg.p50, ng.p50 - gg.p50);
+                std::printf("  full wall    : no-graph  %.3f  vs graph       %.3f   (Δ %.3f ms, %+.1f%%)\n",
+                            nw.p50, gw.p50, nw.p50 - gw.p50, nw.p50 > 0 ? (gw.p50 / nw.p50 - 1) * 100 : 0);
+                continue;
             }
 
             // Peak memory after warm-up (engine + context + all buffers resident).

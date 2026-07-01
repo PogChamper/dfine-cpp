@@ -109,6 +109,16 @@ def build(args: argparse.Namespace) -> None:
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, args.workspace_gb << 30)
 
+    if args.max_aux_streams is not None:
+        # TRT uses auxiliary streams for intra-inference parallelism by default (2 here).
+        # A CUDA graph captured with cudaStreamCaptureModeThreadLocal only records the main
+        # stream, silently missing aux-stream kernels -> an incomplete/incorrect graph. So a
+        # graph-capturable engine must be built single-stream (--max-aux-streams 0); the
+        # C++ detector gates capture on num_aux_streams()==0 exactly for this reason.
+        config.max_aux_streams = args.max_aux_streams
+        print(f"[build] max_aux_streams = {args.max_aux_streams}"
+              + ("  (single-stream, CUDA-graph capturable)" if args.max_aux_streams == 0 else ""))
+
     if args.no_tf32:
         # TF32 is on by default and deviates ~1% from true FP32 PyTorch (the FDR
         # integral amplifies it into box error). Disable it for an FP32-faithful
@@ -240,6 +250,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--strongly-typed", action="store_true", help="strongly-typed network (pin FP32 by ONNX types)")
     p.add_argument("--tactic", default=None, help="restrict tactic sources, e.g. 'cublas' or 'cublas,edge,jit'")
     p.add_argument("--cuda-graph", action="store_true", help="label sidecar cuda_graph_compat=true (advisory)")
+    p.add_argument("--max-aux-streams", type=int, default=None,
+                   help="cap TRT auxiliary streams; 0 = single-stream (required for CUDA-graph capture)")
     p.add_argument("--verbose", action="store_true", help="list every FP32-pinned decoder layer")
     return p.parse_args()
 

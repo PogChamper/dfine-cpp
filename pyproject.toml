@@ -9,11 +9,12 @@
 #     pulls the libs; at C++ runtime, LD_LIBRARY_PATH must point at `.../tensorrt_libs`.
 #   • onnxruntime-gpu is pinned to the CUDA-12 wheel (1.24.4); 1.27 needs CUDA 13.
 #   • The ONNX **export** (export_dfine_onnx.py) additionally needs the D-FINE-seg source
-#     package on PYTHONPATH for build_model — it is NOT a pip dependency. Everything else
-#     (build_engine / convert_fp16 / convert_int8 / profile / coco_eval) is self-contained.
+#     (https://github.com/ArgoHA/D-FINE-seg) on PYTHONPATH for build_model — it is NOT a
+#     pip dependency. Everything else (build_engine / convert_fp16 / convert_int8 /
+#     profile / coco_eval) is self-contained.
 [project]
 name = "dfine-cpp-tools"
-version = "0.2.0"
+version = "0.1.0"
 description = "Export / build / convert / eval / profile scripts for the D-FINE-cpp TensorRT runtime"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

@@ -40,9 +40,12 @@ COCO-80 index — no background slot), `score`, `box` (xyxy pixel coords), and
   next to the package (wheel), or the dev tree `<repo>/build/libdfine.so`
   (produced by `./build.sh`).
 
-- A TensorRT `.engine` for a D-FINE model. Build one with the scripts in
-  [`trt-files/scripts/`](../trt-files/scripts/) (see [docs/HANDOFF.md](../docs/HANDOFF.md)),
-  or let the `dfine` CLI build it for you.
+- A TensorRT `.engine` for a D-FINE model. Engines are GPU-arch- and
+  TRT-version-specific, so compile one locally: download a prebuilt ONNX from the
+  repo's [Releases](../../../releases) and run
+  [`trt-files/scripts/build_engine.py`](../trt-files/scripts/build_engine.py)
+  (see the root [README Quickstart](../README.md#quickstart)), or let the
+  `dfine` CLI build it for you.
 
 ## Custom (non-COCO) models
 

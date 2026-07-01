@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -339,8 +340,11 @@ def parse_args() -> argparse.Namespace:
                    help="batch size of the tracing dummy; must be >=2 to keep the batch axis dynamic")
     p.add_argument("--opset", type=int, default=16)
     p.add_argument("--checkpoint", required=True, help="path to a D-FINE detection .pt/.pth")
-    p.add_argument("--dfine-src", default="/home/dxdxxd/projects/custom-dfine/D-FINE-seg",
-                   help="root of the D-FINE python source providing build_model")
+    p.add_argument("--dfine-src",
+                   default=os.environ.get("DFINE_SEG_SRC",
+                                          "/home/dxdxxd/projects/custom-dfine/D-FINE-seg"),
+                   help="root of the D-FINE-seg source (github.com/ArgoHA/D-FINE-seg) providing "
+                        "build_model; or set $DFINE_SEG_SRC")
     p.add_argument("--output", default=str(repo / "trt-files" / "onnx" / "dfine_m.onnx"))
     p.add_argument("--device", default="cuda")
     p.add_argument("--no-simplify", action="store_true")

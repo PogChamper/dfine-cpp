@@ -1,9 +1,12 @@
 // cpp_detector_example.cpp — minimal use of the D-FINE C++ detector API.
 //
 // Not wired into CMake; this is a documented snippet. Build it by hand against
-// an already-built libdfine.so (see build.sh), linking dfine::dfine:
+// an already-built libdfine.so (see build.sh), linking dfine::dfine. The public
+// headers hide TensorRT/CUDA behind a PIMPL, so no TensorRT include path is
+// needed; if your TensorRT libs are not on a default linker path, add
+// -Wl,-rpath-link,/path/to/tensorrt/lib so ld can resolve libdfine's deps.
 //
-//   c++ -std=c++20 -I include -I third_party/tensorrt/include \
+//   c++ -std=c++17 -I include \
 //       examples/cpp_detector_example.cpp -Lbuild -ldfine \
 //       -Wl,-rpath,build -o cpp_detector_example
 //

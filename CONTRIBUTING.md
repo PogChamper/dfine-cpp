@@ -1,7 +1,7 @@
 # Contributing to D-FINE-cpp
 
-Thanks for your interest! This is a performance- and correctness-critical inference library, so the bar is
-high: **every change must keep the C++ warning-clean, sanitizer-clean, and mAP-neutral.**
+This is a performance- and correctness-critical inference library, so the bar is high:
+**every change must keep the C++ warning-clean, sanitizer-clean, and mAP-neutral.**
 
 ## Ground rules (the hard-won ones)
 
@@ -15,19 +15,23 @@ high: **every change must keep the C++ warning-clean, sanitizer-clean, and mAP-n
 ## Build
 
 ```sh
-./build.sh                 # Release
-WERROR=ON ./build.sh       # warnings-as-errors (CI/PR bar; must pass clean)
+./build.sh                  # Release; CUDA arch defaults to 'native' (the local GPU)
+WERROR=ON ./build.sh        # warnings-as-errors (CI/PR bar; must pass clean)
 BUILD_TYPE=UBSAN ./build.sh # UndefinedBehaviorSanitizer (safe on the full pipeline)
 BUILD_TYPE=ASAN  ./build.sh # AddressSanitizer (host-isolated: decode/postprocess)
+CUDA_ARCH=89 ./build.sh     # explicit SM (CI/cross builds; 'native' needs CMake >= 3.24)
 ```
 
-Toolchain specifics (conda cmake, vendored TRT headers, the nvcc/`ld` workaround) are baked into `build.sh`
-and documented in HANDOFF "Environment".
+`build.sh` discovers `cmake`/`nvcc` from `PATH` (`$CMAKE`/`$NVCC` override) and resolves TensorRT as
+`$TENSORRT_DIR` → a populated `third_party/tensorrt` → system paths via `cmake/FindTensorRT.cmake`; the
+conda-`ld` workaround is applied only for conda toolchains. Plain CMake works too:
+`cmake -B build -S . -DCMAKE_CUDA_ARCHITECTURES=native && cmake --build build -j`.
 
 ## Style
 
-- **C++17.** Format new/changed code with the repo `.clang-format` (`clang-format -i <files>`). Existing files
-  are intentionally *not* bulk-reformatted — keep diffs minimal.
+- **C++17.** The whole tree is formatted with the repo `.clang-format` and CI gates on it
+  (`clang-format --dry-run --Werror`, clang-format 18) — run `clang-format -i` on changed files before
+  committing.
 - RAII for all CUDA/TensorRT resources (`cuda_raii.hpp`); no raw `cudaFree`/`cudaStreamDestroy`. Comments say
   *why*, not *what*. Match the surrounding idiom.
 - Python (scripts): 4-space, ≤100 col; `ruff` clean.

@@ -50,6 +50,27 @@ C++ FP16 is **~8.7× the PyTorch throughput** at batch 1. FP16 is essentially lo
 −34.5%** (3.90 → 2.55 ms) — D-FINE is *dispatch-bound* at small batch (the CPU spends ~3.9 ms in `enqueueV3`
 launching hundreds of kernels; `cudaGraphLaunch` is ~0.05 ms). See [docs/HANDOFF.md](docs/HANDOFF.md) §M2.2.
 
+**Frozen pipeline (opt-in):** three composable `DetectorOptions` knobs for steady-state streaming.
+`gpu_decode` runs sigmoid/top-k/box-decode as CUDA kernels so only the surviving detections cross PCIe
+(Zero-D2H). `freeze()` / `FreezeSpec` warms every grow-only buffer to peak and locks it — zero steady-state
+device allocation (VRAM Δ = +0 B over full runs). `full_pipeline_graph` captures H2D → preprocess → infer →
+decode → D2H into **one `cudaGraphLaunch` per frame**; it needs a `--max-aux-streams 0` engine and a fixed
+source resolution via `freeze(FreezeSpec{batch, src_w, src_h})`, and is byte-identical to the split path
+(validated on 1061 real 640×480 COCO images). Measured on m FP16: batch-1 e2e wall **−34.3%**, CPU per frame
+4.30 → 0.195 ms (dispatch 4.18 → 0.12 ms); batch-8 frees 19.2 ms CPU per call (wall stays GPU-bound, ±2%).
+
+```cpp
+dfine::DetectorOptions o;
+o.full_pipeline_graph = true;                     // implies gpu_decode
+dfine::DFineDetector det("dfine_m_fp16_st.engine", o);
+det.freeze(dfine::FreezeSpec{1, 1920, 1080});     // batch, source WxH — captures + locks
+det.detect(frame);                                // one cudaGraphLaunch per call
+```
+
+Measure with `dfine_bench --pipeline-compare`. `last_timings()` reports per-stage CPU cost
+(`preprocess_cpu_ms` / `dispatch_ms` / `wait_ms` / `decode_host_ms`) — the dispatch column is what the graph
+collapses. See [include/dfine/tasks/detector.hpp](include/dfine/tasks/detector.hpp) for the exact contract.
+
 ### Benchmark & compare backends yourself
 
 The repo ships a **cross-backend profiler** — measure **PyTorch, ONNXRuntime-GPU, and TensorRT (FP32/FP16)
@@ -65,31 +86,55 @@ python trt-files/scripts/profile.py --backends torch onnx trt cpp cpp-graph \
 `--backends` picks any subset of `torch · onnx · trt · trt-baseline · cpp · cpp-graph`. Per-stage C++ latency
 (preprocess / infer / D2H / decode, percentiles) is `build/dfine_bench`; the honest CUDA-graph delta is
 `dfine_bench --graph-compare` (on a `--max-aux-streams 0` engine); a full **n→x** sweep across all backends is
-`bash trt-files/scripts/overnight_bench.sh`. (The `torch` backend and `.pt`→ONNX export need the D-FINE-seg
-source on `PYTHONPATH`; the ONNX/TRT/C++ paths are self-contained.)
+`bash trt-files/scripts/overnight_bench.sh`. (The `torch` backend and `.pt`→ONNX export need the
+[D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) source on `PYTHONPATH`; the ONNX/TRT/C++ paths are
+self-contained.)
 
 ## Quickstart
 
+Prebuilt ONNX for all five sizes — FP32 and strongly-typed FP16, each with the `.json` sidecar the engine
+build needs, plus `SHA256SUMS` — is attached to [GitHub Releases](../../releases). TensorRT engines are
+GPU-arch- and TRT-version-specific, so you compile the engine locally from the ONNX — that is why we ship
+ONNX, not engines.
+
 ```sh
-# 1. Build the C++ (toolchain gotchas baked into build.sh — see docs/HANDOFF.md "Environment")
+# 1. Build the C++
 ./build.sh
+# — or plain CMake:
+cmake -B build -S . -DCMAKE_CUDA_ARCHITECTURES=native   # [-DTENSORRT_DIR=/path/to/tensorrt]
+cmake --build build -j
 
-# 2. Export ONNX + build a TensorRT engine (Python; needs the D-FINE-seg venv, see below)
-PY=<D-FINE-seg>/.venv/bin/python
-$PY trt-files/scripts/export_dfine_onnx.py --model-name m --checkpoint dfine_m_obj2coco.pt   # -> dfine_m.onnx
-$PY trt-files/scripts/build_engine.py --no-tf32 --max-batch 8                                 # -> dfine_m_fp32.engine
+# 2. Download an ONNX (+ its .json sidecar) from Releases, build an engine on your GPU
+#    (fp16_st is the recommended production build — strongly-typed, decoder kept FP32)
+python trt-files/scripts/build_engine.py --strongly-typed --no-tf32 --max-batch 8 \
+    --onnx dfine_m_fp16_st.onnx --output trt-files/engines/dfine_m_fp16_st.engine
 
-# 3. Run
-export LD_LIBRARY_PATH=<D-FINE-seg>/.venv/lib/python3.11/site-packages/tensorrt_libs:$LD_LIBRARY_PATH
-./build/dfine_detect --engine trt-files/engines/dfine_m_fp32.engine --image dog.jpg --threshold 0.5
+# 3. Run — libnvinfer/libcudart must be on LD_LIBRARY_PATH; any TensorRT 10.x libs work,
+#    e.g. `python -m pip install "tensorrt==10.13.*"` then the venv's .../site-packages/tensorrt_libs
+export LD_LIBRARY_PATH=/path/to/tensorrt/lib:$LD_LIBRARY_PATH
+./build/dfine_detect --engine trt-files/engines/dfine_m_fp16_st.engine --image dog.jpg --threshold 0.5
 ```
 
-**FP16 engine** (the recommended production build — strongly-typed, decoder kept FP32):
+For an FP32 engine, drop `--strongly-typed` and point `--onnx` at the fp32 file (`dfine_m.onnx`).
+
+### Export from a checkpoint
+
+To build the ONNX yourself (fine-tuned weights, non-COCO class counts), you need the training/export source
+repo [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) — for this step only; `build_engine` /
+`convert_fp16` / `profile` / `coco_eval` and the C++ runtime are self-contained.
+
 ```sh
-$PY trt-files/scripts/convert_fp16.py --output trt-files/onnx/dfine_m_fp16_st.onnx
-$PY trt-files/scripts/build_engine.py --strongly-typed --no-tf32 --max-batch 8 \
-    --onnx trt-files/onnx/dfine_m_fp16_st.onnx --output trt-files/engines/dfine_m_fp16_st.engine
+git clone https://github.com/ArgoHA/D-FINE-seg                       # export-time dependency only
+python trt-files/scripts/export_dfine_onnx.py --model-name m \
+    --checkpoint dfine_m_obj2coco.pt --dfine-src ./D-FINE-seg        # -> trt-files/onnx/dfine_m.onnx + .json
+python trt-files/scripts/convert_fp16.py \
+    --output trt-files/onnx/dfine_m_fp16_st.onnx                     # FP32 -> strongly-typed FP16 ONNX
 ```
+
+Standard checkpoints (`dfine_<size>_<dataset>.pt`) can be fetched from Hugging Face with D-FINE-seg's
+`ensure_pretrained` helper (`src/d_fine/utils.py` in that repo); nano has no obj2coco checkpoint — use
+`dfine_n_coco.pt`. Any other checkpoint: pass its path to `--checkpoint`. The `dfine export` CLI (below)
+wraps the same script.
 
 ## Using the library
 
@@ -155,8 +200,8 @@ dfine bench   --model m --batches 1,2,4,8                                       
 ## Apps
 
 `dfine_detect` (single image) · `dfine_coco_eval` (mAP) · `dfine_bench` (per-stage latency / FPS / GPU-mem,
-`--cuda-graph`, `--graph-compare`) · `dfine_build` (pure-C++ engine build, FP32) · `dfine_inspect` /
-`dfine_smoke`.
+`--cuda-graph`, `--graph-compare`, `--pipeline-compare`) · `dfine_build` (pure-C++ engine build, FP32) ·
+`dfine_inspect` / `dfine_smoke`.
 
 ## Architecture
 
@@ -189,23 +234,34 @@ BF16/INT8 fail. Full forensics in [docs/impl/M0_STATUS.md](docs/impl/M0_STATUS.m
 
 **Done & validated:** M0 (export→engine→validate, all 5 sizes) · M1 (C++ detector, AP 0.5506 == reference) ·
 M2 (FP16 + CUDA-graph; INT8 investigated & rejected) · **M4 bindings** (stable C ABI + Python `ctypes`
-package + zero-setup `dfine` CLI — detections byte-identical to the C++ path). Next: **M3 instance
-segmentation**, pre-built wheels, and demo apps. See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the
-prioritized plan and [docs/HANDOFF.md](docs/HANDOFF.md) for the single source of truth on the current state.
+package + zero-setup `dfine` CLI — detections byte-identical to the C++ path) · **intensive-core P1–P3**
+(GPU decode, `freeze()`, full-pipeline graph; P4 pending). M3 instance segmentation is shelved. Next:
+pre-built wheels and a demo — see **[docs/ROADMAP.md](docs/ROADMAP.md)** and
+[docs/HANDOFF.md](docs/HANDOFF.md) for the single source of truth on the current state.
 
 ## Requirements & environment
 
-- **Runtime:** NVIDIA GPU (built for Ada `sm_89`; override `CUDA_ARCH`), CUDA 12.x, TensorRT 10.13.
-- **C++ build:** CMake ≥ 3.20, a CUDA toolkit (`nvcc`), TensorRT headers (`third_party/tensorrt`, vendored).
-  `./build.sh` wraps the exact incantation (incl. the conda-`ld` workaround). No OpenCV.
-- **Python scripts** (export / engine-build / eval / profile): see `pyproject.toml` (uv). The **ONNX export**
-  additionally needs the [D-FINE-seg](https://github.com/Peterande/D-FINE) source package on `PYTHONPATH` for
-  model construction; everything else (build_engine / convert_fp16 / profile / coco_eval) is self-contained.
+- **Runtime:** NVIDIA GPU + driver, CUDA 12.x, TensorRT 10.x (validated on 10.13). `libnvinfer`/`libcudart`
+  must be on `LD_LIBRARY_PATH` — a system TensorRT install or a `pip install "tensorrt==10.13.*"` venv's
+  `tensorrt_libs` dir both work.
+- **C++ build:** CMake ≥ 3.24 (the default `CUDA_ARCHITECTURES=native` needs 3.24; the project floor in
+  `CMakeLists.txt` is 3.20 if you pass an explicit arch, e.g. `-DCMAKE_CUDA_ARCHITECTURES=89`), a CUDA 12.x
+  toolkit (`nvcc`), TensorRT headers + libs. A system TensorRT is found automatically
+  ([cmake/FindTensorRT.cmake](cmake/FindTensorRT.cmake) searches `$TENSORRT_DIR`, `/usr/local/TensorRT`,
+  `/opt/tensorrt`, `/usr`); alternatively populate `third_party/tensorrt` — see
+  [third_party/README.md](third_party/README.md). `./build.sh` auto-discovers `cmake`/`nvcc` from `PATH`
+  and applies a conda-`ld` workaround only for conda toolchains. No OpenCV.
+- **Python scripts** (engine-build / convert / eval / profile): see `pyproject.toml` (uv). The **ONNX
+  export** alone additionally needs the [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) source on
+  `PYTHONPATH` for model construction; everything else (build_engine / convert_fp16 / profile / coco_eval)
+  is self-contained.
 
-Engines and ONNX are gitignored build outputs — regenerate them with the scripts.
+Engines are machine-specific build outputs (gitignored) — compile them locally from the prebuilt ONNX on
+[Releases](../../releases) or from your own export.
 
 ## Credits & license
 
-C++/TensorRT port of **D-FINE** (Peng et al.), Apache-2.0. Vendored: `stb_image` (public domain),
-nlohmann/json (MIT). Links NVIDIA TensorRT/CUDA (install separately). This project is **Apache-2.0** — see
-[LICENSE](LICENSE) and [NOTICE](NOTICE).
+C++/TensorRT port of **D-FINE** (Peng et al.), Apache-2.0; export path built on
+[D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg). Vendored: `stb_image` (public domain); nlohmann/json
+(MIT) is found on the system or fetched at configure time. Links NVIDIA TensorRT/CUDA (install separately).
+This project is **Apache-2.0** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).

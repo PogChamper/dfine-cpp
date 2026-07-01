@@ -96,6 +96,11 @@ def main(args: argparse.Namespace) -> None:
         activation_type=QuantType.QInt8,
         weight_type=QuantType.QInt8,
         calibrate_method=method,
+        # TensorRT INT8 QDQ constraints: SYMMETRIC only (zero-point 0; ORT defaults to
+        # asymmetric activations), and NO bias quantization (TRT folds bias into the
+        # INT8 conv itself; a DequantizeLinear on the int32 bias is rejected).
+        extra_options={"ActivationSymmetric": True, "WeightSymmetric": True,
+                       "QuantizeBias": False},
     )
     pre_path.unlink(missing_ok=True)
 

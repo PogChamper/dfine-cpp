@@ -184,19 +184,21 @@ struct DFineDetector::Impl {
     }
 
     // Grow the detector-owned pinned output buffers to hold at least the given sizes.
-    void ensure_pinned_(std::size_t logits_bytes, std::size_t boxes_bytes) {
+    // Returns false (no throw) on allocation failure so capture_graph_ can fall back.
+    bool ensure_pinned_(std::size_t logits_bytes, std::size_t boxes_bytes) {
         if (pinned_logits_cap_ < logits_bytes) {
             void* p = nullptr;
-            DFINE_CUDA_CHECK(cudaMallocHost(&p, logits_bytes));
+            if (cudaMallocHost(&p, logits_bytes) != cudaSuccess) { cudaGetLastError(); return false; }
             pinned_logits_.reset(p);
             pinned_logits_cap_ = logits_bytes;
         }
         if (pinned_boxes_cap_ < boxes_bytes) {
             void* p = nullptr;
-            DFINE_CUDA_CHECK(cudaMallocHost(&p, boxes_bytes));
+            if (cudaMallocHost(&p, boxes_bytes) != cudaSuccess) { cudaGetLastError(); return false; }
             pinned_boxes_.reset(p);
             pinned_boxes_cap_ = boxes_bytes;
         }
+        return true;
     }
 
     // A cached graph is stale once any baked device/host address moves (a grow-only
@@ -215,7 +217,10 @@ struct DFineDetector::Impl {
     bool capture_graph_(int B) {
         const std::size_t logits_bytes = static_cast<std::size_t>(B) * N * C * sizeof(float);
         const std::size_t boxes_bytes  = static_cast<std::size_t>(B) * N * 4 * sizeof(float);
-        ensure_pinned_(logits_bytes, boxes_bytes);
+        // No-throw on any CUDA failure below: a false return lets try_graph_infer_ set
+        // graph_disabled_ and run_batch degrade to the plain enqueueV3 path, which
+        // reuses the session's own pinned buffers and allocates nothing new.
+        if (!ensure_pinned_(logits_bytes, boxes_bytes)) return false;
 
         void* d_input  = session.device_buffer(input_name);
         void* d_logits = session.device_buffer(b_logits->name);
@@ -228,14 +233,18 @@ struct DFineDetector::Impl {
         // Warm-up: >=2 full enqueue cycles at this exact shape flush TRT's deferred
         // shape setup, which would otherwise sync-abort the capture (P12 §5a).
         const int warm = opts.graph_warmup_iters < 2 ? 2 : opts.graph_warmup_iters;
+        auto d2h = [&](void* dst, void* src, std::size_t n) {
+            return cudaMemcpyAsync(dst, src, n, cudaMemcpyDeviceToHost, stream) == cudaSuccess;
+        };
         for (int w = 0; w < warm; ++w) {
-            if (!ctx->enqueueV3(stream)) return false;
-            DFINE_CUDA_CHECK(cudaMemcpyAsync(pinned_logits_.get(), d_logits, logits_bytes,
-                                             cudaMemcpyDeviceToHost, stream));
-            DFINE_CUDA_CHECK(cudaMemcpyAsync(pinned_boxes_.get(), d_boxes, boxes_bytes,
-                                             cudaMemcpyDeviceToHost, stream));
+            if (!ctx->enqueueV3(stream) ||
+                !d2h(pinned_logits_.get(), d_logits, logits_bytes) ||
+                !d2h(pinned_boxes_.get(), d_boxes, boxes_bytes)) {
+                cudaGetLastError();
+                return false;
+            }
         }
-        DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (cudaStreamSynchronize(stream) != cudaSuccess) { cudaGetLastError(); return false; }
 
         if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
             cudaGetLastError();  // clear sticky error

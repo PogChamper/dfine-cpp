@@ -247,7 +247,10 @@ int main(int argc, char** argv) {
             double a, bb, c, d;
             for (int w = 0; w < warmup; ++w) one_iter(a, bb, c, d);  // enqueueV3 path: flush tactics + shape
 
-            if (cuda_graph) {
+            if (cuda_graph && session.num_aux_streams() != 0) {
+                std::printf("(engine uses %d aux streams — ThreadLocal capture unsafe, using enqueueV3)\n",
+                            session.num_aux_streams());
+            } else if (cuda_graph) {
                 // Capture enqueueV3 + D2H after the warm-up has flushed deferred setup.
                 session.context()->setEnqueueEmitsProfile(false);
                 cudaGraph_t g = nullptr;

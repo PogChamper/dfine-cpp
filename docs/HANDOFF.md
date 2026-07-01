@@ -17,6 +17,13 @@ modeled on `rf-detr-cpp`. Repo: `/home/dxdxxd/projects/custom-dfine/D-FINE-cpp`.
   (backbone+encoder FP16, decoder FP32) is **1.6–2.2× faster at −0.2% mAP**; opt-in CUDA-graph replay cuts
   **batch-1 latency −34.5%** on a single-stream (`--max-aux-streams 0`) engine (D-FINE is dispatch-bound). The weakly-typed `kFP16` flag is a trap (fixed −6.8 AP),
   and BF16/INT8 are dead — all for the same reason: D-FINE's FDR needs mantissa precision. See "M2" below.
+- **M4 = bindings & DX: DONE and validated.** A stable `extern "C"` ABI (`include/dfine/c_api.h` +
+  `src/c_api/c_api.cpp`, compiled into `libdfine.so` by default; `-DDFINE_BUILD_C_API=OFF` to skip), a
+  dependency-light Python `ctypes` package (`python/dfine/`), and a zero-setup `dfine` CLI
+  (predict/info/build/export/bench). The C-ABI **and** Python detections are **byte-identical to
+  `dfine_detect`** — proven by `dfine_capi_parity` and 14 pytests. `-Werror`- and UBSan-clean; hardened by an
+  adversarial multi-agent review (16 findings, all fixed incl. a negative-numpy-stride OOB). See "M4" below.
+  **M3 instance-seg stays deliberately shelved** (no seg checkpoints / use-case).
 - The big M0/M2 discovery is the through-line: **D-FINE's FDR box-decode is exquisitely FP-precision-sensitive**
   (grid_sample, the kFP16 flag, BF16 and INT8 all fail through it) — see "Decisions" and the M2 section.
 
@@ -308,3 +315,60 @@ FPS at batch 1 / batch 8 — PyTorch 31/66, ONNXRuntime-GPU 40/89, TensorRT-FP32
 176/227, **C++ FP16 272/459** (≈8.7×/7× PyTorch); e2e batch-1 latency 32.0 / 25.0 / 8.0 / 5.7 / **3.7** ms;
 GPU mem FP16 488 MiB vs FP32 642 (−24%); all backends mAP 0.5500–0.5509. (These engines are the default 2-aux
 build, so `cpp-graph` there == `cpp`; the graph win needs a `--max-aux-streams 0` engine — see M2.2.)
+
+## M4 — bindings & DX (DONE)
+
+Make the fast engine callable from any language and runnable in one command. Detection-only (M3 seg shelved).
+
+### C ABI — `include/dfine/c_api.h` + `src/c_api/c_api.cpp`
+Modeled near-verbatim on `rf-detr-cpp`'s `c_api.h`: opaque `dfine_detector_t*`, `DFINE_API` visibility macro,
+thread-local `dfine_last_error()` (returns `""`, never NULL), heap `dfine_detections_t {dfine_detection_t*
+detections; int count;}` freed by `dfine_detections_free()`, every entry point wraps try/catch → last_error +
+NULL/0 (no exception crosses the boundary). Compiled into `libdfine.so` (option `DFINE_BUILD_C_API`, default
+ON; adds `DFINE_BUILDING_LIB`). **D-FINE deltas from the rf-detr template (deliberate):** (a) `class_id` is the
+**dense COCO-80** index 0..79 — D-FINE has **no background slot**, so no "+1 for COCO-91"; `dfine_class_name()`
+maps 0..79. (b) core is OpenCV-free & channel-agnostic, so `dfine_detector_detect(det, data, w, h, step,
+channels, is_bgr, thr)` exposes `channels`+`is_bgr` (builds an `ImageU8` internally, no cv::Mat). (c) the log
+callback is **severity-aware** (`void(*)(int severity, const char*)`, 0=FATAL..4=VERBOSE). **Extras beyond the
+template:** `dfine_detector_create_ex(engine, meta, dfine_options_t{threshold, use_cuda_graph,
+graph_warmup_iters})` surfaces the flagship CUDA-graph path; `dfine_detector_detect_batch` +
+`dfine_detections_free_batch` surface batch throughput; introspection `variant/input_w/h/num_queries/
+num_classes/max_batch`. Threshold: per-call `<0` ⇒ engine default; options `threshold<=0` keeps 0.5 (zero-init
+safe). **Validation:** `apps/dfine_capi_parity.cpp` asserts C-ABI detections **byte-identical** to
+`DFineDetector::detect` (20/44/231 dets, FP32+FP16, single+batch); `apps/dfine_capi_smoke.c` (pure C) proves
+the header is valid C + exception-safe. Both `-Werror` (`-Wall -Wextra -Wpedantic`) and UBSan-clean.
+
+### Python — `python/dfine/` (ctypes, no compile step)
+`Detector(engine_path, meta=None, *, threshold=0.5, use_cuda_graph=False, is_bgr=False, class_names=None)`
+hides all ctypes behind `_ffi.py` (private `_Box/_Detection/_Detections/_Image/_Options` Structures,
+argtypes/restypes pinned once, best-effort TensorRT preload, lib discovery via `$DFINE_LIBRARY` → bundled →
+`build/libdfine.so`). `.detect(np_hwc_uint8, threshold=None) -> list[Detection]` (each `class_id/score/box/
+class_name`, `.as_dict()`); `.detect_batch([...])`; the C result is freed **every call** (try/finally) and
+`__del__`/`__enter__`/`__exit__` destroy the engine. Memory-safe: numpy buffers kept alive across the C call;
+zero-copy only when rows are packed **and** `strides[0] >= w*3` (rejects `np.flipud`/`[::-1]` negative-stride
+views — the one real bug the review caught). `pyproject.toml` declares `tensorrt` as an **extra** (not
+redistributable). **14 pytests** pass incl. a parity test that is byte-exact vs the C++ `dfine_detect` binary
+(via a lossless-PNG round-trip so stb and PIL decode identical pixels) + negative-stride and threshold=0.0
+regressions. Run: `cd python && PYTHONPATH=. LD_LIBRARY_PATH=<tensorrt_libs>:<conda>/lib pytest tests`.
+
+### CLI — `dfine` console entry point (`python/dfine/cli.py`)
+`dfine predict|info|build|export|bench`. Resolves an engine from `--engine` → cache
+(`~/.cache/dfine/dfine_{model}_{prec}-sm{arch}-trt{ver}.engine`, arch/TRT-versioned since engines aren't
+portable) → dev-tree `trt-files/engines/` → **builds on demand** (ONNX→engine via `build_engine.py`). `predict`
+decodes+draws with PIL (`--out`, `--json`); `build` wraps `build_engine.py`; `export` wraps
+`export_dfine_onnx.py` (needs D-FINE-seg src) and, for `--precision fp16`, chains `convert_fp16.py` so the
+output name matches what `build`/`predict` look up; `bench` shells to the C++ `dfine_bench`. Validated: `info`/
+`predict` on existing engines, and the full **build→cache→resolve** loop (built nano fp32 into the cache, then
+`info --model n` resolved the cached engine). *No HF auto-download helper exists in this repo* — `export`
+requires the D-FINE-seg checkpoints (mapped per model) or an explicit `--checkpoint`.
+
+### Not done (next): pre-compiled wheels + GitHub Actions, and the visual README gif.
+No git remote here, so "GitHub release artifact" wheel hosting is deferred. A true PyPI manylinux wheel is
+infeasible (TensorRT non-redistributable, `.so` is CUDA/arch-specific); the realistic MVP is a Linux wheel that
+bundles `libdfine.so` (via `package-data`, already declared) and depends on the user's local TRT 10.13 + CUDA
+12. The side-by-side "PyTorch ~31 FPS vs D-FINE-cpp ~272 FPS" gif still needs a manual screen-record.
+
+**M4 new files:** `include/dfine/c_api.h`, `src/c_api/c_api.cpp`, `apps/dfine_capi_smoke.c`,
+`apps/dfine_capi_parity.cpp`; `python/{pyproject.toml,README.md}`, `python/dfine/{__init__,_ffi,detector,cli}.py`,
+`python/tests/{conftest,test_detector}.py`. CMake gained `DFINE_BUILD_C_API` + the two harness targets;
+`build.sh` now also sets `CMAKE_C_FLAGS=-B/usr/bin` (system binutils for the C target).

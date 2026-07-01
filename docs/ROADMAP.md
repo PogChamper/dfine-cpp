@@ -22,9 +22,10 @@ gap and are the direct prerequisites for almost everything else in this document
 
 | Item | Verdict | Effort | Impact | Risk |
 |---|---|---|---|---|
-| M3 instance segmentation | DO-NEXT | M-L | High | Medium |
-| `extern "C"` ABI wrapper (`c_api.h`/`.cpp`) | DO-NEXT | S-M | High | Low |
-| Python bindings + pip wheel over the C ABI | WORTH-IT | M | Very high | Medium |
+| M3 instance segmentation | SHELVED (no ckpts/use-case) | M-L | High | Medium |
+| `extern "C"` ABI wrapper (`c_api.h`/`.cpp`) | ✅ DONE (M4) | S-M | High | Low |
+| Python bindings over the C ABI | ✅ DONE (M4) | M | Very high | Medium |
+| pip **wheel** (bundle `.so`, extra `tensorrt`) | DO-NEXT | S-M | High | Medium |
 
 - **M3 instance segmentation.** D-FINE-seg already has the mask head, so this is additive rather than
   exploratory: add a `masks` output to the ONNX export, write a GPU bilinear-upsample + threshold-0.5
@@ -50,7 +51,7 @@ shareable — cheap to build, high visibility, low technical risk.
 |---|---|---|---|---|
 | WASM/WebGPU browser demo | HIGH-HYPE / standout | M | Very high | Low |
 | Real-time demo apps (video/camera, FPS overlay) | WORTH-IT | M | High | Low |
-| Zero-setup CLI (HF weights → export → build → run) | WORTH-IT | M | Medium-high | Low-medium |
+| Zero-setup CLI (export → build → cache → run) | ✅ DONE (M4, `dfine` CLI) | M | Medium-high | Low-medium |
 | Dockerfile, GPU-runner CI, engine cache/registry | NICE | S-M | Incremental | Low |
 
 - **WASM/WebGPU browser demo.** The explicit-gather export (no `GridSample` plugin) is exactly what makes

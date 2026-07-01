@@ -106,6 +106,52 @@ for (const dfine::Detection& d : det.detect(img, /*threshold=*/0.5f)) {
 `detect_batch(std::vector<ImageU8>)` runs dynamic batch (N=1..8). `DetectorOptions.use_cuda_graph` enables
 CUDA-graph replay (needs a `--max-aux-streams 0` engine). Link `dfine::dfine`; no OpenCV required.
 
+### From C (stable ABI)
+
+`libdfine.so` exposes a pure-C ABI ([`include/dfine/c_api.h`](include/dfine/c_api.h), built by default;
+`-DDFINE_BUILD_C_API=OFF` to skip) — opaque handle, no exceptions cross the boundary, thread-local
+`dfine_last_error()`, heap result sets freed by `dfine_detections_free()`. It's the foundation for FFI from
+any language:
+
+```c
+dfine_detector_t* det = dfine_detector_create("dfine_m_fp16_st.engine", NULL);
+dfine_detections_t* r = dfine_detector_detect(det, rgb, w, h, w*3, 3, /*is_bgr=*/0, 0.5f);
+for (int i = 0; i < r->count; ++i)
+    printf("%s %.2f\n", dfine_class_name(r->detections[i].class_id), r->detections[i].score);
+dfine_detections_free(r);
+dfine_detector_destroy(det);
+```
+
+### From Python
+
+A dependency-light [`dfine`](python/) package wraps the C ABI via `ctypes` (no compile step; loads the
+prebuilt `.so`). See [`python/README.md`](python/README.md).
+
+```python
+import numpy as np
+from dfine import Detector
+
+with Detector("dfine_m_fp16_st.engine", threshold=0.4) as det:
+    for d in det.detect(rgb_hwc_uint8):        # numpy HWC uint8 (is_bgr=True for BGR)
+        print(d.class_name, d.score, d.box.as_tuple())
+```
+
+The C result set is freed after every call; `with`/`__del__` release the engine. `detect_batch()` returns
+per-image results. Detections are **byte-identical to the C++ `dfine_detect`** (verified by `pytest`).
+
+### Zero-setup CLI
+
+The package installs a `dfine` command that resolves an engine from `--engine`, an on-disk cache
+(`~/.cache/dfine`, keyed by GPU arch + TRT version), the dev-tree, or builds one on demand:
+
+```sh
+dfine predict --model m --image dog.jpg --threshold 0.5 --out annotated.jpg   # detect + draw
+dfine info    --model m                                                        # introspection
+dfine build   --model m --precision fp16                                       # ONNX -> .engine (cached)
+dfine export  --model m                                                        # .pt  -> ONNX (needs D-FINE-seg)
+dfine bench   --model m --batches 1,2,4,8                                       # latency/throughput
+```
+
 ## Apps
 
 `dfine_detect` (single image) · `dfine_coco_eval` (mAP) · `dfine_bench` (per-stage latency / FPS / GPU-mem,
@@ -142,9 +188,10 @@ BF16/INT8 fail. Full forensics in [docs/impl/M0_STATUS.md](docs/impl/M0_STATUS.m
 ## Status & roadmap
 
 **Done & validated:** M0 (export→engine→validate, all 5 sizes) · M1 (C++ detector, AP 0.5506 == reference) ·
-M2 (FP16 + CUDA-graph; INT8 investigated & rejected). Next: **M3 instance segmentation**, a C ABI + Python
-bindings, and demo apps. See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the prioritized plan and
-[docs/HANDOFF.md](docs/HANDOFF.md) for the single source of truth on the current state.
+M2 (FP16 + CUDA-graph; INT8 investigated & rejected) · **M4 bindings** (stable C ABI + Python `ctypes`
+package + zero-setup `dfine` CLI — detections byte-identical to the C++ path). Next: **M3 instance
+segmentation**, pre-built wheels, and demo apps. See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the
+prioritized plan and [docs/HANDOFF.md](docs/HANDOFF.md) for the single source of truth on the current state.
 
 ## Requirements & environment
 

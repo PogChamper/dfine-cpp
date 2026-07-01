@@ -14,8 +14,8 @@ modeled on `rf-detr-cpp`. Repo: `/home/dxdxxd/projects/custom-dfine/D-FINE-cpp`.
   gives the identical AP to batch 1; dynamic batch N=1/2/8 verified; `dfine_build` rebuilds the engine
   in pure C++ (mAP-equal). See "M1 — C++ detector (DONE)" below.
 - **M2 = production hardening: FP16 + CUDA-graph DONE and validated; INT8 rejected.** Strongly-typed FP16
-  (backbone+encoder FP16, decoder FP32) is **1.6–2.2× faster at −0.2% mAP**; opt-in CUDA-graph replay is
-  byte-identical but a minor win here (~1%, D-FINE-M is compute-bound). The weakly-typed `kFP16` flag is a trap (fixed −6.8 AP),
+  (backbone+encoder FP16, decoder FP32) is **1.6–2.2× faster at −0.2% mAP**; opt-in CUDA-graph replay cuts
+  **batch-1 latency −34.5%** on a single-stream (`--max-aux-streams 0`) engine (D-FINE is dispatch-bound). The weakly-typed `kFP16` flag is a trap (fixed −6.8 AP),
   and BF16/INT8 are dead — all for the same reason: D-FINE's FDR needs mantissa precision. See "M2" below.
 - The big M0/M2 discovery is the through-line: **D-FINE's FDR box-decode is exquisitely FP-precision-sensitive**
   (grid_sample, the kFP16 flag, BF16 and INT8 all fail through it) — see "Decisions" and the M2 section.
@@ -173,7 +173,7 @@ the payoff of the explicit-deform export. The baseline engine is built via
 | Full RAII / sanitizer-clean / warning-clean | ✅ | see Quality bar |
 | Profiling (latency/mem/mAP, cross-backend) | ✅ | `dfine_bench` + `profile.py` |
 | **FP16 (strongly-typed, backbone+encoder)** | ✅ M2.1 | **1.6–2.2× infer, mAP −0.2%**; the `kFP16` *flag* is the trap, not FP16 |
-| **CUDA-graph replay (opt-in)** | ✅ M2.2 | byte-identical outputs; small win (e2e −0.5%/−1.3% b1/b8 — D-FINE-M is compute-bound) |
+| **CUDA-graph replay (opt-in)** | ✅ M2.2 | byte-identical; **−34.5% batch-1** on a `--max-aux-streams 0` engine (D-FINE is dispatch-bound); default 2-aux engines can't capture (gated) |
 | **INT8 (QDQ)** | ⛔ rejected | builds, but mAP collapses to ~0.13 — D-FINE's FDR needs ≥FP16 precision |
 | **Instance segmentation** | ⛔ M3 | D-FINE-seg mask head, threshold 0.5 (masks pre-sigmoid'd) |
 
@@ -238,13 +238,25 @@ outputs aren't FP32 / the engine uses aux streams. `DetectorOptions.use_cuda_gra
 sidecar flag; `CudaGraph`/`CudaGraphExec` RAII in `cuda_raii.hpp`; `--cuda-graph` on `dfine_bench`/
 `dfine_detect`/`dfine_coco_eval`. Our RAW single-input/FP32-output export sidesteps rf-detr's two graph hazards
 (int64 `labels`, `orig_target_sizes`) — see `research/P12_cuda_graph.md`.
-- **mAP unchanged:** graph vs no-graph detections are **byte-identical** (`dfine_coco_eval` diff, 500 imgs).
-- **Latency (careful same-run back-to-back, C++ FP16):** the graph fuses `enqueueV3`+D2H, saving only
-  **~0.09 ms (b1)** / **~0.35 ms (b8)** → **e2e −0.5% (b1) / −1.3% (b8)**. D-FINE-M is **compute-bound**
-  (~15 ms GPU at b8), so eliminating launch/D2H dispatch barely moves e2e — the graph is a *minor* win here
-  (it matters more for tiny/dispatch-bound models). Byte-identical and free to enable; use it for fixed-shape
-  streaming. (An earlier "−1.3 ms / 2.36×" figure was a GPU-contention artifact — corrected here.)
-  Measure it any time with `profile.py --backends cpp cpp-graph`.
+
+**★ The graph requires a single-stream (0-aux) engine — this is the key gotcha.** TRT builds these D-FINE
+engines with **2 auxiliary streams** by default (`getNbAuxStreams()==2`), and `cudaStreamCaptureModeThreadLocal`
+records only the main stream → an *incomplete* graph that silently drops the aux-stream kernels (fast but
+wrong). The detector/bench correctly **gate capture on `num_aux_streams()==0`**, so on a default engine the
+graph is a safe no-op (falls back to enqueueV3). To actually use it, **build with
+`build_engine.py --max-aux-streams 0`** (`config.max_aux_streams=0`), which makes the engine single-stream and
+capturable. (An earlier "−1.3 ms / 2.36×" reading was a *pre-gate incomplete capture* running fewer kernels —
+not a real speedup.)
+- **mAP unchanged:** on a 0-aux engine, graph vs no-graph detections are **byte-identical** (`dfine_coco_eval`
+  diff) — the graph is correct.
+- **Latency (0-aux FP16 m, rigorous same-run `dfine_bench --graph-compare`):** D-FINE is **dispatch-bound at
+  small batch** — enqueueV3 spends **3.87 ms of CPU** launching the hundreds of kernels vs **0.09 ms** for
+  `cudaGraphLaunch`, and the GPU *starves* waiting (3.90 ms wall for 2.55 ms of real compute). The graph
+  removes the starvation: **batch-1 full wall 3.90 → 2.55 ms = −34.5%**; batch-8 −4.9% (GPU-bound there).
+- **Recommendation:** for **fixed-shape batch-1 streaming**, build `--max-aux-streams 0` + `use_cuda_graph` —
+  **2.55 ms beats the default 2-aux engine's 3.30 ms** (the graph more than repays the lost stream
+  parallelism). For **batch throughput**, keep the default 2-aux engine (parallelism wins, graph gives little).
+  Measure with `dfine_bench --graph-compare` (needs a 0-aux engine) or `profile.py --backends cpp cpp-graph`.
 
 ### M2.3 — INT8 (QDQ), investigated, **rejected** (mAP 0.13)
 
@@ -281,4 +293,5 @@ production speed path; seg (M2.4) is the next feature.
 **Cross-backend reference (D-FINE-M, full COCO val, `profile.py --backends torch onnx trt cpp cpp-graph`):**
 FPS at batch 1 / batch 8 — PyTorch 31/66, ONNXRuntime-GPU 40/89, TensorRT-FP32(py) 125/160, C++ FP32
 176/227, **C++ FP16 272/459** (≈8.7×/7× PyTorch); e2e batch-1 latency 32.0 / 25.0 / 8.0 / 5.7 / **3.7** ms;
-GPU mem FP16 488 MiB vs FP32 642 (−24%); all backends mAP 0.5500–0.5509. (`cpp-graph` = C++ FP16 + CUDA-graph.)
+GPU mem FP16 488 MiB vs FP32 642 (−24%); all backends mAP 0.5500–0.5509. (These engines are the default 2-aux
+build, so `cpp-graph` there == `cpp`; the graph win needs a `--max-aux-streams 0` engine — see M2.2.)

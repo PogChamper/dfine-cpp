@@ -39,38 +39,55 @@ int main(int argc, char** argv) {
         auto parse_wh = [](std::string_view v, int& w, int& h, const char* flag) {
             const std::string s(v);
             const auto x = s.find('x');
-            if (x == std::string::npos) throw std::runtime_error(std::string(flag) + " expects WxH");
+            if (x == std::string::npos)
+                throw std::runtime_error(std::string(flag) + " expects WxH");
             w = std::stoi(s.substr(0, x));
             h = std::stoi(s.substr(x + 1));
         };
         for (int i = 1; i < argc; ++i) {
             std::string_view a = argv[i];
             if (a == "-h" || a == "--help") {
-                std::printf("usage: %s --engine E --images-dir DIR --filelist L --out J "
-                            "[--meta M] [--threshold 0.001] [--batch 1] [--cuda-graph] "
-                            "[--gpu-decode] [--own-device-memory] [--freeze] "
-                            "[--full-graph] [--filter-res WxH]\n"
-                            "  --full-graph  freeze + capture the full-pipeline CUDA graph (P3); "
-                            "requires a fixed source\n                resolution — pair with "
-                            "--filter-res so every image matches the frozen size\n"
-                            "  --filter-res  skip images whose size differs from WxH (also the "
-                            "freeze source size)\n  dfine v%s\n",
-                            argv[0], dfine::version());
+                std::printf(
+                    "usage: %s --engine E --images-dir DIR --filelist L --out J "
+                    "[--meta M] [--threshold 0.001] [--batch 1] [--cuda-graph] "
+                    "[--gpu-decode] [--own-device-memory] [--freeze] "
+                    "[--full-graph] [--filter-res WxH]\n"
+                    "  --full-graph  freeze + capture the full-pipeline CUDA graph (P3); "
+                    "requires a fixed source\n                resolution — pair with "
+                    "--filter-res so every image matches the frozen size\n"
+                    "  --filter-res  skip images whose size differs from WxH (also the "
+                    "freeze source size)\n  dfine v%s\n",
+                    argv[0], dfine::version());
                 return 0;
-            } else if (starts_with(a, "--engine"))     engine = next_value(argc, argv, i, "--engine");
-            else if (starts_with(a, "--images-dir"))    images_dir = next_value(argc, argv, i, "--images-dir");
-            else if (starts_with(a, "--filelist"))      filelist = next_value(argc, argv, i, "--filelist");
-            else if (starts_with(a, "--meta"))          meta = next_value(argc, argv, i, "--meta");
-            else if (starts_with(a, "--out"))           out = next_value(argc, argv, i, "--out");
-            else if (starts_with(a, "--threshold"))     threshold = parse_float(next_value(argc, argv, i, "--threshold"), "--threshold");
-            else if (starts_with(a, "--batch"))         batch = parse_int(next_value(argc, argv, i, "--batch"), "--batch");
-            else if (a == "--cuda-graph")               cuda_graph = true;
-            else if (a == "--gpu-decode")               gpu_decode = true;
-            else if (a == "--own-device-memory")        own_dev_mem = true;
-            else if (a == "--freeze")                   do_freeze = true;
-            else if (a == "--full-graph")               full_graph = true;
-            else if (starts_with(a, "--filter-res"))    parse_wh(next_value(argc, argv, i, "--filter-res"), filter_w, filter_h, "--filter-res");
-            else throw std::runtime_error("unknown arg: " + std::string(a));
+            } else if (starts_with(a, "--engine"))
+                engine = next_value(argc, argv, i, "--engine");
+            else if (starts_with(a, "--images-dir"))
+                images_dir = next_value(argc, argv, i, "--images-dir");
+            else if (starts_with(a, "--filelist"))
+                filelist = next_value(argc, argv, i, "--filelist");
+            else if (starts_with(a, "--meta"))
+                meta = next_value(argc, argv, i, "--meta");
+            else if (starts_with(a, "--out"))
+                out = next_value(argc, argv, i, "--out");
+            else if (starts_with(a, "--threshold"))
+                threshold = parse_float(next_value(argc, argv, i, "--threshold"), "--threshold");
+            else if (starts_with(a, "--batch"))
+                batch = parse_int(next_value(argc, argv, i, "--batch"), "--batch");
+            else if (a == "--cuda-graph")
+                cuda_graph = true;
+            else if (a == "--gpu-decode")
+                gpu_decode = true;
+            else if (a == "--own-device-memory")
+                own_dev_mem = true;
+            else if (a == "--freeze")
+                do_freeze = true;
+            else if (a == "--full-graph")
+                full_graph = true;
+            else if (starts_with(a, "--filter-res"))
+                parse_wh(next_value(argc, argv, i, "--filter-res"), filter_w, filter_h,
+                         "--filter-res");
+            else
+                throw std::runtime_error("unknown arg: " + std::string(a));
         }
         if (engine.empty() || images_dir.empty() || filelist.empty() || out.empty()) {
             std::fprintf(stderr, "error: --engine, --images-dir, --filelist, --out are required\n");
@@ -80,17 +97,18 @@ int main(int argc, char** argv) {
 
         dfine::DetectorOptions opts;
         opts.threshold = threshold;
-        opts.use_cuda_graph = cuda_graph;  // validates the graph path produces == mAP
-        opts.gpu_decode = gpu_decode;      // validates the GPU-decode path == CPU-decode mAP
-        opts.own_device_memory = own_dev_mem;  // validates the kUSER_MANAGED activation path
+        opts.use_cuda_graph = cuda_graph;       // validates the graph path produces == mAP
+        opts.gpu_decode = gpu_decode;           // validates the GPU-decode path == CPU-decode mAP
+        opts.own_device_memory = own_dev_mem;   // validates the kUSER_MANAGED activation path
         opts.full_pipeline_graph = full_graph;  // validates the P3 single-launch path
         dfine::DFineDetector det = meta.empty() ? dfine::DFineDetector(engine, opts)
                                                 : dfine::DFineDetector(engine, meta, opts);
 
         if (full_graph && filter_w <= 0) {
-            std::fprintf(stderr, "[dfine_coco_eval] warning: --full-graph without --filter-res — "
-                                 "images not matching the frozen source size fall back to the "
-                                 "split path\n");
+            std::fprintf(stderr,
+                         "[dfine_coco_eval] warning: --full-graph without --filter-res — "
+                         "images not matching the frozen source size fall back to the "
+                         "split path\n");
         }
 
         std::size_t free_after_freeze = 0, total_vram = 0;
@@ -120,7 +138,10 @@ int main(int argc, char** argv) {
         bool first = true;
         long long n_imgs = 0, n_dets = 0, n_missing = 0;
 
-        struct Item { long long id; dfine_app::LoadedImage img; };
+        struct Item {
+            long long id;
+            dfine_app::LoadedImage img;
+        };
         std::vector<Item> chunk;
         chunk.reserve(static_cast<std::size_t>(batch));
 
@@ -136,10 +157,9 @@ int main(int argc, char** argv) {
                     const float h = d.box.y2 - d.box.y1;
                     if (!first) os << ',';
                     first = false;
-                    os << "{\"image_id\":" << chunk[k].id
-                       << ",\"category_contig\":" << d.class_id
-                       << ",\"bbox\":[" << d.box.x1 << ',' << d.box.y1 << ',' << w << ',' << h << ']'
-                       << ",\"score\":" << d.score << '}';
+                    os << "{\"image_id\":" << chunk[k].id << ",\"category_contig\":" << d.class_id
+                       << ",\"bbox\":[" << d.box.x1 << ',' << d.box.y1 << ',' << w << ',' << h
+                       << ']' << ",\"score\":" << d.score << '}';
                     ++n_dets;
                 }
             }
@@ -159,9 +179,11 @@ int main(int argc, char** argv) {
             if (!(ss >> image_id >> fname)) continue;
 
             dfine_app::LoadedImage img = dfine_app::load_image_rgb((images_dir / fname).string());
-            if (!img) { ++n_missing; continue; }
-            if (filter_w > 0 &&
-                (img.view().width != filter_w || img.view().height != filter_h)) {
+            if (!img) {
+                ++n_missing;
+                continue;
+            }
+            if (filter_w > 0 && (img.view().width != filter_w || img.view().height != filter_h)) {
                 ++n_filtered;
                 continue;
             }
@@ -171,24 +193,29 @@ int main(int argc, char** argv) {
         flush();
 
         os << "]\n";
-        std::fprintf(stderr, "[dfine_coco_eval] done: %lld images, %lld detections, %lld missing "
-                     "(batch=%d)\n", n_imgs, n_dets, n_missing, batch);
+        std::fprintf(stderr,
+                     "[dfine_coco_eval] done: %lld images, %lld detections, %lld missing "
+                     "(batch=%d)\n",
+                     n_imgs, n_dets, n_missing, batch);
         if (filter_w > 0) {
             std::fprintf(stderr, "[dfine_coco_eval] filter-res %dx%d: %lld images skipped\n",
                          filter_w, filter_h, n_filtered);
         }
         if (full_graph) {
-            std::fprintf(stderr, "[dfine_coco_eval] full-graph replays: %llu calls over %lld "
+            std::fprintf(stderr,
+                         "[dfine_coco_eval] full-graph replays: %llu calls over %lld "
                          "images (non-replayed calls used the split path)\n",
                          static_cast<unsigned long long>(det.full_graph_replays()), n_imgs);
         }
         if (do_freeze || full_graph) {
             std::size_t free_end = 0, tot = 0;
             cudaMemGetInfo(&free_end, &tot);
-            const long long delta = static_cast<long long>(free_after_freeze) -
-                                    static_cast<long long>(free_end);
-            std::fprintf(stderr, "[dfine_coco_eval] frozen: free VRAM delta over %lld images = "
-                         "%+lld bytes (0 == no steady-state allocation)\n", n_imgs, delta);
+            const long long delta =
+                static_cast<long long>(free_after_freeze) - static_cast<long long>(free_end);
+            std::fprintf(stderr,
+                         "[dfine_coco_eval] frozen: free VRAM delta over %lld images = "
+                         "%+lld bytes (0 == no steady-state allocation)\n",
+                         n_imgs, delta);
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

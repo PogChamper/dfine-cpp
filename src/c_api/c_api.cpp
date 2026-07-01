@@ -56,7 +56,7 @@ void c_log_adapter(dfine::LogSeverity sev, const char* msg) noexcept {
 // ---------------------------------------------------------------------------
 
 dfine_detections_t* pack_detections(const dfine::Detections& dets) {
-    auto* out  = new dfine_detections_t;
+    auto* out = new dfine_detections_t;
     out->count = static_cast<int>(dets.size());
     try {
         out->detections = (out->count > 0)
@@ -68,13 +68,13 @@ dfine_detections_t* pack_detections(const dfine::Detections& dets) {
     }
     for (int i = 0; i < out->count; ++i) {
         const dfine::Detection& d = dets[static_cast<std::size_t>(i)];
-        dfine_detection_t&      o = out->detections[i];
-        o.box.x1   = d.box.x1;
-        o.box.y1   = d.box.y1;
-        o.box.x2   = d.box.x2;
-        o.box.y2   = d.box.y2;
+        dfine_detection_t& o = out->detections[i];
+        o.box.x1 = d.box.x1;
+        o.box.y1 = d.box.y1;
+        o.box.x2 = d.box.x2;
+        o.box.y2 = d.box.y2;
         o.class_id = d.class_id;
-        o.score    = d.score;
+        o.score = d.score;
     }
     return out;
 }
@@ -83,8 +83,8 @@ dfine_detections_t* pack_detections(const dfine::Detections& dets) {
 // Build a validated, non-owning ImageU8 view over caller-owned bytes.
 // ---------------------------------------------------------------------------
 
-dfine::ImageU8 make_view(const uint8_t* data, int width, int height, int step,
-                         int channels, int is_bgr) {
+dfine::ImageU8 make_view(const uint8_t* data, int width, int height, int step, int channels,
+                         int is_bgr) {
     if (!data) throw std::invalid_argument("dfine: image data is NULL");
     if (width <= 0 || height <= 0) {
         throw std::invalid_argument("dfine: invalid image size (width=" + std::to_string(width) +
@@ -98,16 +98,16 @@ dfine::ImageU8 make_view(const uint8_t* data, int width, int height, int step,
     const long long min_step = static_cast<long long>(width) * channels;
     if (step > 0 && step < min_step) {
         throw std::invalid_argument("dfine: step (" + std::to_string(step) +
-                                    ") is smaller than width*channels (" + std::to_string(min_step) +
-                                    ")");
+                                    ") is smaller than width*channels (" +
+                                    std::to_string(min_step) + ")");
     }
     dfine::ImageU8 view;
-    view.data     = data;
-    view.height   = height;
-    view.width    = width;
+    view.data = data;
+    view.height = height;
+    view.width = width;
     view.channels = channels;
-    view.stride   = step > 0 ? step : 0;  // 0 => tightly packed (width*channels)
-    view.is_bgr   = (is_bgr != 0);
+    view.stride = step > 0 ? step : 0;  // 0 => tightly packed (width*channels)
+    view.is_bgr = (is_bgr != 0);
     return view;
 }
 
@@ -164,10 +164,9 @@ dfine_detector_t* dfine_detector_create_ex(const char* engine_path, const char* 
             dopts.use_cuda_graph = (opts->use_cuda_graph != 0);
             if (opts->graph_warmup_iters > 0) dopts.graph_warmup_iters = opts->graph_warmup_iters;
         }
-        dfine::DFineDetector det =
-            (meta_path && meta_path[0] != '\0')
-                ? dfine::DFineDetector(engine_path, meta_path, dopts)
-                : dfine::DFineDetector(engine_path, dopts);
+        dfine::DFineDetector det = (meta_path && meta_path[0] != '\0')
+                                       ? dfine::DFineDetector(engine_path, meta_path, dopts)
+                                       : dfine::DFineDetector(engine_path, dopts);
         return new dfine_detector_s(std::move(det));
     } catch (const std::exception& e) {
         set_error(e.what());
@@ -230,9 +229,8 @@ dfine_detections_t* dfine_detector_detect(dfine_detector_t* det, const uint8_t* 
     }
 }
 
-dfine_detections_t** dfine_detector_detect_batch(dfine_detector_t* det,
-                                                 const dfine_image_t* images, int count,
-                                                 float threshold) {
+dfine_detections_t** dfine_detector_detect_batch(dfine_detector_t* det, const dfine_image_t* images,
+                                                 int count, float threshold) {
     t_last_error.clear();
     if (!det) {
         set_error("dfine_detector_detect_batch: detector is NULL");

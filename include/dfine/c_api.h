@@ -52,13 +52,13 @@ extern "C" {
  * Visibility / export macros
  * ---------------------------------------------------------------------- */
 #if defined(_WIN32) || defined(__CYGWIN__)
-#  ifdef DFINE_BUILDING_LIB
-#    define DFINE_API __declspec(dllexport)
-#  else
-#    define DFINE_API __declspec(dllimport)
-#  endif
+#ifdef DFINE_BUILDING_LIB
+#define DFINE_API __declspec(dllexport)
 #else
-#  define DFINE_API __attribute__((visibility("default")))
+#define DFINE_API __declspec(dllimport)
+#endif
+#else
+#define DFINE_API __attribute__((visibility("default")))
 #endif
 
 /* -------------------------------------------------------------------------
@@ -87,8 +87,8 @@ typedef struct dfine_box_s {
  */
 typedef struct dfine_detection_s {
     dfine_box_t box;
-    int         class_id;
-    float       score;
+    int class_id;
+    float score;
 } dfine_detection_t;
 
 /*
@@ -97,7 +97,7 @@ typedef struct dfine_detection_s {
  */
 typedef struct dfine_detections_s {
     dfine_detection_t* detections;
-    int                count;
+    int count;
 } dfine_detections_t;
 
 /*
@@ -105,12 +105,12 @@ typedef struct dfine_detections_s {
  * Same field meaning as the scalar dfine_detector_detect() arguments.
  */
 typedef struct dfine_image_s {
-    const uint8_t* data;     /* first byte of an HWC uint8 image           */
-    int            width;    /* pixels                                     */
-    int            height;   /* pixels                                     */
-    int            step;     /* row stride in bytes; <=0 => width*channels */
-    int            channels; /* must be 3                                  */
-    int            is_bgr;   /* 0 = RGB, non-zero = BGR                    */
+    const uint8_t* data; /* first byte of an HWC uint8 image           */
+    int width;           /* pixels                                     */
+    int height;          /* pixels                                     */
+    int step;            /* row stride in bytes; <=0 => width*channels */
+    int channels;        /* must be 3                                  */
+    int is_bgr;          /* 0 = RGB, non-zero = BGR                    */
 } dfine_image_t;
 
 /*
@@ -118,12 +118,12 @@ typedef struct dfine_image_s {
  * what you need; a NULL pointer means "all defaults".
  */
 typedef struct dfine_options_s {
-    float threshold;          /* default score threshold; <=0 keeps 0.5        */
-    int   use_cuda_graph;     /* 0/1: opt-in CUDA-graph replay of the engine.  */
-                              /*   Cuts batch-1 launch overhead on single-     */
-                              /*   stream (--max-aux-streams 0) engines; a safe */
-                              /*   no-op (falls back to enqueueV3) otherwise.   */
-    int   graph_warmup_iters; /* enqueue cycles before capture (<=0 => 3)      */
+    float threshold;        /* default score threshold; <=0 keeps 0.5        */
+    int use_cuda_graph;     /* 0/1: opt-in CUDA-graph replay of the engine.  */
+                            /*   Cuts batch-1 launch overhead on single-     */
+                            /*   stream (--max-aux-streams 0) engines; a safe */
+                            /*   no-op (falls back to enqueueV3) otherwise.   */
+    int graph_warmup_iters; /* enqueue cycles before capture (<=0 => 3)      */
 } dfine_options_t;
 
 /* -------------------------------------------------------------------------
@@ -168,15 +168,13 @@ DFINE_API void dfine_set_log_callback(dfine_log_fn_t callback);
  *
  * Returns a non-NULL handle on success, NULL on failure (see dfine_last_error).
  */
-DFINE_API dfine_detector_t* dfine_detector_create(const char* engine_path,
-                                                  const char* meta_path);
+DFINE_API dfine_detector_t* dfine_detector_create(const char* engine_path, const char* meta_path);
 
 /*
  * Like dfine_detector_create() but with construction options (threshold,
  * CUDA-graph). `opts` may be NULL (equivalent to dfine_detector_create()).
  */
-DFINE_API dfine_detector_t* dfine_detector_create_ex(const char* engine_path,
-                                                     const char* meta_path,
+DFINE_API dfine_detector_t* dfine_detector_create_ex(const char* engine_path, const char* meta_path,
                                                      const dfine_options_t* opts);
 
 /* Destroy a detector and free all associated resources. Safe with NULL. */
@@ -189,12 +187,12 @@ DFINE_API void dfine_detector_destroy(dfine_detector_t* det);
 /* The returned string is owned by the detector and valid until it is destroyed;
  * copy it if you need to outlive the handle. */
 DFINE_API const char* dfine_detector_variant(const dfine_detector_t* det);
-DFINE_API int         dfine_detector_input_width(const dfine_detector_t* det);
-DFINE_API int         dfine_detector_input_height(const dfine_detector_t* det);
-DFINE_API int         dfine_detector_num_queries(const dfine_detector_t* det);
-DFINE_API int         dfine_detector_num_classes(const dfine_detector_t* det);
+DFINE_API int dfine_detector_input_width(const dfine_detector_t* det);
+DFINE_API int dfine_detector_input_height(const dfine_detector_t* det);
+DFINE_API int dfine_detector_num_queries(const dfine_detector_t* det);
+DFINE_API int dfine_detector_num_classes(const dfine_detector_t* det);
 /* 1 for a static engine; the profile max for a dynamic engine; 0 if unknown. */
-DFINE_API int         dfine_detector_max_batch(const dfine_detector_t* det);
+DFINE_API int dfine_detector_max_batch(const dfine_detector_t* det);
 
 /* -------------------------------------------------------------------------
  * Inference
@@ -214,11 +212,9 @@ DFINE_API int         dfine_detector_max_batch(const dfine_detector_t* det);
  * Returns a heap-allocated dfine_detections_t* on success (may have count == 0),
  * or NULL on failure. Free the result with dfine_detections_free().
  */
-DFINE_API dfine_detections_t* dfine_detector_detect(dfine_detector_t* det,
-                                                    const uint8_t* data,
-                                                    int width, int height, int step,
-                                                    int channels, int is_bgr,
-                                                    float threshold);
+DFINE_API dfine_detections_t* dfine_detector_detect(dfine_detector_t* det, const uint8_t* data,
+                                                    int width, int height, int step, int channels,
+                                                    int is_bgr, float threshold);
 
 /*
  * Batch detection. Requires an engine built with max_batch >= count.
@@ -228,8 +224,8 @@ DFINE_API dfine_detections_t* dfine_detector_detect(dfine_detector_t* det,
  * failure. Free the whole thing with dfine_detections_free_batch().
  */
 DFINE_API dfine_detections_t** dfine_detector_detect_batch(dfine_detector_t* det,
-                                                           const dfine_image_t* images,
-                                                           int count, float threshold);
+                                                           const dfine_image_t* images, int count,
+                                                           float threshold);
 
 /* -------------------------------------------------------------------------
  * Result memory management

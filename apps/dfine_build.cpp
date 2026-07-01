@@ -71,22 +71,41 @@ Args parse_args(int argc, char** argv) {
     Args a;
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
-        if (arg == "-h" || arg == "--help") { usage(argv[0]); std::exit(0); }
-        else if (starts_with(arg, "--onnx"))          a.onnx = next_value(argc, argv, i, "--onnx");
-        else if (starts_with(arg, "--engine"))        a.engine = next_value(argc, argv, i, "--engine");
-        else if (starts_with(arg, "--meta-out"))      a.meta_out = next_value(argc, argv, i, "--meta-out");
-        else if (starts_with(arg, "--meta"))          a.meta_in = next_value(argc, argv, i, "--meta");
-        else if (starts_with(arg, "--precision"))     a.precision = next_value(argc, argv, i, "--precision");
-        else if (starts_with(arg, "--workspace-mib")) a.workspace_mib = parse_int(next_value(argc, argv, i, "--workspace-mib"), "--workspace-mib");
-        else if (starts_with(arg, "--input-name"))    a.input_name = next_value(argc, argv, i, "--input-name");
-        else if (starts_with(arg, "--min-batch"))     a.min_batch = parse_int(next_value(argc, argv, i, "--min-batch"), "--min-batch");
-        else if (starts_with(arg, "--opt-batch"))     a.opt_batch = parse_int(next_value(argc, argv, i, "--opt-batch"), "--opt-batch");
-        else if (starts_with(arg, "--max-batch"))     a.max_batch = parse_int(next_value(argc, argv, i, "--max-batch"), "--max-batch");
-        else if (arg == "--cuda-graph")               a.cuda_graph = true;
-        else if (arg == "--verbose")                  a.verbose = true;
-        else throw std::runtime_error("unknown arg: " + std::string(arg));
+        if (arg == "-h" || arg == "--help") {
+            usage(argv[0]);
+            std::exit(0);
+        } else if (starts_with(arg, "--onnx"))
+            a.onnx = next_value(argc, argv, i, "--onnx");
+        else if (starts_with(arg, "--engine"))
+            a.engine = next_value(argc, argv, i, "--engine");
+        else if (starts_with(arg, "--meta-out"))
+            a.meta_out = next_value(argc, argv, i, "--meta-out");
+        else if (starts_with(arg, "--meta"))
+            a.meta_in = next_value(argc, argv, i, "--meta");
+        else if (starts_with(arg, "--precision"))
+            a.precision = next_value(argc, argv, i, "--precision");
+        else if (starts_with(arg, "--workspace-mib"))
+            a.workspace_mib =
+                parse_int(next_value(argc, argv, i, "--workspace-mib"), "--workspace-mib");
+        else if (starts_with(arg, "--input-name"))
+            a.input_name = next_value(argc, argv, i, "--input-name");
+        else if (starts_with(arg, "--min-batch"))
+            a.min_batch = parse_int(next_value(argc, argv, i, "--min-batch"), "--min-batch");
+        else if (starts_with(arg, "--opt-batch"))
+            a.opt_batch = parse_int(next_value(argc, argv, i, "--opt-batch"), "--opt-batch");
+        else if (starts_with(arg, "--max-batch"))
+            a.max_batch = parse_int(next_value(argc, argv, i, "--max-batch"), "--max-batch");
+        else if (arg == "--cuda-graph")
+            a.cuda_graph = true;
+        else if (arg == "--verbose")
+            a.verbose = true;
+        else
+            throw std::runtime_error("unknown arg: " + std::string(arg));
     }
-    if (a.onnx.empty()) { usage(argv[0]); std::exit(2); }
+    if (a.onnx.empty()) {
+        usage(argv[0]);
+        std::exit(2);
+    }
     if (a.precision != "fp32") {
         throw std::runtime_error(
             "dfine_build supports only --precision fp32 (D-FINE decoder must stay FP32). "
@@ -95,7 +114,10 @@ Args parse_args(int argc, char** argv) {
     if (a.engine.empty()) {
         a.engine = a.onnx.parent_path() / (a.onnx.stem().string() + "-" + a.precision + ".engine");
     }
-    if (a.meta_in.empty()) { a.meta_in = a.onnx; a.meta_in.replace_extension(".json"); }
+    if (a.meta_in.empty()) {
+        a.meta_in = a.onnx;
+        a.meta_in.replace_extension(".json");
+    }
     if (a.meta_out.empty()) a.meta_out = a.engine.string() + ".json";
     if (a.min_batch <= 0 || a.opt_batch <= 0 || a.max_batch <= 0) {
         throw std::runtime_error("--*-batch values must be positive");
@@ -108,7 +130,10 @@ Args parse_args(int argc, char** argv) {
 
 void print_dims(const nvinfer1::Dims& d) {
     std::fputc('[', stdout);
-    for (int i = 0; i < d.nbDims; ++i) { if (i) std::fputc(',', stdout); std::printf("%ld", static_cast<long>(d.d[i])); }
+    for (int i = 0; i < d.nbDims; ++i) {
+        if (i) std::fputc(',', stdout);
+        std::printf("%ld", static_cast<long>(d.d[i]));
+    }
     std::fputc(']', stdout);
 }
 
@@ -134,8 +159,8 @@ int main(int argc, char** argv) {
     std::printf("[dfine_build] onnx      : %s\n", args.onnx.c_str());
     std::printf("[dfine_build] engine    : %s\n", args.engine.c_str());
     std::printf("[dfine_build] precision : %s\n", args.precision.c_str());
-    std::printf("[dfine_build] batch     : min=%d opt=%d max=%d\n",
-                args.min_batch, args.opt_batch, args.max_batch);
+    std::printf("[dfine_build] batch     : min=%d opt=%d max=%d\n", args.min_batch, args.opt_batch,
+                args.max_batch);
 
     try {
         std::unique_ptr<nvinfer1::IBuilder> builder{nvinfer1::createInferBuilder(logger)};
@@ -146,7 +171,7 @@ int main(int argc, char** argv) {
         if (!parser) throw std::runtime_error("createParser failed");
 
         const int severity = static_cast<int>(args.verbose ? nvinfer1::ILogger::Severity::kVERBOSE
-                                                            : nvinfer1::ILogger::Severity::kWARNING);
+                                                           : nvinfer1::ILogger::Severity::kWARNING);
         if (!parser->parseFromFile(args.onnx.c_str(), severity)) {
             for (int i = 0; i < parser->getNbErrors(); ++i)
                 std::fprintf(stderr, "  ONNX error: %s\n", parser->getError(i)->desc());
@@ -157,7 +182,10 @@ int main(int argc, char** argv) {
 
         nvinfer1::ITensor* input = nullptr;
         for (int i = 0; i < network->getNbInputs(); ++i) {
-            if (args.input_name == network->getInput(i)->getName()) { input = network->getInput(i); break; }
+            if (args.input_name == network->getInput(i)->getName()) {
+                input = network->getInput(i);
+                break;
+            }
         }
         if (!input && network->getNbInputs() > 0) {
             input = network->getInput(0);
@@ -171,7 +199,8 @@ int main(int argc, char** argv) {
         std::putchar('\n');
 
         bool has_dynamic_dim = false;
-        for (int i = 0; i < in_dims.nbDims; ++i) if (in_dims.d[i] < 0) has_dynamic_dim = true;
+        for (int i = 0; i < in_dims.nbDims; ++i)
+            if (in_dims.d[i] < 0) has_dynamic_dim = true;
         const bool need_profile = has_dynamic_dim || args.max_batch > 1;
 
         std::unique_ptr<nvinfer1::IBuilderConfig> config{builder->createBuilderConfig()};
@@ -202,7 +231,8 @@ int main(int argc, char** argv) {
         int in_h = (in_dims.nbDims == 4 && in_dims.d[2] > 0) ? static_cast<int>(in_dims.d[2]) : 640;
         int in_w = (in_dims.nbDims == 4 && in_dims.d[3] > 0) ? static_cast<int>(in_dims.d[3]) : 640;
         if (need_profile) {
-            const int C = (in_dims.nbDims == 4 && in_dims.d[1] > 0) ? static_cast<int>(in_dims.d[1]) : 3;
+            const int C =
+                (in_dims.nbDims == 4 && in_dims.d[1] > 0) ? static_cast<int>(in_dims.d[1]) : 3;
             auto* profile = builder->createOptimizationProfile();
             profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN,
                                    nvinfer1::Dims4{args.min_batch, C, in_h, in_w});
@@ -211,13 +241,14 @@ int main(int argc, char** argv) {
             profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX,
                                    nvinfer1::Dims4{args.max_batch, C, in_h, in_w});
             config->addOptimizationProfile(profile);
-            std::printf("[dfine_build] profile   : min=%d opt=%d max=%d @ %dx%d\n",
-                        args.min_batch, args.opt_batch, args.max_batch, in_h, in_w);
+            std::printf("[dfine_build] profile   : min=%d opt=%d max=%d @ %dx%d\n", args.min_batch,
+                        args.opt_batch, args.max_batch, in_h, in_w);
         }
 
         std::printf("[dfine_build] building... (10-60s)\n");
         const auto t0 = std::chrono::steady_clock::now();
-        std::unique_ptr<nvinfer1::IHostMemory> plan{builder->buildSerializedNetwork(*network, *config)};
+        std::unique_ptr<nvinfer1::IHostMemory> plan{
+            builder->buildSerializedNetwork(*network, *config)};
         const auto t1 = std::chrono::steady_clock::now();
         if (!plan) throw std::runtime_error("buildSerializedNetwork returned null");
         std::printf("[dfine_build] built in %.1fs, plan = %.1f MiB\n",
@@ -226,7 +257,8 @@ int main(int argc, char** argv) {
 
         std::ofstream out(args.engine, std::ios::binary | std::ios::trunc);
         if (!out) throw std::runtime_error("cannot open engine output: " + args.engine.string());
-        out.write(static_cast<const char*>(plan->data()), static_cast<std::streamsize>(plan->size()));
+        out.write(static_cast<const char*>(plan->data()),
+                  static_cast<std::streamsize>(plan->size()));
         out.close();
         std::printf("[dfine_build] wrote %s\n", args.engine.c_str());
 
@@ -247,9 +279,14 @@ int main(int argc, char** argv) {
             std::ifstream mi(args.meta_in);
             mi >> j;
         } else {
-            j = {{"model", "d-fine"}, {"num_classes", 80}, {"num_queries", 300},
-                 {"color_order", "RGB"}, {"mean", {0.0, 0.0, 0.0}}, {"std", {1.0, 1.0, 1.0}},
-                 {"resize", "stretch"}, {"input_names", {"images"}},
+            j = {{"model", "d-fine"},
+                 {"num_classes", 80},
+                 {"num_queries", 300},
+                 {"color_order", "RGB"},
+                 {"mean", {0.0, 0.0, 0.0}},
+                 {"std", {1.0, 1.0, 1.0}},
+                 {"resize", "stretch"},
+                 {"input_names", {"images"}},
                  {"output_names", {"logits", "boxes"}}};
         }
         j["input_h"] = in_h;
@@ -260,8 +297,9 @@ int main(int argc, char** argv) {
         j["opt_batch"] = args.opt_batch;
         j["max_batch"] = args.max_batch;
         j["cuda_graph_compat"] = args.cuda_graph;
-        j["trt_version"] = std::to_string(NV_TENSORRT_MAJOR) + "." + std::to_string(NV_TENSORRT_MINOR) +
-                           "." + std::to_string(NV_TENSORRT_PATCH);
+        j["trt_version"] = std::to_string(NV_TENSORRT_MAJOR) + "." +
+                           std::to_string(NV_TENSORRT_MINOR) + "." +
+                           std::to_string(NV_TENSORRT_PATCH);
         std::ofstream mo(args.meta_out);
         if (!mo) throw std::runtime_error("cannot write meta sidecar: " + args.meta_out.string());
         mo << j.dump(2) << '\n';

@@ -8,10 +8,10 @@ namespace dfine {
 // class head with NO background slot: `logits [N, num_queries, num_classes]` and
 // `boxes [N, num_queries, 4]` (cxcywh, normalized to [0,1]). Decode has no NMS.
 struct PostprocessParams {
-    int   num_queries{300};   // logits/boxes dim 1
-    int   num_classes{80};    // logits dim 2 (contiguous class ids, no background)
-    int   topk{300};          // top-k over (query × class); default = num_queries
-    float threshold{0.5f};    // score threshold applied after top-k selection
+    int num_queries{300};   // logits/boxes dim 1
+    int num_classes{80};    // logits dim 2 (contiguous class ids, no background)
+    int topk{300};          // top-k over (query × class); default = num_queries
+    float threshold{0.5f};  // score threshold applied after top-k selection
 };
 
 // Decode one image's raw D-FINE outputs into pixel-space detections.

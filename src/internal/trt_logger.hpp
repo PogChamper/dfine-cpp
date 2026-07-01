@@ -12,7 +12,7 @@ namespace dfine {
 // so user-installed callbacks see TRT messages too. Severity threshold defaults to
 // WARNING; pass kVERBOSE to debug engine builds.
 class TrtLogger : public nvinfer1::ILogger {
-   public:
+ public:
     using Severity = nvinfer1::ILogger::Severity;
 
     explicit TrtLogger(Severity min = Severity::kWARNING) noexcept : min_severity_(min) {}
@@ -21,11 +21,21 @@ class TrtLogger : public nvinfer1::ILogger {
         if (severity > min_severity_) return;
         LogSeverity mapped = LogSeverity::kInfo;
         switch (severity) {
-            case Severity::kINTERNAL_ERROR: mapped = LogSeverity::kFatal;   break;
-            case Severity::kERROR:          mapped = LogSeverity::kError;   break;
-            case Severity::kWARNING:        mapped = LogSeverity::kWarning; break;
-            case Severity::kINFO:           mapped = LogSeverity::kInfo;    break;
-            case Severity::kVERBOSE:        mapped = LogSeverity::kVerbose; break;
+            case Severity::kINTERNAL_ERROR:
+                mapped = LogSeverity::kFatal;
+                break;
+            case Severity::kERROR:
+                mapped = LogSeverity::kError;
+                break;
+            case Severity::kWARNING:
+                mapped = LogSeverity::kWarning;
+                break;
+            case Severity::kINFO:
+                mapped = LogSeverity::kInfo;
+                break;
+            case Severity::kVERBOSE:
+                mapped = LogSeverity::kVerbose;
+                break;
         }
         const std::string prefixed = std::string("[TRT] ") + (msg ? msg : "");
         log_message(mapped, prefixed.c_str());
@@ -34,7 +44,7 @@ class TrtLogger : public nvinfer1::ILogger {
     void set_min_severity(Severity s) noexcept { min_severity_ = s; }
     Severity min_severity() const noexcept { return min_severity_; }
 
-   private:
+ private:
     Severity min_severity_;
 };
 

@@ -21,11 +21,17 @@ inline const char* next_value(int argc, char** argv, int& i, std::string_view fl
 }
 
 inline int parse_int(const char* s, std::string_view flag) {
-    try { return std::stoi(s); }
-    catch (...) { throw std::runtime_error("invalid integer for " + std::string(flag)); }
+    try {
+        return std::stoi(s);
+    } catch (...) {
+        throw std::runtime_error("invalid integer for " + std::string(flag));
+    }
 }
 
 inline float parse_float(const char* s, std::string_view flag) {
-    try { return std::stof(s); }
-    catch (...) { throw std::runtime_error("invalid float for " + std::string(flag)); }
+    try {
+        return std::stof(s);
+    } catch (...) {
+        throw std::runtime_error("invalid float for " + std::string(flag));
+    }
 }

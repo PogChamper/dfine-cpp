@@ -24,8 +24,8 @@ inline float sigmoid(float x) noexcept {
 // matches the Python reference, which sorts by probability.
 struct Candidate {
     float logit;
-    int   query;
-    int   cls;
+    int query;
+    int cls;
 };
 
 }  // namespace
@@ -60,10 +60,9 @@ Detections decode_detections(const float* logits, const float* boxes, int img_w,
         }
     }
 
-    std::partial_sort(cand.begin(), cand.begin() + K, cand.end(),
-                      [](const Candidate& a, const Candidate& b) noexcept {
-                          return a.logit > b.logit;
-                      });
+    std::partial_sort(
+        cand.begin(), cand.begin() + K, cand.end(),
+        [](const Candidate& a, const Candidate& b) noexcept { return a.logit > b.logit; });
 
     const float W = static_cast<float>(img_w);
     const float H = static_cast<float>(img_h);
@@ -78,12 +77,12 @@ Detections decode_detections(const float* logits, const float* boxes, int img_w,
         const float cx = db[0], cy = db[1], w = db[2], h = db[3];
 
         Detection d;
-        d.box.x1   = (cx - 0.5f * w) * W;
-        d.box.y1   = (cy - 0.5f * h) * H;
-        d.box.x2   = (cx + 0.5f * w) * W;
-        d.box.y2   = (cy + 0.5f * h) * H;
+        d.box.x1 = (cx - 0.5f * w) * W;
+        d.box.y1 = (cy - 0.5f * h) * H;
+        d.box.x2 = (cx + 0.5f * w) * W;
+        d.box.y2 = (cy + 0.5f * h) * H;
         d.class_id = cn.cls;
-        d.score    = score;
+        d.score = score;
         out.push_back(d);
     }
     return out;

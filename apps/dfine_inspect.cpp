@@ -11,13 +11,13 @@
 #include <vector>
 
 #if NV_TENSORRT_MAJOR < 10
-#  error "D-FINE-cpp requires TensorRT >= 10.0 (tensor-name I/O API)."
+#error "D-FINE-cpp requires TensorRT >= 10.0 (tensor-name I/O API)."
 #endif
 
 namespace {
 
 class StderrLogger : public nvinfer1::ILogger {
-   public:
+ public:
     void log(Severity severity, const char* msg) noexcept override {
         if (severity <= Severity::kWARNING) std::cerr << "[TRT] " << msg << '\n';
     }
@@ -25,13 +25,20 @@ class StderrLogger : public nvinfer1::ILogger {
 
 const char* dtype_name(nvinfer1::DataType d) {
     switch (d) {
-        case nvinfer1::DataType::kFLOAT: return "float32";
-        case nvinfer1::DataType::kHALF:  return "float16";
-        case nvinfer1::DataType::kINT8:  return "int8";
-        case nvinfer1::DataType::kINT32: return "int32";
-        case nvinfer1::DataType::kINT64: return "int64";
-        case nvinfer1::DataType::kBOOL:  return "bool";
-        default:                         return "other";
+        case nvinfer1::DataType::kFLOAT:
+            return "float32";
+        case nvinfer1::DataType::kHALF:
+            return "float16";
+        case nvinfer1::DataType::kINT8:
+            return "int8";
+        case nvinfer1::DataType::kINT32:
+            return "int32";
+        case nvinfer1::DataType::kINT64:
+            return "int64";
+        case nvinfer1::DataType::kBOOL:
+            return "bool";
+        default:
+            return "other";
     }
 }
 
@@ -62,7 +69,8 @@ int main(int argc, char** argv) {
         StderrLogger logger;
         std::cout << "engine: " << argv[1] << "\n"
                   << "TensorRT runtime: " << getInferLibVersion() << " (header "
-                  << NV_TENSORRT_MAJOR << "." << NV_TENSORRT_MINOR << "." << NV_TENSORRT_PATCH << ")\n";
+                  << NV_TENSORRT_MAJOR << "." << NV_TENSORRT_MINOR << "." << NV_TENSORRT_PATCH
+                  << ")\n";
 
         const std::vector<char> blob = read_file(argv[1]);
         std::unique_ptr<nvinfer1::IRuntime> runtime{nvinfer1::createInferRuntime(logger)};

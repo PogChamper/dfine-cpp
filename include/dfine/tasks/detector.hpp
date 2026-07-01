@@ -19,7 +19,7 @@ struct DetectorOptions {
     // if capture fails (e.g. data-dependent internal shapes) or outputs aren't FP32.
     // Best for fixed-resolution, steady-batch streaming.
     bool use_cuda_graph{false};
-    int  graph_warmup_iters{3};  // full enqueue cycles before capture (TRT needs >=2)
+    int graph_warmup_iters{3};  // full enqueue cycles before capture (TRT needs >=2)
 
     // Opt-in GPU-side decode (Zero-D2H): run sigmoid/top-k/threshold/box-decode as
     // CUDA kernels reading the engine outputs on-device, so only the survivors cross
@@ -51,9 +51,9 @@ struct DetectorOptions {
 // size. src_w/src_h bound the LARGEST source frame the frozen detector will accept —
 // a larger frame after freeze() throws instead of allocating on the hot path.
 struct FreezeSpec {
-    int  batch{0};
-    int  src_w{0};
-    int  src_h{0};
+    int batch{0};
+    int src_w{0};
+    int src_h{0};
     bool src_is_bgr{false};  // channel order the full-pipeline graph is captured for
 };
 
@@ -66,18 +66,18 @@ struct FreezeSpec {
 //
 // Thread safety: not thread-safe. Use one instance per thread.
 class DFineDetector {
-   public:
+ public:
     // Load engine + sidecar `<engine_path>.json`.
     explicit DFineDetector(const std::filesystem::path& engine_path,
                            const DetectorOptions& opts = {});
 
     // Load engine with an explicit sidecar path.
-    DFineDetector(const std::filesystem::path& engine_path,
-                  const std::filesystem::path& meta_path, const DetectorOptions& opts = {});
+    DFineDetector(const std::filesystem::path& engine_path, const std::filesystem::path& meta_path,
+                  const DetectorOptions& opts = {});
 
     ~DFineDetector();
 
-    DFineDetector(const DFineDetector&)            = delete;
+    DFineDetector(const DFineDetector&) = delete;
     DFineDetector& operator=(const DFineDetector&) = delete;
     DFineDetector(DFineDetector&&) noexcept;
     DFineDetector& operator=(DFineDetector&&) noexcept;
@@ -89,7 +89,7 @@ class DFineDetector {
     // Batch detect. Requires an engine built with max_batch >= images.size().
     // results[i] holds the detections for images[i].
     [[nodiscard]] std::vector<Detections> detect_batch(const std::vector<ImageU8>& images,
-                                                        float threshold = -1.0f);
+                                                       float threshold = -1.0f);
 
     // Freeze the memory footprint: warm every grow-only buffer to peak (at `batch`,
     // default the engine max), then lock so the steady-state path performs no device
@@ -119,17 +119,17 @@ class DFineDetector {
     // fixed-resolution pipeline should show this equal to its frame count).
     [[nodiscard]] std::uint64_t full_graph_replays() const noexcept;
 
-    [[nodiscard]] const std::string& variant()     const noexcept;
-    [[nodiscard]] int                input_h()     const noexcept;
-    [[nodiscard]] int                input_w()     const noexcept;
-    [[nodiscard]] int                num_queries() const noexcept;
-    [[nodiscard]] int                num_classes() const noexcept;
+    [[nodiscard]] const std::string& variant() const noexcept;
+    [[nodiscard]] int input_h() const noexcept;
+    [[nodiscard]] int input_w() const noexcept;
+    [[nodiscard]] int num_queries() const noexcept;
+    [[nodiscard]] int num_classes() const noexcept;
     // 1 for a static engine; the profile max for a dynamic engine; 0 if dynamic
     // but the max is unknown (no/partial sidecar).
-    [[nodiscard]] int                max_batch()   const noexcept;
+    [[nodiscard]] int max_batch() const noexcept;
 
     struct Timings {
-        double preprocess_ms{0};   // merged into infer_ms (async on the stream)
+        double preprocess_ms{0};  // merged into infer_ms (async on the stream)
         double infer_ms{0};
         double postprocess_ms{0};
         double total_ms{0};
@@ -149,12 +149,12 @@ class DFineDetector {
     };
     [[nodiscard]] const Timings& last_timings() const noexcept;
 
-   private:
+ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 
-    void init_(const std::filesystem::path& engine_path,
-               const std::filesystem::path& meta_path, const DetectorOptions& opts);
+    void init_(const std::filesystem::path& engine_path, const std::filesystem::path& meta_path,
+               const DetectorOptions& opts);
 };
 
 }  // namespace dfine

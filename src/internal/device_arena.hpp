@@ -29,13 +29,13 @@
 namespace dfine {
 
 class DeviceArena {
-   public:
+ public:
     enum class Policy { kWarn, kThrow };  // never abort() in a library
     enum class Kind { kDevice, kHost };   // cudaMalloc vs cudaMallocHost (pinned)
 
     explicit DeviceArena(Kind kind = Kind::kDevice) noexcept : kind_(kind) {}
     ~DeviceArena() { free_(); }
-    DeviceArena(const DeviceArena&)            = delete;
+    DeviceArena(const DeviceArena&) = delete;
     DeviceArena& operator=(const DeviceArena&) = delete;
 
     // Reserve a `bytes` slab (aligned) and return its byte offset. Valid to
@@ -53,10 +53,11 @@ class DeviceArena {
             return align_up(high_water_, align);  // kWarn: hand out an UNBACKED offset
         }
         if (committed_) {
-            throw std::runtime_error("dfine: DeviceArena::sub after commit (reserve before commit)");
+            throw std::runtime_error(
+                "dfine: DeviceArena::sub after commit (reserve before commit)");
         }
         const std::size_t off = align_up(high_water_, align);
-        high_water_           = off + bytes;
+        high_water_ = off + bytes;
         return off;
     }
 
@@ -64,7 +65,7 @@ class DeviceArena {
     void commit() {
         if (committed_) return;
         committed_ = true;
-        capacity_  = high_water_;
+        capacity_ = high_water_;
         if (capacity_ == 0) return;
         void* p = nullptr;
         if (kind_ == Kind::kDevice) {
@@ -86,13 +87,13 @@ class DeviceArena {
         return reinterpret_cast<T*>(base_ + offset);
     }
 
-    [[nodiscard]] void*       base()       const noexcept { return base_; }
+    [[nodiscard]] void* base() const noexcept { return base_; }
     [[nodiscard]] std::size_t high_water() const noexcept { return high_water_; }
-    [[nodiscard]] std::size_t capacity()   const noexcept { return capacity_; }
-    [[nodiscard]] bool        committed()  const noexcept { return committed_; }
-    [[nodiscard]] bool        locked()     const noexcept { return locked_; }
+    [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
+    [[nodiscard]] bool committed() const noexcept { return committed_; }
+    [[nodiscard]] bool locked() const noexcept { return locked_; }
 
-   private:
+ private:
     static std::size_t align_up(std::size_t x, std::size_t a) noexcept {
         return a == 0 ? x : (x + a - 1) / a * a;
     }
@@ -106,13 +107,13 @@ class DeviceArena {
         base_ = nullptr;
     }
 
-    Kind          kind_;
+    Kind kind_;
     std::uint8_t* base_{nullptr};
-    std::size_t   high_water_{0};
-    std::size_t   capacity_{0};
-    bool          committed_{false};
-    bool          locked_{false};
-    Policy        policy_{Policy::kThrow};
+    std::size_t high_water_{0};
+    std::size_t capacity_{0};
+    bool committed_{false};
+    bool locked_{false};
+    Policy policy_{Policy::kThrow};
 };
 
 }  // namespace dfine

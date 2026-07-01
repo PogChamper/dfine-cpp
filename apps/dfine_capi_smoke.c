@@ -34,7 +34,7 @@ static void check(int cond, const char* what) {
 
 /* Fill a freshly malloc'd HWC RGB buffer with a flat gray value. */
 static uint8_t* make_gray(int w, int h, int value) {
-    size_t   n   = (size_t)w * (size_t)h * 3u;
+    size_t n = (size_t)w * (size_t)h * 3u;
     uint8_t* buf = (uint8_t*)malloc(n);
     if (buf) memset(buf, value, n);
     return buf;
@@ -65,8 +65,7 @@ static void run_selftests(void) {
     check(dfine_detector_max_batch(NULL) == 0, "max_batch(NULL) == 0");
 
     /* detect on NULL detector -> NULL + error. */
-    check(dfine_detector_detect(NULL, NULL, 0, 0, 0, 3, 0, 0.5f) == NULL,
-          "detect(NULL) -> NULL");
+    check(dfine_detector_detect(NULL, NULL, 0, 0, 0, 3, 0, 0.5f) == NULL, "detect(NULL) -> NULL");
     check(dfine_detector_detect_batch(NULL, NULL, 0, 0.5f) == NULL, "detect_batch(NULL) -> NULL");
 
     /* free / destroy on NULL are no-ops. */
@@ -81,7 +80,7 @@ static void run_engine_path(const char* engine, const char* meta, float threshol
 
     dfine_options_t opts;
     memset(&opts, 0, sizeof opts);
-    opts.threshold      = threshold;
+    opts.threshold = threshold;
     opts.use_cuda_graph = use_graph;
 
     dfine_detector_t* det = dfine_detector_create_ex(engine, meta, &opts);
@@ -91,8 +90,8 @@ static void run_engine_path(const char* engine, const char* meta, float threshol
         return;
     }
 
-    int w  = dfine_detector_input_width(det);
-    int h  = dfine_detector_input_height(det);
+    int w = dfine_detector_input_width(det);
+    int h = dfine_detector_input_height(det);
     int mb = dfine_detector_max_batch(det);
     printf("  variant=%s input=%dx%d queries=%d classes=%d max_batch=%d\n",
            dfine_detector_variant(det), w, h, dfine_detector_num_queries(det),
@@ -101,7 +100,7 @@ static void run_engine_path(const char* engine, const char* meta, float threshol
     check(dfine_detector_num_classes(det) > 0, "engine reports >0 classes");
 
     /* Single detect on a synthetic gray image (packed and padded strides). */
-    int      iw = 640, ih = 480;
+    int iw = 640, ih = 480;
     uint8_t* img = make_gray(iw, ih, 128);
     check(img != NULL, "allocate synthetic image");
     if (img) {
@@ -127,12 +126,12 @@ static void run_engine_path(const char* engine, const char* meta, float threshol
         dfine_image_t batch[2];
         memset(batch, 0, sizeof batch);
         for (int i = 0; i < 2; ++i) {
-            batch[i].data     = img;
-            batch[i].width    = iw;
-            batch[i].height   = ih;
-            batch[i].step     = 0;
+            batch[i].data = img;
+            batch[i].width = iw;
+            batch[i].height = ih;
+            batch[i].step = 0;
             batch[i].channels = 3;
-            batch[i].is_bgr   = 0;
+            batch[i].is_bgr = 0;
         }
         dfine_detections_t** br = dfine_detector_detect_batch(det, batch, 2, 0.5f);
         check(br != NULL, "detect_batch(2) -> non-NULL");
@@ -150,10 +149,10 @@ static void run_engine_path(const char* engine, const char* meta, float threshol
 }
 
 int main(int argc, char** argv) {
-    const char* engine    = NULL;
-    const char* meta      = NULL;
-    float       threshold = 0.5f;
-    int         use_graph = 0;
+    const char* engine = NULL;
+    const char* meta = NULL;
+    float threshold = 0.5f;
+    int use_graph = 0;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {

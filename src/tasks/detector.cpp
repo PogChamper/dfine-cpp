@@ -37,12 +37,12 @@ struct DFineDetector::Impl {
 
     // Declared first so it is destroyed LAST (after `session` and its context): TRT
     // requires user-managed device memory to outlive the execution context.
-    DevPtr                             act_mem_;  // TRT activation block (own_device_memory)
+    DevPtr act_mem_;  // TRT activation block (own_device_memory)
 
-    TrtSession                         session;
-    EngineMeta                         meta;
+    TrtSession session;
+    EngineMeta meta;
     std::unique_ptr<ImagePreprocessor> preprocessor;
-    DetectorOptions                    opts;
+    DetectorOptions opts;
 
     std::string input_name;
     const BindingInfo* b_logits{nullptr};
@@ -52,13 +52,13 @@ struct DFineDetector::Impl {
     int in_h_{640};
     int in_w_{640};
     bool input_dynamic_{false};  // batch axis is dynamic (-1)
-    int  max_batch_{1};          // enforced upper bound for detect_batch
+    int max_batch_{1};           // enforced upper bound for detect_batch
 
     std::vector<float> h_logits;
     std::vector<float> h_boxes;
 
     PostprocessParams pp;
-    Timings           timings;
+    Timings timings;
 
     // --- CUDA-graph replay state (opt-in via DetectorOptions.use_cuda_graph) ------
     // One instantiated graph per batch size, each capturing enqueueV3 + the output
@@ -73,34 +73,34 @@ struct DFineDetector::Impl {
         void* p_boxes{nullptr};
     };
     std::unordered_map<int, GraphEntry> graphs_;
-    HostPtr     pinned_logits_;
-    HostPtr     pinned_boxes_;
+    HostPtr pinned_logits_;
+    HostPtr pinned_boxes_;
     std::size_t pinned_logits_cap_{0};
     std::size_t pinned_boxes_cap_{0};
-    int  graph_ctx_batch_{-1};      // batch the context is configured + flushed for
-    bool graph_supported_{false};   // FP32 outputs and no aux streams
-    bool graph_disabled_{false};    // a capture attempt failed unrecoverably; stop trying
+    int graph_ctx_batch_{-1};      // batch the context is configured + flushed for
+    bool graph_supported_{false};  // FP32 outputs and no aux streams
+    bool graph_disabled_{false};   // a capture attempt failed unrecoverably; stop trying
     bool graph_warned_{false};
 
     // --- GPU decode (Zero-D2H) state (opt-in via DetectorOptions.gpu_decode) -------
     // Kernels read the engine's FP32 logits/boxes on-device and emit only the compact
     // survivors ([B*N] DetectionGPU + counts) — no full-logits D2H, no CPU decode.
-    bool             gpu_decode_supported_{false};  // FP32 outputs
-    bool             gpu_decode_warned_{false};
-    GpuDecodeScratch gdec_;                          // raw device pointers into gdec_arena_
-    std::unique_ptr<DeviceArena> gdec_arena_;         // one block backing all 9 scratch slabs
-    int    gdec_cap_batch_{0};                       // buffers sized for this many images
-    std::vector<DetectionGPU> gdec_host_out_;        // D2H compact results [cap*N]
-    std::vector<uint32_t>     gdec_host_counts_;     // survivors per image [cap]
-    std::vector<float2>       gdec_scale_host_;       // per-image (origW, origH) staging
+    bool gpu_decode_supported_{false};  // FP32 outputs
+    bool gpu_decode_warned_{false};
+    GpuDecodeScratch gdec_;                    // raw device pointers into gdec_arena_
+    std::unique_ptr<DeviceArena> gdec_arena_;  // one block backing all 9 scratch slabs
+    int gdec_cap_batch_{0};                    // buffers sized for this many images
+    std::vector<DetectionGPU> gdec_host_out_;  // D2H compact results [cap*N]
+    std::vector<uint32_t> gdec_host_counts_;   // survivors per image [cap]
+    std::vector<float2> gdec_scale_host_;      // per-image (origW, origH) staging
 
     // --- Frozen-memory contract (P2) ----------------------------------------------
     // (act_mem_ is declared at the top of Impl for destruction ordering.)
-    bool   frozen_{false};       // freeze() called: no further device allocation allowed
-    int    frozen_batch_{0};     // resolved config freeze() locked (re-freeze must match)
-    int    frozen_src_w_{0};
-    int    frozen_src_h_{0};
-    bool   frozen_bgr_{false};
+    bool frozen_{false};   // freeze() called: no further device allocation allowed
+    int frozen_batch_{0};  // resolved config freeze() locked (re-freeze must match)
+    int frozen_src_w_{0};
+    int frozen_src_h_{0};
+    bool frozen_bgr_{false};
 
     // --- Full-pipeline graph (P3) state (opt-in via full_pipeline_graph) -----------
     // One graph spanning H2D(frames) -> preprocess -> enqueueV3 -> GPU decode ->
@@ -110,20 +110,20 @@ struct DFineDetector::Impl {
     // lifetime. Replays are gated on the exact frozen configuration (batch, source
     // size, channel order); anything else falls back to the split gpu_decode path.
     CudaGraphExec full_exec_;
-    int           full_batch_{0};
-    int           full_src_w_{0};
-    int           full_src_h_{0};
-    bool          full_is_bgr_{false};
-    bool          full_ready_{false};
+    int full_batch_{0};
+    int full_src_w_{0};
+    int full_src_h_{0};
+    bool full_is_bgr_{false};
+    bool full_ready_{false};
     std::uint64_t full_replays_{0};
-    std::size_t   frame_slot_bytes_{0};  // packed src_h * src_w * 3; one slot per batch image
-    HostPtr       h_frames_;             // pinned input slab [full_batch_ slots]; host packs here
-    DevPtr        d_frames_;             // device twin; the graph H2Ds slot-by-slot from h_frames_
-    HostPtr       h_survivors_;          // pinned [full_batch_ * N] DetectionGPU (graph D2H target)
-    HostPtr       h_counts_;             // pinned [full_batch_] uint32_t (graph D2H target)
-    HostPtr       h_scale_;              // pinned [full_batch_] float2, constant (src_w, src_h)
-    HostPtr       h_thr_;                // mapped pinned float: live threshold (see decode_gpu.cuh)
-    float*        d_thr_{nullptr};       // device alias of h_thr_
+    std::size_t frame_slot_bytes_{0};  // packed src_h * src_w * 3; one slot per batch image
+    HostPtr h_frames_;                 // pinned input slab [full_batch_ slots]; host packs here
+    DevPtr d_frames_;                  // device twin; the graph H2Ds slot-by-slot from h_frames_
+    HostPtr h_survivors_;              // pinned [full_batch_ * N] DetectionGPU (graph D2H target)
+    HostPtr h_counts_;                 // pinned [full_batch_] uint32_t (graph D2H target)
+    HostPtr h_scale_;                  // pinned [full_batch_] float2, constant (src_w, src_h)
+    HostPtr h_thr_;                    // mapped pinned float: live threshold (see decode_gpu.cuh)
+    float* d_thr_{nullptr};            // device alias of h_thr_
 
     Impl(const std::filesystem::path& engine_path, const std::filesystem::path& meta_path,
          const DetectorOptions& options)
@@ -159,7 +159,8 @@ struct DFineDetector::Impl {
         // The CUDA preprocess writes float32 straight into the input device buffer,
         // so a non-FP32 input binding would be a size mismatch / out-of-bounds write.
         if (in_b->dtype != nvinfer1::DataType::kFLOAT) {
-            throw std::runtime_error("dfine: input tensor '" + input_name +
+            throw std::runtime_error(
+                "dfine: input tensor '" + input_name +
                 "' is not FP32; rebuild the engine with an FP32 (fp32:chw) input.");
         }
 
@@ -191,8 +192,8 @@ struct DFineDetector::Impl {
 
         pp.num_queries = N;
         pp.num_classes = C;
-        pp.topk        = N;
-        pp.threshold   = opts.threshold;
+        pp.topk = N;
+        pp.threshold = opts.threshold;
 
         h_logits.resize(static_cast<std::size_t>(N) * C);
         h_boxes.resize(static_cast<std::size_t>(N) * 4);
@@ -233,10 +234,10 @@ struct DFineDetector::Impl {
     // (the box tensor is the output whose last dim == 4).
     void resolve_outputs_() {
         b_logits = session.find("logits");
-        b_boxes  = session.find("boxes");
+        b_boxes = session.find("boxes");
         if (meta.output_names.size() >= 2) {
             if (!b_logits) b_logits = session.find(meta.output_names[0]);
-            if (!b_boxes)  b_boxes  = session.find(meta.output_names[1]);
+            if (!b_boxes) b_boxes = session.find(meta.output_names[1]);
         }
         if (!b_logits || !b_boxes) {
             const auto& outs = session.output_indices();
@@ -250,17 +251,22 @@ struct DFineDetector::Impl {
             // resolved by shape — fail loudly rather than guess either tensor.
             if (outs.size() != 2) {
                 throw std::runtime_error(
-                    "dfine: engine has " + std::to_string(outs.size()) + " outputs and no "
+                    "dfine: engine has " + std::to_string(outs.size()) +
+                    " outputs and no "
                     "'logits'/'boxes' tensor names; name the tensors at export or provide "
                     "the .json sidecar with output_names");
             }
             const BindingInfo* box_cand = nullptr;
-            const BindingInfo* other    = nullptr;
+            const BindingInfo* other = nullptr;
             int n_box = 0;
             for (int oi : outs) {
                 const BindingInfo* x = &session.bindings()[oi];
-                if (last_dim(x) == 4) { box_cand = x; ++n_box; }
-                else                  { other = x; }
+                if (last_dim(x) == 4) {
+                    box_cand = x;
+                    ++n_box;
+                } else {
+                    other = x;
+                }
             }
             if (n_box != 1 || !other) {
                 throw std::runtime_error(
@@ -268,7 +274,7 @@ struct DFineDetector::Impl {
                     "model has two [*, N, 4] outputs); name the tensors 'logits'/'boxes' at "
                     "export or provide the .json sidecar with output_names");
             }
-            b_boxes  = box_cand;
+            b_boxes = box_cand;
             b_logits = other;
         }
     }
@@ -292,13 +298,19 @@ struct DFineDetector::Impl {
     bool ensure_pinned_(std::size_t logits_bytes, std::size_t boxes_bytes) {
         if (pinned_logits_cap_ < logits_bytes) {
             void* p = nullptr;
-            if (cudaMallocHost(&p, logits_bytes) != cudaSuccess) { cudaGetLastError(); return false; }
+            if (cudaMallocHost(&p, logits_bytes) != cudaSuccess) {
+                cudaGetLastError();
+                return false;
+            }
             pinned_logits_.reset(p);
             pinned_logits_cap_ = logits_bytes;
         }
         if (pinned_boxes_cap_ < boxes_bytes) {
             void* p = nullptr;
-            if (cudaMallocHost(&p, boxes_bytes) != cudaSuccess) { cudaGetLastError(); return false; }
+            if (cudaMallocHost(&p, boxes_bytes) != cudaSuccess) {
+                cudaGetLastError();
+                return false;
+            }
             pinned_boxes_.reset(p);
             pinned_boxes_cap_ = boxes_bytes;
         }
@@ -308,11 +320,10 @@ struct DFineDetector::Impl {
     // A cached graph is stale once any baked device/host address moves (a grow-only
     // buffer realloc after a larger batch was seen). Cheap 5-pointer check per replay.
     bool graph_stale_(const GraphEntry& g) const {
-        return g.d_input  != session.device_buffer(input_name) ||
+        return g.d_input != session.device_buffer(input_name) ||
                g.d_logits != session.device_buffer(b_logits->name) ||
-               g.d_boxes  != session.device_buffer(b_boxes->name) ||
-               g.p_logits != pinned_logits_.get() ||
-               g.p_boxes  != pinned_boxes_.get();
+               g.d_boxes != session.device_buffer(b_boxes->name) ||
+               g.p_logits != pinned_logits_.get() || g.p_boxes != pinned_boxes_.get();
     }
 
     // Capture enqueueV3 + output D2H for the current (already-set, already-flushed)
@@ -320,15 +331,15 @@ struct DFineDetector::Impl {
     // the context usable for the plain enqueueV3 path. H2D/preprocess stay outside.
     bool capture_graph_(int B) {
         const std::size_t logits_bytes = static_cast<std::size_t>(B) * N * C * sizeof(float);
-        const std::size_t boxes_bytes  = static_cast<std::size_t>(B) * N * 4 * sizeof(float);
+        const std::size_t boxes_bytes = static_cast<std::size_t>(B) * N * 4 * sizeof(float);
         // No-throw on any CUDA failure below: a false return lets try_graph_infer_ set
         // graph_disabled_ and run_batch degrade to the plain enqueueV3 path, which
         // reuses the session's own pinned buffers and allocates nothing new.
         if (!ensure_pinned_(logits_bytes, boxes_bytes)) return false;
 
-        void* d_input  = session.device_buffer(input_name);
+        void* d_input = session.device_buffer(input_name);
         void* d_logits = session.device_buffer(b_logits->name);
-        void* d_boxes  = session.device_buffer(b_boxes->name);
+        void* d_boxes = session.device_buffer(b_boxes->name);
         cudaStream_t stream = session.stream();
         auto* ctx = session.context();
 
@@ -341,21 +352,24 @@ struct DFineDetector::Impl {
             return cudaMemcpyAsync(dst, src, n, cudaMemcpyDeviceToHost, stream) == cudaSuccess;
         };
         for (int w = 0; w < warm; ++w) {
-            if (!ctx->enqueueV3(stream) ||
-                !d2h(pinned_logits_.get(), d_logits, logits_bytes) ||
+            if (!ctx->enqueueV3(stream) || !d2h(pinned_logits_.get(), d_logits, logits_bytes) ||
                 !d2h(pinned_boxes_.get(), d_boxes, boxes_bytes)) {
                 cudaGetLastError();
                 return false;
             }
         }
-        if (cudaStreamSynchronize(stream) != cudaSuccess) { cudaGetLastError(); return false; }
+        if (cudaStreamSynchronize(stream) != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
 
         if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
             cudaGetLastError();  // clear sticky error
             return false;
         }
         const bool enq_ok = ctx->enqueueV3(stream);
-        cudaMemcpyAsync(pinned_logits_.get(), d_logits, logits_bytes, cudaMemcpyDeviceToHost, stream);
+        cudaMemcpyAsync(pinned_logits_.get(), d_logits, logits_bytes, cudaMemcpyDeviceToHost,
+                        stream);
         cudaMemcpyAsync(pinned_boxes_.get(), d_boxes, boxes_bytes, cudaMemcpyDeviceToHost, stream);
         cudaGraph_t graph_raw = nullptr;
         const cudaError_t end_err = cudaStreamEndCapture(stream, &graph_raw);
@@ -373,8 +387,11 @@ struct DFineDetector::Impl {
         }
         GraphEntry e;
         e.exec = CudaGraphExec(exec_raw);
-        e.d_input = d_input; e.d_logits = d_logits; e.d_boxes = d_boxes;
-        e.p_logits = pinned_logits_.get(); e.p_boxes = pinned_boxes_.get();
+        e.d_input = d_input;
+        e.d_logits = d_logits;
+        e.d_boxes = d_boxes;
+        e.p_logits = pinned_logits_.get();
+        e.p_boxes = pinned_boxes_.get();
         graphs_[B] = std::move(e);
         return true;
     }
@@ -393,7 +410,10 @@ struct DFineDetector::Impl {
             it = graphs_.end();
         }
         if (it == graphs_.end()) {
-            if (!capture_graph_(B)) { graph_disabled_ = true; return false; }
+            if (!capture_graph_(B)) {
+                graph_disabled_ = true;
+                return false;
+            }
             it = graphs_.find(B);
         }
 
@@ -403,14 +423,14 @@ struct DFineDetector::Impl {
         DFINE_CUDA_CHECK(cudaStreamSynchronize(session.stream()));
 
         const std::size_t logits_n = static_cast<std::size_t>(B) * N * C;
-        const std::size_t boxes_n  = static_cast<std::size_t>(B) * N * 4;
+        const std::size_t boxes_n = static_cast<std::size_t>(B) * N * 4;
         if (h_logits.size() < logits_n) h_logits.resize(logits_n);
-        if (h_boxes.size()  < boxes_n)  h_boxes.resize(boxes_n);
+        if (h_boxes.size() < boxes_n) h_boxes.resize(boxes_n);
         std::memcpy(h_logits.data(), it->second.p_logits, logits_n * sizeof(float));
-        std::memcpy(h_boxes.data(),  it->second.p_boxes,  boxes_n * sizeof(float));
+        std::memcpy(h_boxes.data(), it->second.p_boxes, boxes_n * sizeof(float));
         const auto td2 = std::chrono::steady_clock::now();
         dispatch_ms = ms_(td0, td1);
-        wait_ms     = ms_(td1, td2);  // sync + pinned->host copies (matches the plain path)
+        wait_ms = ms_(td1, td2);  // sync + pinned->host copies (matches the plain path)
         return true;
     }
 
@@ -423,30 +443,31 @@ struct DFineDetector::Impl {
                                      std::to_string(B) + " > frozen max " +
                                      std::to_string(gdec_cap_batch_));
         }
-        const int cap    = B > max_batch_ ? B : (max_batch_ > 0 ? max_batch_ : B);
+        const int cap = B > max_batch_ ? B : (max_batch_ > 0 ? max_batch_ : B);
         const int n_cand = N * C;
         // The GPU decode carries the candidate count (cap * n_cand) in 32-bit int
         // (kernel indices, grid dims, CUB num_items). Unreachable for D-FINE
         // (N*C=24000), but fail loudly rather than silently overflow on a huge engine.
         if (static_cast<long long>(cap) * n_cand > std::numeric_limits<int>::max()) {
-            throw std::runtime_error("dfine: gpu_decode candidate count (batch*queries*classes) "
-                                     "exceeds INT_MAX; reduce batch or disable gpu_decode");
+            throw std::runtime_error(
+                "dfine: gpu_decode candidate count (batch*queries*classes) "
+                "exceeds INT_MAX; reduce batch or disable gpu_decode");
         }
-        const auto        total     = static_cast<std::size_t>(cap) * n_cand;
+        const auto total = static_cast<std::size_t>(cap) * n_cand;
         const std::size_t cub_bytes = gpu_decode_temp_bytes(cap, n_cand);
 
         // Pack all nine scratch buffers into ONE device allocation. sub() offsets are
         // 256-byte aligned (safe for CUB temp + coalescing); commit() does one cudaMalloc.
-        auto       arena   = std::make_unique<DeviceArena>();
-        const auto o_keys  = arena->sub(total * sizeof(float));
-        const auto o_vals  = arena->sub(total * sizeof(uint32_t));
-        const auto o_ko    = arena->sub(total * sizeof(float));
-        const auto o_vo    = arena->sub(total * sizeof(uint32_t));
-        const auto o_seg   = arena->sub(static_cast<std::size_t>(cap + 1) * sizeof(int));
-        const auto o_out   = arena->sub(static_cast<std::size_t>(cap) * N * sizeof(DetectionGPU));
-        const auto o_cnt   = arena->sub(static_cast<std::size_t>(cap) * sizeof(uint32_t));
+        auto arena = std::make_unique<DeviceArena>();
+        const auto o_keys = arena->sub(total * sizeof(float));
+        const auto o_vals = arena->sub(total * sizeof(uint32_t));
+        const auto o_ko = arena->sub(total * sizeof(float));
+        const auto o_vo = arena->sub(total * sizeof(uint32_t));
+        const auto o_seg = arena->sub(static_cast<std::size_t>(cap + 1) * sizeof(int));
+        const auto o_out = arena->sub(static_cast<std::size_t>(cap) * N * sizeof(DetectionGPU));
+        const auto o_cnt = arena->sub(static_cast<std::size_t>(cap) * sizeof(uint32_t));
         const auto o_scale = arena->sub(static_cast<std::size_t>(cap) * sizeof(float2));
-        const auto o_temp  = arena->sub(cub_bytes);
+        const auto o_temp = arena->sub(cub_bytes);
         arena->commit();
 
         // Commit-last: run the only throwing setup (fill seg_off + sync) on LOCAL
@@ -454,17 +475,18 @@ struct DFineDetector::Impl {
         // gdec_arena_, and gdec_cap_batch_ all still reference the prior valid arena.
         int* seg = arena->at<int>(o_seg);
         gpu_decode_fill_segoff(seg, cap, n_cand, session.stream());
-        DFINE_CUDA_CHECK(cudaStreamSynchronize(session.stream()));  // seg_off ready before first use
+        DFINE_CUDA_CHECK(
+            cudaStreamSynchronize(session.stream()));  // seg_off ready before first use
 
-        gdec_.keys           = arena->at<float>(o_keys);
-        gdec_.vals           = arena->at<uint32_t>(o_vals);
-        gdec_.keys_out       = arena->at<float>(o_ko);
-        gdec_.vals_out       = arena->at<uint32_t>(o_vo);
-        gdec_.seg_off        = seg;
-        gdec_.out            = arena->at<DetectionGPU>(o_out);
-        gdec_.counts         = arena->at<uint32_t>(o_cnt);
-        gdec_.scale_wh       = arena->at<float2>(o_scale);
-        gdec_.cub_temp       = arena->at(o_temp);
+        gdec_.keys = arena->at<float>(o_keys);
+        gdec_.vals = arena->at<uint32_t>(o_vals);
+        gdec_.keys_out = arena->at<float>(o_ko);
+        gdec_.vals_out = arena->at<uint32_t>(o_vo);
+        gdec_.seg_off = seg;
+        gdec_.out = arena->at<DetectionGPU>(o_out);
+        gdec_.counts = arena->at<uint32_t>(o_cnt);
+        gdec_.scale_wh = arena->at<float2>(o_scale);
+        gdec_.cub_temp = arena->at(o_temp);
         gdec_.cub_temp_bytes = cub_bytes;
 
         gdec_arena_ = std::move(arena);  // frees the previous block (grow-only replacement)
@@ -493,15 +515,14 @@ struct DFineDetector::Impl {
     // leak into a later replay), enqueueV3, the GPU decode reading the live
     // threshold, and the survivor/count D2H into pinned buffers.
     bool enqueue_full_sequence_(int B) {
-        cudaStream_t stream  = session.stream();
-        auto*        d_input = static_cast<float*>(session.device_buffer(input_name));
-        auto*        h_slab  = static_cast<std::uint8_t*>(h_frames_.get());
-        auto*        d_slab  = static_cast<std::uint8_t*>(d_frames_.get());
+        cudaStream_t stream = session.stream();
+        auto* d_input = static_cast<float*>(session.device_buffer(input_name));
+        auto* h_slab = static_cast<std::uint8_t*>(h_frames_.get());
+        auto* d_slab = static_cast<std::uint8_t*>(d_frames_.get());
         const std::size_t single = static_cast<std::size_t>(3) * in_h_ * in_w_;
         for (int i = 0; i < B; ++i) {
             if (cudaMemcpyAsync(d_slab + i * frame_slot_bytes_, h_slab + i * frame_slot_bytes_,
-                                frame_slot_bytes_, cudaMemcpyHostToDevice,
-                                stream) != cudaSuccess) {
+                                frame_slot_bytes_, cudaMemcpyHostToDevice, stream) != cudaSuccess) {
                 return false;
             }
             launch_stretch_resize_normalize(stream, d_slab + i * frame_slot_bytes_, full_src_h_,
@@ -516,7 +537,7 @@ struct DFineDetector::Impl {
         }
         if (!session.context()->enqueueV3(stream)) return false;
         const auto* d_logits = static_cast<const float*>(session.device_buffer(b_logits->name));
-        const auto* d_boxes  = static_cast<const float*>(session.device_buffer(b_boxes->name));
+        const auto* d_boxes = static_cast<const float*>(session.device_buffer(b_boxes->name));
         gpu_decode_enqueue(d_logits, d_boxes, B, N, C, /*topk=*/N, /*threshold=*/0.0f, d_thr_,
                            gdec_, stream);
         if (cudaMemcpyAsync(h_survivors_.get(), gdec_.out,
@@ -543,7 +564,7 @@ struct DFineDetector::Impl {
         h_counts_.reset();
         h_scale_.reset();
         h_thr_.reset();
-        d_thr_            = nullptr;
+        d_thr_ = nullptr;
         frame_slot_bytes_ = 0;
     }
 
@@ -556,22 +577,25 @@ struct DFineDetector::Impl {
         // Any failure below (early return or throw) releases the partial state.
         struct ReleaseGuard {
             Impl* self;
-            bool  dismiss{false};
+            bool dismiss{false};
             ~ReleaseGuard() {
                 if (!dismiss) self->release_full_graph_state_();
             }
         } guard{this};
         try {
             cudaStream_t stream = session.stream();
-            frame_slot_bytes_   = static_cast<std::size_t>(full_src_h_) * full_src_w_ * 3;
-            const std::size_t slab_bytes  = static_cast<std::size_t>(B) * frame_slot_bytes_;
-            const std::size_t out_bytes   = static_cast<std::size_t>(B) * N * sizeof(DetectionGPU);
-            const std::size_t cnt_bytes   = static_cast<std::size_t>(B) * sizeof(uint32_t);
+            frame_slot_bytes_ = static_cast<std::size_t>(full_src_h_) * full_src_w_ * 3;
+            const std::size_t slab_bytes = static_cast<std::size_t>(B) * frame_slot_bytes_;
+            const std::size_t out_bytes = static_cast<std::size_t>(B) * N * sizeof(DetectionGPU);
+            const std::size_t cnt_bytes = static_cast<std::size_t>(B) * sizeof(uint32_t);
             const std::size_t scale_bytes = static_cast<std::size_t>(B) * sizeof(float2);
 
             auto pin = [](HostPtr& h, std::size_t bytes) {
                 void* p = nullptr;
-                if (cudaMallocHost(&p, bytes) != cudaSuccess) { cudaGetLastError(); return false; }
+                if (cudaMallocHost(&p, bytes) != cudaSuccess) {
+                    cudaGetLastError();
+                    return false;
+                }
                 h.reset(p);
                 return true;
             };
@@ -580,7 +604,10 @@ struct DFineDetector::Impl {
                 return false;
             }
             void* p = nullptr;
-            if (cudaMalloc(&p, slab_bytes) != cudaSuccess) { cudaGetLastError(); return false; }
+            if (cudaMalloc(&p, slab_bytes) != cudaSuccess) {
+                cudaGetLastError();
+                return false;
+            }
             d_frames_.reset(p);
             // The live-threshold knob must be device-readable: mapped pinned memory.
             if (cudaHostAlloc(&p, sizeof(float), cudaHostAllocMapped) != cudaSuccess) {
@@ -610,7 +637,10 @@ struct DFineDetector::Impl {
             const int warm = opts.graph_warmup_iters < 2 ? 2 : opts.graph_warmup_iters;
             session.context()->setEnqueueEmitsProfile(false);
             for (int w = 0; w < warm; ++w) {
-                if (!enqueue_full_sequence_(B)) { cudaGetLastError(); return false; }
+                if (!enqueue_full_sequence_(B)) {
+                    cudaGetLastError();
+                    return false;
+                }
                 if (cudaStreamSynchronize(stream) != cudaSuccess) {
                     cudaGetLastError();
                     return false;
@@ -631,8 +661,8 @@ struct DFineDetector::Impl {
             } catch (...) {
                 seq_ok = false;
             }
-            cudaGraph_t       graph_raw = nullptr;
-            const cudaError_t end_err   = cudaStreamEndCapture(stream, &graph_raw);
+            cudaGraph_t graph_raw = nullptr;
+            const cudaError_t end_err = cudaStreamEndCapture(stream, &graph_raw);
             if (!seq_ok || end_err != cudaSuccess || graph_raw == nullptr) {
                 cudaGetLastError();
                 if (graph_raw) cudaGraphDestroy(graph_raw);
@@ -658,8 +688,8 @@ struct DFineDetector::Impl {
                 return false;
             }
 
-            full_batch_   = B;
-            full_ready_   = true;
+            full_batch_ = B;
+            full_ready_ = true;
             guard.dismiss = true;
             return true;
         } catch (...) {
@@ -674,18 +704,17 @@ struct DFineDetector::Impl {
     std::vector<Detections> run_full_graph_(const std::vector<ImageU8>& images, int B, float thr,
                                             std::chrono::steady_clock::time_point t0) {
         using Clock = std::chrono::steady_clock;
-        auto* slab  = static_cast<std::uint8_t*>(h_frames_.get());
+        auto* slab = static_cast<std::uint8_t*>(h_frames_.get());
         for (int i = 0; i < B; ++i) {
-            const ImageU8&    im         = images[static_cast<std::size_t>(i)];
+            const ImageU8& im = images[static_cast<std::size_t>(i)];
             const std::size_t packed_row = static_cast<std::size_t>(im.width) * 3;
-            std::uint8_t*     dst        = slab + static_cast<std::size_t>(i) * frame_slot_bytes_;
+            std::uint8_t* dst = slab + static_cast<std::size_t>(i) * frame_slot_bytes_;
             if (static_cast<std::size_t>(im.row_bytes()) == packed_row) {
                 std::memcpy(dst, im.data, frame_slot_bytes_);
             } else {
                 for (int r = 0; r < im.height; ++r) {
                     std::memcpy(dst + static_cast<std::size_t>(r) * packed_row,
-                                im.data + static_cast<std::size_t>(r) * im.row_bytes(),
-                                packed_row);
+                                im.data + static_cast<std::size_t>(r) * im.row_bytes(), packed_row);
                 }
             }
         }
@@ -699,23 +728,23 @@ struct DFineDetector::Impl {
         ++full_replays_;
 
         const auto* survivors = static_cast<const DetectionGPU*>(h_survivors_.get());
-        const auto* counts    = static_cast<const uint32_t*>(h_counts_.get());
+        const auto* counts = static_cast<const uint32_t*>(h_counts_.get());
         std::vector<Detections> results;
         results.reserve(static_cast<std::size_t>(B));
         for (int i = 0; i < B; ++i) {
-            const uint32_t      m    = counts[static_cast<std::size_t>(i)];
+            const uint32_t m = counts[static_cast<std::size_t>(i)];
             const DetectionGPU* base = survivors + static_cast<std::size_t>(i) * N;
-            Detections          dets;
+            Detections dets;
             dets.reserve(m);
             for (uint32_t k = 0; k < m; ++k) {
                 const DetectionGPU& g = base[k];
-                Detection           d;
-                d.box.x1   = g.x1;
-                d.box.y1   = g.y1;
-                d.box.x2   = g.x2;
-                d.box.y2   = g.y2;
+                Detection d;
+                d.box.x1 = g.x1;
+                d.box.y1 = g.y1;
+                d.box.x2 = g.x2;
+                d.box.y2 = g.y2;
                 d.class_id = g.class_id;
-                d.score    = g.score;
+                d.score = g.score;
                 dets.push_back(d);
             }
             results.push_back(std::move(dets));
@@ -725,14 +754,14 @@ struct DFineDetector::Impl {
         auto ms = [](auto a, auto b) {
             return std::chrono::duration<double, std::milli>(b - a).count();
         };
-        timings.preprocess_ms     = 0.0;
-        timings.infer_ms          = ms(t0, t1);
-        timings.postprocess_ms    = ms(t1, t2);
-        timings.total_ms          = ms(t0, t2);
+        timings.preprocess_ms = 0.0;
+        timings.infer_ms = ms(t0, t1);
+        timings.postprocess_ms = ms(t1, t2);
+        timings.total_ms = ms(t0, t2);
         timings.preprocess_cpu_ms = ms(t0, tp);
-        timings.dispatch_ms       = ms(tp, td);
-        timings.wait_ms           = ms(td, t1);
-        timings.decode_host_ms    = ms(t1, t2);
+        timings.dispatch_ms = ms(tp, td);
+        timings.wait_ms = ms(td, t1);
+        timings.decode_host_ms = ms(t1, t2);
         return results;
     }
 
@@ -741,7 +770,7 @@ struct DFineDetector::Impl {
     // input size), optionally capture the full-pipeline graph (P3), then lock:
     // no further device allocation.
     void freeze_(const FreezeSpec& spec) {
-        const int b  = spec.batch > 0 ? spec.batch : (max_batch_ > 0 ? max_batch_ : 1);
+        const int b = spec.batch > 0 ? spec.batch : (max_batch_ > 0 ? max_batch_ : 1);
         const int sw = spec.src_w > 0 ? spec.src_w : in_w_;
         const int sh = spec.src_h > 0 ? spec.src_h : in_h_;
         if (frozen_) {
@@ -759,13 +788,13 @@ struct DFineDetector::Impl {
         }
         const std::size_t px = static_cast<std::size_t>(sh) * sw * 3;
         std::vector<std::uint8_t> gray(px, 114);
-        std::vector<ImageU8>      imgs(static_cast<std::size_t>(b));
+        std::vector<ImageU8> imgs(static_cast<std::size_t>(b));
         for (auto& im : imgs) {
-            im.data     = gray.data();
-            im.height   = sh;
-            im.width    = sw;
+            im.data = gray.data();
+            im.height = sh;
+            im.width = sw;
             im.channels = 3;
-            im.is_bgr   = spec.src_is_bgr;
+            im.is_bgr = spec.src_is_bgr;
         }
         // Warm enough to settle every grow-only allocation. M2.2 CUDA-graph capture
         // is deferred to the 2nd enqueue at a batch (the 1st flushes the shape), and
@@ -776,8 +805,8 @@ struct DFineDetector::Impl {
         for (int w = 0; w < warm; ++w) (void)run_batch(imgs, opts.threshold);
 
         if (opts.full_pipeline_graph) {
-            full_src_w_  = sw;
-            full_src_h_  = sh;
+            full_src_w_ = sw;
+            full_src_h_ = sh;
             full_is_bgr_ = spec.src_is_bgr;
             if (!gpu_decode_supported_ || session.num_aux_streams() != 0) {
                 log_message(LogSeverity::kWarning,
@@ -791,8 +820,8 @@ struct DFineDetector::Impl {
             }
         }
 
-        session.freeze();                        // binding grow -> throw hereafter
-        frozen_ = true;                          // gpu-decode grow -> throw hereafter
+        session.freeze();  // binding grow -> throw hereafter
+        frozen_ = true;    // gpu-decode grow -> throw hereafter
         if (gdec_arena_) gdec_arena_->lock();
         // Only a spec that explicitly bounds the source size locks the preprocessor
         // staging. freeze(int)/freeze({batch}) keeps the legacy P2 behavior — an
@@ -804,7 +833,7 @@ struct DFineDetector::Impl {
         frozen_batch_ = b;
         frozen_src_w_ = sw;
         frozen_src_h_ = sh;
-        frozen_bgr_   = spec.src_is_bgr;
+        frozen_bgr_ = spec.src_is_bgr;
     }
 
     // Zero-D2H path: enqueueV3 -> on-device decode -> D2H only the survivors.
@@ -828,7 +857,7 @@ struct DFineDetector::Impl {
                                          cudaMemcpyHostToDevice, stream));
 
         const auto* d_logits = static_cast<const float*>(session.device_buffer(b_logits->name));
-        const auto* d_boxes  = static_cast<const float*>(session.device_buffer(b_boxes->name));
+        const auto* d_boxes = static_cast<const float*>(session.device_buffer(b_boxes->name));
         gpu_decode_enqueue(d_logits, d_boxes, B, N, C, /*topk=*/N, thr, /*threshold_dev=*/nullptr,
                            gdec_, stream);
 
@@ -846,19 +875,19 @@ struct DFineDetector::Impl {
         std::vector<Detections> results;
         results.reserve(static_cast<std::size_t>(B));
         for (int i = 0; i < B; ++i) {
-            const uint32_t      m    = gdec_host_counts_[static_cast<std::size_t>(i)];
+            const uint32_t m = gdec_host_counts_[static_cast<std::size_t>(i)];
             const DetectionGPU* base = gdec_host_out_.data() + static_cast<std::size_t>(i) * N;
-            Detections          dets;
+            Detections dets;
             dets.reserve(m);
             for (uint32_t k = 0; k < m; ++k) {
                 const DetectionGPU& g = base[k];
-                Detection           d;
-                d.box.x1   = g.x1;
-                d.box.y1   = g.y1;
-                d.box.x2   = g.x2;
-                d.box.y2   = g.y2;
+                Detection d;
+                d.box.x1 = g.x1;
+                d.box.y1 = g.y1;
+                d.box.x2 = g.x2;
+                d.box.y2 = g.y2;
                 d.class_id = g.class_id;
-                d.score    = g.score;
+                d.score = g.score;
                 dets.push_back(d);
             }
             results.push_back(std::move(dets));
@@ -868,14 +897,14 @@ struct DFineDetector::Impl {
         auto ms = [](auto a, auto b) {
             return std::chrono::duration<double, std::milli>(b - a).count();
         };
-        timings.preprocess_ms     = 0.0;
-        timings.infer_ms          = ms(t0, t1);
-        timings.postprocess_ms    = ms(t1, t2);
-        timings.total_ms          = ms(t0, t2);
+        timings.preprocess_ms = 0.0;
+        timings.infer_ms = ms(t0, t1);
+        timings.postprocess_ms = ms(t1, t2);
+        timings.total_ms = ms(t0, t2);
         timings.preprocess_cpu_ms = pre_cpu_ms;
-        timings.dispatch_ms       = ms(td0, td1);
-        timings.wait_ms           = ms(td1, t1);
-        timings.decode_host_ms    = ms(t1, t2);
+        timings.dispatch_ms = ms(td0, td1);
+        timings.wait_ms = ms(td1, t1);
+        timings.decode_host_ms = ms(t1, t2);
         return results;
     }
 
@@ -912,15 +941,16 @@ struct DFineDetector::Impl {
             if (gpu_decode_supported_) return run_gpu_decode_(images, B, thr, t0, ms_(t0, tp));
             if (!gpu_decode_warned_) {
                 gpu_decode_warned_ = true;
-                log_message(LogSeverity::kWarning,
-                            "dfine: gpu_decode set but engine outputs aren't FP32; using CPU decode");
+                log_message(
+                    LogSeverity::kWarning,
+                    "dfine: gpu_decode set but engine outputs aren't FP32; using CPU decode");
             }
         }
 
         // Preprocess/H2D stayed outside; the graph (if any) covers enqueueV3 + D2H.
-        bool   used_graph  = false;
+        bool used_graph = false;
         double dispatch_ms = 0.0;
-        double wait_ms     = 0.0;
+        double wait_ms = 0.0;
         if (opts.use_cuda_graph) {
             if (graph_supported_ && !graph_disabled_) {
                 used_graph = try_graph_infer_(B, dispatch_ms, wait_ms);
@@ -947,14 +977,14 @@ struct DFineDetector::Impl {
             DFINE_TRT_CHECK(session.context()->enqueueV3(session.stream()));
             const auto td1 = Clock::now();
             const std::size_t logits_n = static_cast<std::size_t>(B) * N * C;
-            const std::size_t boxes_n  = static_cast<std::size_t>(B) * N * 4;
+            const std::size_t boxes_n = static_cast<std::size_t>(B) * N * 4;
             if (h_logits.size() < logits_n) h_logits.resize(logits_n);
-            if (h_boxes.size()  < boxes_n)  h_boxes.resize(boxes_n);
+            if (h_boxes.size() < boxes_n) h_boxes.resize(boxes_n);
             session.get_output_f32(b_logits->name, h_logits.data(), logits_n);
-            session.get_output_f32(b_boxes->name,  h_boxes.data(),  boxes_n);
+            session.get_output_f32(b_boxes->name, h_boxes.data(), boxes_n);
             const auto td2 = Clock::now();
             dispatch_ms = ms_(td0, td1);
-            wait_ms     = ms_(td1, td2);
+            wait_ms = ms_(td1, td2);
             graph_ctx_batch_ = B;  // context now enqueued/flushed for this shape
         }
         const auto t1 = Clock::now();
@@ -964,19 +994,19 @@ struct DFineDetector::Impl {
         results.reserve(static_cast<std::size_t>(B));
         for (int i = 0; i < B; ++i) {
             const float* l = h_logits.data() + static_cast<std::size_t>(i) * N * C;
-            const float* b = h_boxes.data()  + static_cast<std::size_t>(i) * N * 4;
+            const float* b = h_boxes.data() + static_cast<std::size_t>(i) * N * 4;
             results.push_back(decode_detections(l, b, images[i].width, images[i].height, pp));
         }
         const auto t2 = Clock::now();
 
-        timings.preprocess_ms     = 0.0;  // merged into infer_ms (async on the stream)
-        timings.infer_ms          = ms_(t0, t1);
-        timings.postprocess_ms    = ms_(t1, t2);
-        timings.total_ms          = ms_(t0, t2);
+        timings.preprocess_ms = 0.0;  // merged into infer_ms (async on the stream)
+        timings.infer_ms = ms_(t0, t1);
+        timings.postprocess_ms = ms_(t1, t2);
+        timings.total_ms = ms_(t0, t2);
         timings.preprocess_cpu_ms = ms_(t0, tp);
-        timings.dispatch_ms       = dispatch_ms;
-        timings.wait_ms           = wait_ms;
-        timings.decode_host_ms    = ms_(t1, t2);
+        timings.dispatch_ms = dispatch_ms;
+        timings.wait_ms = wait_ms;
+        timings.decode_host_ms = ms_(t1, t2);
         return results;
     }
 };
@@ -1042,11 +1072,19 @@ const std::string& DFineDetector::variant() const noexcept {
     static const std::string kEmpty;
     return impl_ ? impl_->meta.variant : kEmpty;
 }
-int DFineDetector::input_h()     const noexcept { return impl_ ? impl_->in_h_ : 0; }
-int DFineDetector::input_w()     const noexcept { return impl_ ? impl_->in_w_ : 0; }
-int DFineDetector::num_queries() const noexcept { return impl_ ? impl_->N : 0; }
-int DFineDetector::num_classes() const noexcept { return impl_ ? impl_->C : 0; }
-int DFineDetector::max_batch()   const noexcept {
+int DFineDetector::input_h() const noexcept {
+    return impl_ ? impl_->in_h_ : 0;
+}
+int DFineDetector::input_w() const noexcept {
+    return impl_ ? impl_->in_w_ : 0;
+}
+int DFineDetector::num_queries() const noexcept {
+    return impl_ ? impl_->N : 0;
+}
+int DFineDetector::num_classes() const noexcept {
+    return impl_ ? impl_->C : 0;
+}
+int DFineDetector::max_batch() const noexcept {
     // 0 = dynamic engine whose profile max is unknown (no/partial sidecar);
     // detect_batch then defers the bound to TensorRT's setInputShape.
     if (!impl_) return 0;

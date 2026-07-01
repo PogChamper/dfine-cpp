@@ -35,10 +35,10 @@ EngineMeta EngineMeta::from_json_file(const std::filesystem::path& path) {
 
     EngineMeta m;
     m.schema_version = j.value("schema_version", kEngineMetaSchemaVersion);
-    m.variant     = j.value("variant", std::string{});
-    m.task        = j.value("task", std::string{"detect"});
-    m.input_h     = j.value("input_h", 640);
-    m.input_w     = j.value("input_w", 640);
+    m.variant = j.value("variant", std::string{});
+    m.task = j.value("task", std::string{"detect"});
+    m.input_h = j.value("input_h", 640);
+    m.input_w = j.value("input_w", 640);
     m.num_classes = j.value("num_classes", 80);
     m.num_queries = j.value("num_queries", 300);
 
@@ -50,15 +50,15 @@ EngineMeta EngineMeta::from_json_file(const std::filesystem::path& path) {
     }
 
     m.color_order = j.value("color_order", std::string{"RGB"});
-    m.resize      = j.value("resize", std::string{"stretch"});
-    m.precision   = j.value("precision", std::string{"fp32"});
+    m.resize = j.value("resize", std::string{"stretch"});
+    m.precision = j.value("precision", std::string{"fp32"});
     m.dynamic_batch = j.value("dynamic_batch", false);
-    m.min_batch     = j.value("min_batch", 1);
-    m.opt_batch     = j.value("opt_batch", 1);
-    m.max_batch     = j.value("max_batch", 1);
+    m.min_batch = j.value("min_batch", 1);
+    m.opt_batch = j.value("opt_batch", 1);
+    m.max_batch = j.value("max_batch", 1);
     m.cuda_graph_compat = j.value("cuda_graph_compat", false);
 
-    m.input_names  = read_string_array(j, "input_names", {"images"});
+    m.input_names = read_string_array(j, "input_names", {"images"});
     m.output_names = read_string_array(j, "output_names", {"logits", "boxes"});
     return m;
 }

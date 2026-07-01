@@ -72,16 +72,15 @@ void TrtSession::load_engine_(const std::filesystem::path& path) {
     // Engines are not portable across TRT major/minor versions — rebuild after
     // any TRT upgrade.
     {
-        const int rt_major  = getInferLibMajorVersion();
-        const int rt_minor  = getInferLibMinorVersion();
+        const int rt_major = getInferLibMajorVersion();
+        const int rt_minor = getInferLibMinorVersion();
         const int hdr_major = NV_TENSORRT_MAJOR;
         const int hdr_minor = NV_TENSORRT_MINOR;
         if (rt_major != hdr_major || rt_minor != hdr_minor) {
-            const std::string msg =
-                "TRT runtime " + std::to_string(rt_major) + "." + std::to_string(rt_minor) +
-                " != compile-time headers " + std::to_string(hdr_major) + "." +
-                std::to_string(hdr_minor) +
-                " — engine may fail to deserialize; rebuild with dfine_build";
+            const std::string msg = "TRT runtime " + std::to_string(rt_major) + "." +
+                                    std::to_string(rt_minor) + " != compile-time headers " +
+                                    std::to_string(hdr_major) + "." + std::to_string(hdr_minor) +
+                                    " — engine may fail to deserialize; rebuild with dfine_build";
             logger_.log(nvinfer1::ILogger::Severity::kWARNING, msg.c_str());
         }
     }
@@ -123,8 +122,10 @@ void TrtSession::parse_bindings_() {
                       ? static_cast<std::size_t>(b.element_count) * dtype_bytes(b.dtype)
                       : 0;
         bindings_.push_back(std::move(b));
-        if (bindings_.back().is_input) input_indices_.push_back(i);
-        else                           output_indices_.push_back(i);
+        if (bindings_.back().is_input)
+            input_indices_.push_back(i);
+        else
+            output_indices_.push_back(i);
     }
 }
 
@@ -138,7 +139,7 @@ void TrtSession::allocate_buffers_() {
         if (bytes == 0) continue;  // dynamic, deferred until set_input_shape
         void* dp = nullptr;
         DFINE_CUDA_CHECK(cudaMalloc(&dp, bytes));
-        device_buffers_[i].reset(dp);            // own it before the next throwing call
+        device_buffers_[i].reset(dp);  // own it before the next throwing call
         void* hp = nullptr;
         DFINE_CUDA_CHECK(cudaMallocHost(&hp, bytes));
         host_buffers_[i].reset(hp);
@@ -173,8 +174,8 @@ const BindingInfo* TrtSession::find(std::string_view name) const noexcept {
 }
 
 void TrtSession::update_binding_shape_(int idx, const nvinfer1::Dims& dims) {
-    BindingInfo&      b         = bindings_[idx];
-    const int64_t     new_elems = volume(dims);
+    BindingInfo& b = bindings_[idx];
+    const int64_t new_elems = volume(dims);
     const std::size_t new_bytes =
         (new_elems > 0) ? static_cast<std::size_t>(new_elems) * dtype_bytes(b.dtype) : 0;
 
@@ -182,15 +183,15 @@ void TrtSession::update_binding_shape_(int idx, const nvinfer1::Dims& dims) {
     // the oversized shape, set_input_shape's de-dup fast path would later match it and
     // skip re-checking, so the next call would run with an undersized buffer (OOB).
     if (new_bytes > buffer_capacity_[idx] && frozen_) {
-        throw std::runtime_error(
-            "dfine: TrtSession is frozen but binding '" + b.name + "' must grow to " +
-            std::to_string(new_bytes) + " bytes (shape/batch exceeds the frozen maximum; "
-            "warm up at the max shape before freeze())");
+        throw std::runtime_error("dfine: TrtSession is frozen but binding '" + b.name +
+                                 "' must grow to " + std::to_string(new_bytes) +
+                                 " bytes (shape/batch exceeds the frozen maximum; "
+                                 "warm up at the max shape before freeze())");
     }
 
-    b.shape         = dims;
+    b.shape = dims;
     b.element_count = new_elems;
-    b.bytes         = new_bytes;
+    b.bytes = new_bytes;
 
     if (b.bytes > buffer_capacity_[idx]) {
         // Grow-only: free old buffers first (RAII reset), then re-allocate.
@@ -200,7 +201,7 @@ void TrtSession::update_binding_shape_(int idx, const nvinfer1::Dims& dims) {
         if (b.bytes > 0) {
             void* dp = nullptr;
             DFINE_CUDA_CHECK(cudaMalloc(&dp, b.bytes));
-            device_buffers_[idx].reset(dp);      // own it before the next throwing call
+            device_buffers_[idx].reset(dp);  // own it before the next throwing call
             void* hp = nullptr;
             DFINE_CUDA_CHECK(cudaMallocHost(&hp, b.bytes));
             host_buffers_[idx].reset(hp);
@@ -225,7 +226,10 @@ void TrtSession::set_input_shape(std::string_view name, const nvinfer1::Dims& di
     if (cur.nbDims == dims.nbDims) {
         bool same = true;
         for (int i = 0; i < dims.nbDims; ++i) {
-            if (cur.d[i] != dims.d[i]) { same = false; break; }
+            if (cur.d[i] != dims.d[i]) {
+                same = false;
+                break;
+            }
         }
         if (same) return;
     }
@@ -334,16 +338,19 @@ void TrtSession::get_output_f32(std::string_view name, float* host_float32,
         const auto* src = static_cast<const std::uint16_t*>(host_buffers_[idx].get());
         for (std::size_t i = 0; i < element_count; ++i) {
             const std::uint16_t h = src[i];
-            const std::uint32_t sign     = (h >> 15u) & 1u;
+            const std::uint32_t sign = (h >> 15u) & 1u;
             const std::uint32_t exponent = (h >> 10u) & 0x1Fu;
-            const std::uint32_t mantissa =  h         & 0x3FFu;
+            const std::uint32_t mantissa = h & 0x3FFu;
             std::uint32_t f;
             if (exponent == 0u) {
                 if (mantissa == 0u) {
                     f = sign << 31u;  // ±0
                 } else {
                     std::uint32_t e = 0u, m = mantissa;  // subnormal: renormalize
-                    while (!(m & 0x400u)) { m <<= 1u; ++e; }
+                    while (!(m & 0x400u)) {
+                        m <<= 1u;
+                        ++e;
+                    }
                     f = (sign << 31u) | ((127u - 14u - e) << 23u) | ((m & 0x3FFu) << 13u);
                 }
             } else if (exponent == 31u) {
@@ -364,16 +371,26 @@ void TrtSession::get_output_f32(std::string_view name, float* host_float32,
 
 std::size_t TrtSession::dtype_bytes(nvinfer1::DataType d) noexcept {
     switch (d) {
-        case nvinfer1::DataType::kFLOAT: return 4;
-        case nvinfer1::DataType::kHALF:  return 2;
-        case nvinfer1::DataType::kINT8:  return 1;
-        case nvinfer1::DataType::kINT32: return 4;
-        case nvinfer1::DataType::kBOOL:  return 1;
-        case nvinfer1::DataType::kUINT8: return 1;
-        case nvinfer1::DataType::kFP8:   return 1;
-        case nvinfer1::DataType::kBF16:  return 2;
-        case nvinfer1::DataType::kINT64: return 8;
-        default: return 0;
+        case nvinfer1::DataType::kFLOAT:
+            return 4;
+        case nvinfer1::DataType::kHALF:
+            return 2;
+        case nvinfer1::DataType::kINT8:
+            return 1;
+        case nvinfer1::DataType::kINT32:
+            return 4;
+        case nvinfer1::DataType::kBOOL:
+            return 1;
+        case nvinfer1::DataType::kUINT8:
+            return 1;
+        case nvinfer1::DataType::kFP8:
+            return 1;
+        case nvinfer1::DataType::kBF16:
+            return 2;
+        case nvinfer1::DataType::kINT64:
+            return 8;
+        default:
+            return 0;
     }
 }
 
@@ -389,16 +406,26 @@ int64_t TrtSession::volume(const nvinfer1::Dims& dims) noexcept {
 
 const char* TrtSession::dtype_name(nvinfer1::DataType d) noexcept {
     switch (d) {
-        case nvinfer1::DataType::kFLOAT: return "fp32";
-        case nvinfer1::DataType::kHALF:  return "fp16";
-        case nvinfer1::DataType::kINT8:  return "int8";
-        case nvinfer1::DataType::kINT32: return "int32";
-        case nvinfer1::DataType::kBOOL:  return "bool";
-        case nvinfer1::DataType::kUINT8: return "uint8";
-        case nvinfer1::DataType::kFP8:   return "fp8";
-        case nvinfer1::DataType::kBF16:  return "bf16";
-        case nvinfer1::DataType::kINT64: return "int64";
-        default: return "?";
+        case nvinfer1::DataType::kFLOAT:
+            return "fp32";
+        case nvinfer1::DataType::kHALF:
+            return "fp16";
+        case nvinfer1::DataType::kINT8:
+            return "int8";
+        case nvinfer1::DataType::kINT32:
+            return "int32";
+        case nvinfer1::DataType::kBOOL:
+            return "bool";
+        case nvinfer1::DataType::kUINT8:
+            return "uint8";
+        case nvinfer1::DataType::kFP8:
+            return "fp8";
+        case nvinfer1::DataType::kBF16:
+            return "bf16";
+        case nvinfer1::DataType::kINT64:
+            return "int64";
+        default:
+            return "?";
     }
 }
 

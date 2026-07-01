@@ -24,7 +24,7 @@ namespace dfine {
 // One decoded detection, device-side. Layout mirrors Detection's fields so the
 // host copy-out is a trivial field assignment. 24 bytes.
 struct DetectionGPU {
-    float   x1, y1, x2, y2, score;
+    float x1, y1, x2, y2, score;
     int32_t class_id;  // 0..C-1 for a survivor; -1 for a padded (sub-threshold) slot
 };
 
@@ -38,16 +38,16 @@ struct DetectionGPU {
 //   counts             [max_batch]           #survivors per image (a prefix length)
 //   scale_wh           [max_batch]           (origW, origH) per image, filled per call
 struct GpuDecodeScratch {
-    float*        keys           = nullptr;
-    uint32_t*     vals           = nullptr;
-    float*        keys_out       = nullptr;
-    uint32_t*     vals_out       = nullptr;
-    int*          seg_off        = nullptr;
-    void*         cub_temp       = nullptr;
-    std::size_t   cub_temp_bytes = 0;
-    DetectionGPU* out            = nullptr;
-    uint32_t*     counts         = nullptr;
-    float2*       scale_wh       = nullptr;
+    float* keys = nullptr;
+    uint32_t* vals = nullptr;
+    float* keys_out = nullptr;
+    uint32_t* vals_out = nullptr;
+    int* seg_off = nullptr;
+    void* cub_temp = nullptr;
+    std::size_t cub_temp_bytes = 0;
+    DetectionGPU* out = nullptr;
+    uint32_t* counts = nullptr;
+    float2* scale_wh = nullptr;
 };
 
 // Bytes of cub temp storage needed for a segmented radix sort of

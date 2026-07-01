@@ -10,19 +10,19 @@ namespace dfine_app {
 
 // Owns pixels decoded by stb_image as packed 3-channel RGB HWC uint8.
 class LoadedImage {
-   public:
+ public:
     LoadedImage() = default;
     LoadedImage(std::uint8_t* px, int w, int h) noexcept : pixels_(px), w_(w), h_(h) {}
     ~LoadedImage();
 
-    LoadedImage(const LoadedImage&)            = delete;
+    LoadedImage(const LoadedImage&) = delete;
     LoadedImage& operator=(const LoadedImage&) = delete;
     LoadedImage(LoadedImage&& o) noexcept
         : pixels_(std::exchange(o.pixels_, nullptr)), w_(o.w_), h_(o.h_) {}
     LoadedImage& operator=(LoadedImage&& o) noexcept;
 
     explicit operator bool() const noexcept { return pixels_ != nullptr; }
-    int width()  const noexcept { return w_; }
+    int width() const noexcept { return w_; }
     int height() const noexcept { return h_; }
 
     // View for the detector: RGB order (is_bgr = false), tightly packed.
@@ -30,7 +30,7 @@ class LoadedImage {
         return dfine::ImageU8{pixels_, h_, w_, 3, w_ * 3, /*is_bgr=*/false};
     }
 
-   private:
+ private:
     std::uint8_t* pixels_{nullptr};
     int w_{0};
     int h_{0};

@@ -7,10 +7,10 @@ namespace dfine {
 // Severity ordering matches TensorRT's nvinfer1::ILogger::Severity:
 //   FATAL > ERROR > WARN > INFO > VERBOSE
 enum class LogSeverity : int {
-    kFatal   = 0,
-    kError   = 1,
+    kFatal = 0,
+    kError = 1,
     kWarning = 2,
-    kInfo    = 3,
+    kInfo = 3,
     kVerbose = 4,
 };
 

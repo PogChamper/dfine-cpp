@@ -40,7 +40,7 @@ int compare(const dfine::Detections& cpp, const dfine_detections_t* c) {
         return 1 + std::abs(static_cast<int>(cpp.size()) - c->count);
     }
     for (std::size_t i = 0; i < cpp.size(); ++i) {
-        const dfine::Detection&  a = cpp[i];
+        const dfine::Detection& a = cpp[i];
         const dfine_detection_t& b = c->detections[i];
         if (a.class_id != b.class_id || a.score != b.score || !box_equal(a.box, b.box)) {
             if (mismatches < 5) {
@@ -64,9 +64,10 @@ int main(int argc, char** argv) {
         for (int i = 1; i < argc; ++i) {
             std::string_view a = argv[i];
             if (a == "-h" || a == "--help") {
-                std::printf("usage: %s --engine E.engine --image img.jpg [--meta E.json] "
-                            "[--threshold 0.5]\n  dfine v%s\n",
-                            argv[0], dfine::version());
+                std::printf(
+                    "usage: %s --engine E.engine --image img.jpg [--meta E.json] "
+                    "[--threshold 0.5]\n  dfine v%s\n",
+                    argv[0], dfine::version());
                 return 0;
             } else if (starts_with(a, "--engine")) {
                 engine = next_value(argc, argv, i, "--engine");
@@ -128,12 +129,12 @@ int main(int argc, char** argv) {
             dfine_image_t bi[2];
             std::memset(bi, 0, sizeof bi);
             for (int i = 0; i < 2; ++i) {
-                bi[i].data     = view.data;
-                bi[i].width    = view.width;
-                bi[i].height   = view.height;
-                bi[i].step     = view.row_bytes();
+                bi[i].data = view.data;
+                bi[i].width = view.width;
+                bi[i].height = view.height;
+                bi[i].step = view.row_bytes();
                 bi[i].channels = view.channels;
-                bi[i].is_bgr   = view.is_bgr ? 1 : 0;
+                bi[i].is_bgr = view.is_bgr ? 1 : 0;
             }
             dfine_detections_t** cb = dfine_detector_detect_batch(det.get(), bi, 2, threshold);
             if (!cb) {
@@ -142,7 +143,8 @@ int main(int argc, char** argv) {
             } else {
                 for (int i = 0; i < 2; ++i) batch_mismatches += compare(cpp_batch[i], cb[i]);
                 dfine_detections_free_batch(cb, 2);
-                std::printf("batch parity (2x): %s\n", batch_mismatches == 0 ? "identical" : "DIFF");
+                std::printf("batch parity (2x): %s\n",
+                            batch_mismatches == 0 ? "identical" : "DIFF");
             }
         } catch (const std::exception& e) {
             std::printf("  [note] batch parity skipped (%s)\n", e.what());

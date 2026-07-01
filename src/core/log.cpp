@@ -15,11 +15,16 @@ std::atomic<LogSeverity> g_min_severity{LogSeverity::kWarning};
 
 const char* severity_tag(LogSeverity s) noexcept {
     switch (s) {
-        case LogSeverity::kFatal:   return "FATAL";
-        case LogSeverity::kError:   return "ERROR";
-        case LogSeverity::kWarning: return "WARN ";
-        case LogSeverity::kInfo:    return "INFO ";
-        case LogSeverity::kVerbose: return "VERB ";
+        case LogSeverity::kFatal:
+            return "FATAL";
+        case LogSeverity::kError:
+            return "ERROR";
+        case LogSeverity::kWarning:
+            return "WARN ";
+        case LogSeverity::kInfo:
+            return "INFO ";
+        case LogSeverity::kVerbose:
+            return "VERB ";
     }
     return "?";
 }

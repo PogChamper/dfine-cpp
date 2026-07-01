@@ -24,9 +24,8 @@ namespace dfine {
 //                 {1,1,1}, i.e. `/255` only — passing ImageNet constants collapses mAP.
 //
 // The fold is nx = x/255 * (1/std) - mean/std. With mean=0,std=1 this is exactly x/255.
-void launch_stretch_resize_normalize(cudaStream_t stream,
-                                     const std::uint8_t* d_src, int src_h, int src_w,
-                                     int src_pitch, float* d_dst, int dst_h, int dst_w,
+void launch_stretch_resize_normalize(cudaStream_t stream, const std::uint8_t* d_src, int src_h,
+                                     int src_w, int src_pitch, float* d_dst, int dst_h, int dst_w,
                                      bool src_is_bgr, const float mean[3], const float std[3]);
 
 // Convenience preprocessor: owns a pinned host staging buffer + a device source
@@ -34,11 +33,11 @@ void launch_stretch_resize_normalize(cudaStream_t stream,
 // device asynchronously and runs the fused kernel, writing into `d_dst`.
 // Designed for reuse across many frames — buffers are not freed between calls.
 class ImagePreprocessor {
-   public:
+ public:
     ImagePreprocessor(int dst_h, int dst_w);
     ~ImagePreprocessor();
 
-    ImagePreprocessor(const ImagePreprocessor&)            = delete;
+    ImagePreprocessor(const ImagePreprocessor&) = delete;
     ImagePreprocessor& operator=(const ImagePreprocessor&) = delete;
 
     void set_mean(float r, float g, float b) noexcept;
@@ -57,21 +56,21 @@ class ImagePreprocessor {
     int dst_h() const noexcept { return dst_h_; }
     int dst_w() const noexcept { return dst_w_; }
 
-   private:
+ private:
     void ensure_capacity_(std::size_t bytes);
 
     bool frozen_{false};
-    int  dst_h_{0};
-    int  dst_w_{0};
+    int dst_h_{0};
+    int dst_w_{0};
     float mean_[3]{0.0f, 0.0f, 0.0f};
     float std_[3]{1.0f, 1.0f, 1.0f};
-    DevPtr      d_src_;
-    HostPtr     h_pinned_;
+    DevPtr d_src_;
+    HostPtr h_pinned_;
     std::size_t capacity_{0};
     // Signals that the previous async H2D has drained the pinned staging buffer,
     // so a batch loop can safely overwrite it for the next image without a race
     // (the copy is async; the host must not clobber it mid-flight).
-    CudaEvent   upload_done_;
+    CudaEvent upload_done_;
 };
 
 }  // namespace dfine

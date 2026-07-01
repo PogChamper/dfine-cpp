@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
     dfine::DetectorOptions opts;
     opts.threshold = 0.5f;
     dfine::DFineDetector detector = argc > 2 ? dfine::DFineDetector(argv[1], argv[2], opts)
-                                              : dfine::DFineDetector(argv[1], opts);
+                                             : dfine::DFineDetector(argv[1], opts);
 
     // 2. Build an ImageU8 view over a raw HWC uint8 buffer. ImageU8 is a
     //    non-owning view: fill/obtain `pixels` however you like, then point
@@ -40,12 +40,12 @@ int main(int argc, char** argv) {
     // ... fill `pixels` with real RGB (or BGR) image data here ...
 
     dfine::ImageU8 image;
-    image.data     = pixels.data();
-    image.width    = width;
-    image.height   = height;
+    image.data = pixels.data();
+    image.width = width;
+    image.height = height;
     image.channels = channels;
-    image.stride   = 0;      // 0 => tightly packed (width * channels bytes/row)
-    image.is_bgr   = false;  // true if `pixels` is BGR (e.g. straight from OpenCV)
+    image.stride = 0;      // 0 => tightly packed (width * channels bytes/row)
+    image.is_bgr = false;  // true if `pixels` is BGR (e.g. straight from OpenCV)
 
     // 3. Run inference + decode (sigmoid -> top-k -> cxcywh->xyxy -> threshold).
     dfine::Detections detections = detector.detect(image);

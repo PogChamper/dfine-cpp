@@ -19,12 +19,10 @@ namespace {
 // The output->source coordinate map matches OpenCV INTER_LINEAR semantics
 // (`src = (dst + 0.5) * scale - 0.5`), so results track the Python cv2.resize
 // reference used by trt-files/scripts/coco_eval.py.
-__global__ void stretchResizeNormalizeKernel(const std::uint8_t* __restrict__ src,
-                                             int src_h, int src_w, int src_pitch,
-                                             float* __restrict__ dst, int dst_h, int dst_w,
-                                             bool src_is_bgr,
-                                             float scale_x, float scale_y,
-                                             float3 pre_mul, float3 pre_sub) {
+__global__ void stretchResizeNormalizeKernel(const std::uint8_t* __restrict__ src, int src_h,
+                                             int src_w, int src_pitch, float* __restrict__ dst,
+                                             int dst_h, int dst_w, bool src_is_bgr, float scale_x,
+                                             float scale_y, float3 pre_mul, float3 pre_sub) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= dst_w || y >= dst_h) return;
@@ -49,12 +47,12 @@ __global__ void stretchResizeNormalizeKernel(const std::uint8_t* __restrict__ sr
     const std::uint8_t* p11 = src + sy1 * src_pitch + sx1 * 3;
 
     // __ldg routes through the read-only data cache.
-    const float c0 = __ldg(p00 + 0) * w00 + __ldg(p01 + 0) * w01
-                   + __ldg(p10 + 0) * w10 + __ldg(p11 + 0) * w11;
-    const float c1 = __ldg(p00 + 1) * w00 + __ldg(p01 + 1) * w01
-                   + __ldg(p10 + 1) * w10 + __ldg(p11 + 1) * w11;
-    const float c2 = __ldg(p00 + 2) * w00 + __ldg(p01 + 2) * w01
-                   + __ldg(p10 + 2) * w10 + __ldg(p11 + 2) * w11;
+    const float c0 =
+        __ldg(p00 + 0) * w00 + __ldg(p01 + 0) * w01 + __ldg(p10 + 0) * w10 + __ldg(p11 + 0) * w11;
+    const float c1 =
+        __ldg(p00 + 1) * w00 + __ldg(p01 + 1) * w01 + __ldg(p10 + 1) * w10 + __ldg(p11 + 1) * w11;
+    const float c2 =
+        __ldg(p00 + 2) * w00 + __ldg(p01 + 2) * w01 + __ldg(p10 + 2) * w10 + __ldg(p11 + 2) * w11;
 
     const float r = src_is_bgr ? c2 : c0;
     const float g = c1;
@@ -64,7 +62,7 @@ __global__ void stretchResizeNormalizeKernel(const std::uint8_t* __restrict__ sr
     const float ng = g * pre_mul.y - pre_sub.y;
     const float nb = b * pre_mul.z - pre_sub.z;
 
-    const int hw  = dst_h * dst_w;
+    const int hw = dst_h * dst_w;
     const int idx = y * dst_w + x;
     dst[0 * hw + idx] = nr;
     dst[1 * hw + idx] = ng;
@@ -73,10 +71,9 @@ __global__ void stretchResizeNormalizeKernel(const std::uint8_t* __restrict__ sr
 
 }  // namespace
 
-void launch_stretch_resize_normalize(cudaStream_t stream, const std::uint8_t* d_src,
-                                     int src_h, int src_w, int src_pitch, float* d_dst,
-                                     int dst_h, int dst_w, bool src_is_bgr,
-                                     const float mean[3], const float std[3]) {
+void launch_stretch_resize_normalize(cudaStream_t stream, const std::uint8_t* d_src, int src_h,
+                                     int src_w, int src_pitch, float* d_dst, int dst_h, int dst_w,
+                                     bool src_is_bgr, const float mean[3], const float std[3]) {
     if (dst_h <= 0 || dst_w <= 0 || src_h <= 0 || src_w <= 0) {
         throw std::runtime_error("dfine: launch_stretch_resize_normalize bad dims");
     }
@@ -89,14 +86,13 @@ void launch_stretch_resize_normalize(cudaStream_t stream, const std::uint8_t* d_
 
     const dim3 block(16, 16);
     const dim3 grid((dst_w + block.x - 1) / block.x, (dst_h + block.y - 1) / block.y);
-    stretchResizeNormalizeKernel<<<grid, block, 0, stream>>>(d_src, src_h, src_w, src_pitch,
-                                                             d_dst, dst_h, dst_w, src_is_bgr,
-                                                             scale_x, scale_y, pre_mul, pre_sub);
+    stretchResizeNormalizeKernel<<<grid, block, 0, stream>>>(d_src, src_h, src_w, src_pitch, d_dst,
+                                                             dst_h, dst_w, src_is_bgr, scale_x,
+                                                             scale_y, pre_mul, pre_sub);
     DFINE_CUDA_CHECK(cudaGetLastError());
 }
 
-ImagePreprocessor::ImagePreprocessor(int dst_h, int dst_w)
-    : dst_h_(dst_h), dst_w_(dst_w) {
+ImagePreprocessor::ImagePreprocessor(int dst_h, int dst_w) : dst_h_(dst_h), dst_w_(dst_w) {
     cudaEvent_t raw_event = nullptr;
     DFINE_CUDA_CHECK(cudaEventCreateWithFlags(&raw_event, cudaEventDisableTiming));
     upload_done_ = CudaEvent(raw_event);
@@ -106,11 +102,15 @@ ImagePreprocessor::ImagePreprocessor(int dst_h, int dst_w)
 ImagePreprocessor::~ImagePreprocessor() = default;
 
 void ImagePreprocessor::set_mean(float r, float g, float b) noexcept {
-    mean_[0] = r; mean_[1] = g; mean_[2] = b;
+    mean_[0] = r;
+    mean_[1] = g;
+    mean_[2] = b;
 }
 
 void ImagePreprocessor::set_std(float r, float g, float b) noexcept {
-    std_[0] = r; std_[1] = g; std_[2] = b;
+    std_[0] = r;
+    std_[1] = g;
+    std_[2] = b;
 }
 
 void ImagePreprocessor::ensure_capacity_(std::size_t bytes) {
@@ -126,7 +126,7 @@ void ImagePreprocessor::ensure_capacity_(std::size_t bytes) {
     capacity_ = 0;
     void* dp = nullptr;
     DFINE_CUDA_CHECK(cudaMalloc(&dp, bytes));
-    d_src_.reset(dp);                        // own it before the next throwing call
+    d_src_.reset(dp);  // own it before the next throwing call
     void* hp = nullptr;
     DFINE_CUDA_CHECK(cudaMallocHost(&hp, bytes));
     h_pinned_.reset(hp);
@@ -155,22 +155,21 @@ void ImagePreprocessor::process(const ImageU8& image, float* d_dst, cudaStream_t
 
     // Pack into a contiguous pinned buffer (source may have stride > width*3).
     auto* dst_pinned = static_cast<std::uint8_t*>(h_pinned_.get());
-    auto* d_src_raw  = static_cast<std::uint8_t*>(d_src_.get());
+    auto* d_src_raw = static_cast<std::uint8_t*>(d_src_.get());
     if (static_cast<std::size_t>(src_row) == packed_row) {
         std::memcpy(dst_pinned, image.data, total_bytes);
     } else {
         for (int r = 0; r < rows; ++r) {
-            std::memcpy(dst_pinned + r * packed_row, image.data + static_cast<std::size_t>(r) * src_row,
-                        packed_row);
+            std::memcpy(dst_pinned + r * packed_row,
+                        image.data + static_cast<std::size_t>(r) * src_row, packed_row);
         }
     }
-    DFINE_CUDA_CHECK(cudaMemcpyAsync(d_src_raw, dst_pinned, total_bytes,
-                                     cudaMemcpyHostToDevice, stream));
+    DFINE_CUDA_CHECK(
+        cudaMemcpyAsync(d_src_raw, dst_pinned, total_bytes, cudaMemcpyHostToDevice, stream));
     DFINE_CUDA_CHECK(cudaEventRecord(upload_done_.get(), stream));
 
-    launch_stretch_resize_normalize(stream, d_src_raw, rows, cols,
-                                    static_cast<int>(packed_row), d_dst, dst_h_, dst_w_,
-                                    image.is_bgr, mean_, std_);
+    launch_stretch_resize_normalize(stream, d_src_raw, rows, cols, static_cast<int>(packed_row),
+                                    d_dst, dst_h_, dst_w_, image.is_bgr, mean_, std_);
 }
 
 }  // namespace dfine

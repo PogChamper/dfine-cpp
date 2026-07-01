@@ -51,10 +51,10 @@ __global__ void k_fill_segoff(int* __restrict__ seg, int n, int n_cand) {
 // counts[b] = #survivors. No clamp / no NMS — matches postprocess.cpp.
 __global__ void k_decode_topk(const float* __restrict__ keys_sorted,
                               const uint32_t* __restrict__ vals_sorted,
-                              const float* __restrict__ boxes,
-                              const float2* __restrict__ scale_wh, DetectionGPU* __restrict__ out,
-                              uint32_t* __restrict__ counts, int B, int Q, int C, int qc, int topk,
-                              float threshold, const float* __restrict__ threshold_dev) {
+                              const float* __restrict__ boxes, const float2* __restrict__ scale_wh,
+                              DetectionGPU* __restrict__ out, uint32_t* __restrict__ counts, int B,
+                              int Q, int C, int qc, int topk, float threshold,
+                              const float* __restrict__ threshold_dev) {
     const int b = blockIdx.x;
     if (b >= B) return;
 
@@ -62,19 +62,19 @@ __global__ void k_decode_topk(const float* __restrict__ keys_sorted,
     // per block, broadcast through shared memory — so a captured graph replays with
     // the caller's current threshold instead of the value baked at capture (P3).
     __shared__ unsigned int s_count;
-    __shared__ float        s_thr;
+    __shared__ float s_thr;
     if (threadIdx.x == 0) {
         s_count = 0u;
-        s_thr   = threshold_dev ? *threshold_dev : threshold;
+        s_thr = threshold_dev ? *threshold_dev : threshold;
     }
     __syncthreads();
     threshold = s_thr;
 
-    const float2 sw   = scale_wh[b];
-    const int    base = b * qc;
+    const float2 sw = scale_wh[b];
+    const int base = b * qc;
 
     for (int k = threadIdx.x; k < topk; k += blockDim.x) {
-        const int   g     = base + k;
+        const int g = base + k;
         const float logit = keys_sorted[g];
         const float score = sigmoid_stable(logit);
 
@@ -85,19 +85,19 @@ __global__ void k_decode_topk(const float* __restrict__ keys_sorted,
         if (!(score < threshold)) {
             atomicAdd(&s_count, 1u);
             const uint32_t idx = vals_sorted[g];
-            const int      q   = static_cast<int>(idx) / C;
-            const int      c   = static_cast<int>(idx) % C;
-            const float*   db  = boxes + static_cast<std::size_t>(b * Q + q) * 4;
-            const float    cx = db[0], cy = db[1], w = db[2], h = db[3];
-            d.x1       = (cx - 0.5f * w) * sw.x;
-            d.y1       = (cy - 0.5f * h) * sw.y;
-            d.x2       = (cx + 0.5f * w) * sw.x;
-            d.y2       = (cy + 0.5f * h) * sw.y;
-            d.score    = score;
+            const int q = static_cast<int>(idx) / C;
+            const int c = static_cast<int>(idx) % C;
+            const float* db = boxes + static_cast<std::size_t>(b * Q + q) * 4;
+            const float cx = db[0], cy = db[1], w = db[2], h = db[3];
+            d.x1 = (cx - 0.5f * w) * sw.x;
+            d.y1 = (cy - 0.5f * h) * sw.y;
+            d.x2 = (cx + 0.5f * w) * sw.x;
+            d.y2 = (cy + 0.5f * h) * sw.y;
+            d.score = score;
             d.class_id = c;
         } else {
             d.x1 = d.y1 = d.x2 = d.y2 = 0.0f;
-            d.score    = score;
+            d.score = score;
             d.class_id = -1;
         }
         out[b * topk + k] = d;
@@ -110,7 +110,7 @@ __global__ void k_decode_topk(const float* __restrict__ keys_sorted,
 
 std::size_t gpu_decode_temp_bytes(int max_batch, int n_cand) {
     std::size_t bytes = 0;
-    const int   total = max_batch * n_cand;
+    const int total = max_batch * n_cand;
     // Sizing query: CUB computes temp storage from item/segment counts only (the
     // key/value/offset pointers are not dereferenced when d_temp_storage == nullptr).
     cub::DeviceSegmentedRadixSort::SortPairsDescending(
@@ -130,7 +130,7 @@ void gpu_decode_fill_segoff(int* seg_off, int max_batch, int n_cand, cudaStream_
 void gpu_decode_enqueue(const float* logits, const float* boxes, int B, int Q, int C, int topk,
                         float threshold, const float* threshold_dev, const GpuDecodeScratch& s,
                         cudaStream_t stream) {
-    const int qc    = Q * C;
+    const int qc = Q * C;
     const int total = B * qc;
 
     k_pack<<<(total + 255) / 256, 256, 0, stream>>>(logits, s.keys, s.vals, total, qc);

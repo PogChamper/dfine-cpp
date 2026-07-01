@@ -20,7 +20,7 @@ inline constexpr int kEngineMetaSchemaVersion = 1;
 //   ImageNet mean/std here collapses mAP (see docs/HANDOFF.md gotcha #3).
 struct EngineMeta {
     int schema_version{kEngineMetaSchemaVersion};
-    std::string variant;            // "n"/"s"/"m"/"l"/"x" (informational)
+    std::string variant;  // "n"/"s"/"m"/"l"/"x" (informational)
     std::string task{"detect"};
     int input_h{640};
     int input_w{640};

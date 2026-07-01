@@ -20,7 +20,10 @@ namespace {
 
 void print_dims(const nvinfer1::Dims& d) {
     std::fputc('[', stdout);
-    for (int i = 0; i < d.nbDims; ++i) { if (i) std::fputc(',', stdout); std::printf("%ld", static_cast<long>(d.d[i])); }
+    for (int i = 0; i < d.nbDims; ++i) {
+        if (i) std::fputc(',', stdout);
+        std::printf("%ld", static_cast<long>(d.d[i]));
+    }
     std::fputc(']', stdout);
 }
 
@@ -28,8 +31,8 @@ void print_dims(const nvinfer1::Dims& d) {
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 4) {
-        std::fprintf(stderr, "usage: %s <engine.plan> [batch] [iters]\n  dfine v%s\n",
-                     argv[0], dfine::version());
+        std::fprintf(stderr, "usage: %s <engine.plan> [batch] [iters]\n  dfine v%s\n", argv[0],
+                     dfine::version());
         return 2;
     }
     try {
@@ -46,7 +49,8 @@ int main(int argc, char** argv) {
             const auto& b = sess.bindings()[i];
             if (b.bytes != 0) continue;
             if (b.shape.nbDims != 4)
-                throw std::runtime_error("dynamic input '" + b.name + "' is not 4-D; cannot auto-resolve");
+                throw std::runtime_error("dynamic input '" + b.name +
+                                         "' is not 4-D; cannot auto-resolve");
             const int C = b.shape.d[1] > 0 ? static_cast<int>(b.shape.d[1]) : 3;
             const int H = b.shape.d[2] > 0 ? static_cast<int>(b.shape.d[2]) : 640;
             const int W = b.shape.d[3] > 0 ? static_cast<int>(b.shape.d[3]) : 640;
@@ -97,8 +101,8 @@ int main(int argc, char** argv) {
                     const double a = std::fabs(static_cast<double>(f[k]));
                     if (a > max_abs) max_abs = a;
                 }
-                std::printf("  out %-8s fp32 n=%zu mean=%+.6f max|x|=%.6f\n",
-                            b.name.c_str(), n, n ? sum / n : 0.0, max_abs);
+                std::printf("  out %-8s fp32 n=%zu mean=%+.6f max|x|=%.6f\n", b.name.c_str(), n,
+                            n ? sum / n : 0.0, max_abs);
             } else {
                 std::uint64_t s = 0;
                 for (auto v : buf) s += v;

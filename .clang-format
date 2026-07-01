@@ -1,9 +1,9 @@
-# Matches the existing D-FINE-cpp style: Google base, 4-space indent, 100-col,
-# attached braces, aligned consecutive declarations. New/changed C++ should be
-# clang-formatted with this file (see CONTRIBUTING.md); existing files are not
-# bulk-reformatted to keep git history readable.
+# D-FINE-cpp style: Google base, 4-space indent, 100-col, attached braces.
+# The whole tree is formatted with this file and CI gates on it
+# (clang-format --dry-run --Werror); run `clang-format -i` before committing.
 ---
 Language: Cpp
+Standard: c++17
 BasedOnStyle: Google
 IndentWidth: 4
 ColumnLimit: 100
@@ -17,6 +17,3 @@ PointerAlignment: Left
 SortIncludes: false
 SpacesBeforeTrailingComments: 2
 IncludeBlocks: Preserve
----
-Language: Cpp
-Standard: c++17

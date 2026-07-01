@@ -70,8 +70,11 @@ std::vector<int> parse_batches(std::string_view s) {
     std::vector<int> out;
     std::string cur;
     for (char c : s) {
-        if (c == ',') { if (!cur.empty()) out.push_back(std::stoi(cur)); cur.clear(); }
-        else cur += c;
+        if (c == ',') {
+            if (!cur.empty()) out.push_back(std::stoi(cur));
+            cur.clear();
+        } else
+            cur += c;
     }
     if (!cur.empty()) out.push_back(std::stoi(cur));
     if (out.empty()) out = {1};
@@ -141,11 +144,11 @@ int run_pipeline_compare(const std::filesystem::path& engine, const std::filesys
 
     for (int B : batches) {
         dfine::DetectorOptions oa;
-        oa.threshold         = threshold;
-        oa.gpu_decode        = true;
+        oa.threshold = threshold;
+        oa.gpu_decode = true;
         oa.own_device_memory = true;
         dfine::DetectorOptions ob = oa;
-        ob.full_pipeline_graph    = true;
+        ob.full_pipeline_graph = true;
 
         // freeze() is one-way and per-configuration, so each batch size gets fresh
         // detector instances (one engine deserialize each — seconds, not per-iter).
@@ -160,9 +163,10 @@ int run_pipeline_compare(const std::filesystem::path& engine, const std::filesys
         split.freeze(fs);
         graph.freeze(fs);
         if (!graph.full_pipeline_graph_active()) {
-            std::printf("[pipeline-compare] batch %d: full-pipeline graph NOT active — the "
-                        "engine must have FP32 outputs and be built with --max-aux-streams 0\n",
-                        B);
+            std::printf(
+                "[pipeline-compare] batch %d: full-pipeline graph NOT active — the "
+                "engine must have FP32 outputs and be built with --max-aux-streams 0\n",
+                B);
             return 1;
         }
 
@@ -200,17 +204,18 @@ int run_pipeline_compare(const std::filesystem::path& engine, const std::filesys
         }
         const std::uint64_t measured_replays = graph.full_graph_replays() - replays_before;
         if (measured_replays < static_cast<std::uint64_t>(iters)) {
-            std::printf("[pipeline-compare] batch %d: only %llu/%d measured iterations replayed "
-                        "the graph — results below are contaminated by fallback calls\n",
-                        B, static_cast<unsigned long long>(measured_replays), iters);
+            std::printf(
+                "[pipeline-compare] batch %d: only %llu/%d measured iterations replayed "
+                "the graph — results below are contaminated by fallback calls\n",
+                B, static_cast<unsigned long long>(measured_replays), iters);
         }
 
         const Stats sp = summarize(s_pre), sd = summarize(s_disp), sw = summarize(s_wait),
                     sc = summarize(s_dec), st = summarize(s_tot);
         const Stats gp = summarize(g_pre), gd = summarize(g_disp), gw = summarize(g_wait),
                     gc = summarize(g_dec), gt = summarize(g_tot);
-        std::printf("[pipeline-compare] batch %d (%d iters, p50 ms, src %dx%d):\n", B, iters,
-                    src_w, src_h);
+        std::printf("[pipeline-compare] batch %d (%d iters, p50 ms, src %dx%d):\n", B, iters, src_w,
+                    src_h);
         std::printf("  %-18s %-12s %-12s %s\n", "stage (CPU)", "split", "full-graph", "delta");
         auto row = [](const char* name, double a, double b) {
             std::printf("  %-18s %-12.3f %-12.3f %+.3f\n", name, a, b, b - a);
@@ -221,8 +226,8 @@ int run_pipeline_compare(const std::filesystem::path& engine, const std::filesys
         row("decode host", sc.p50, gc.p50);
         const double cpu_s = sp.p50 + sd.p50 + sc.p50;
         const double cpu_g = gp.p50 + gd.p50 + gc.p50;
-        std::printf("  %-18s %-12.3f %-12.3f %+.3f  <- CPU freed per call\n",
-                    "CPU total", cpu_s, cpu_g, cpu_g - cpu_s);
+        std::printf("  %-18s %-12.3f %-12.3f %+.3f  <- CPU freed per call\n", "CPU total", cpu_s,
+                    cpu_g, cpu_g - cpu_s);
         std::printf("  %-18s %-12.3f %-12.3f %+.3f (%+.1f%%)\n", "total wall", st.p50, gt.p50,
                     gt.p50 - st.p50, st.p50 > 0 ? (gt.p50 / st.p50 - 1) * 100 : 0);
         std::printf("  parity: %lld/%d iterations mismatched (%zu detections/frame)%s\n",
@@ -235,9 +240,9 @@ int run_pipeline_compare(const std::filesystem::path& engine, const std::filesys
         // reads the threshold through mapped pinned memory at execution time, so
         // a baked (capture-time) value would show up here as a count mismatch.
         const float probe = threshold * 0.5f + 1e-4f;
-        const auto  pa    = split.detect_batch(frames, probe);
-        const auto  pb    = graph.detect_batch(frames, probe);
-        const bool  ok    = detections_equal(pa, pb);
+        const auto pa = split.detect_batch(frames, probe);
+        const auto pb = graph.detect_batch(frames, probe);
+        const bool ok = detections_equal(pa, pb);
         std::printf("  threshold probe (%.4f vs frozen %.4f): %s\n", probe, threshold,
                     ok ? "byte-identical" : "** MISMATCH — threshold baked into graph **");
         if (!ok) return 1;
@@ -261,33 +266,51 @@ int main(int argc, char** argv) {
         for (int i = 1; i < argc; ++i) {
             std::string_view a = argv[i];
             if (a == "-h" || a == "--help") {
-                std::printf("usage: %s --engine E [--meta M] [--image img] [--src-size WxH] "
-                            "[--batches 1,2,4,8] [--warmup 20] [--iters 200] [--json out] [--cuda-graph]\n"
-                            "  --cuda-graph  replay enqueueV3+D2H from a captured CUDA graph "
-                            "(infer col then includes D2H)\n  dfine v%s\n",
-                            argv[0], dfine::version());
+                std::printf(
+                    "usage: %s --engine E [--meta M] [--image img] [--src-size WxH] "
+                    "[--batches 1,2,4,8] [--warmup 20] [--iters 200] [--json out] [--cuda-graph]\n"
+                    "  --cuda-graph  replay enqueueV3+D2H from a captured CUDA graph "
+                    "(infer col then includes D2H)\n  dfine v%s\n",
+                    argv[0], dfine::version());
                 return 0;
-            } else if (starts_with(a, "--engine"))    engine = next_value(argc, argv, i, "--engine");
-            else if (starts_with(a, "--meta"))         meta = next_value(argc, argv, i, "--meta");
-            else if (starts_with(a, "--image"))        image = next_value(argc, argv, i, "--image");
-            else if (starts_with(a, "--batches"))      batches_arg = next_value(argc, argv, i, "--batches");
-            else if (starts_with(a, "--warmup"))       warmup = parse_int(next_value(argc, argv, i, "--warmup"), "--warmup");
-            else if (starts_with(a, "--iters"))        iters = parse_int(next_value(argc, argv, i, "--iters"), "--iters");
-            else if (starts_with(a, "--threshold"))    threshold = parse_float(next_value(argc, argv, i, "--threshold"), "--threshold");
-            else if (starts_with(a, "--json"))         json_out = next_value(argc, argv, i, "--json");
-            else if (a == "--cuda-graph")              cuda_graph = true;
-            else if (a == "--graph-compare")           { cuda_graph = true; graph_compare = true; }
-            else if (a == "--gpu-decode")              gpu_decode = true;
-            else if (a == "--pipeline-compare")        pipeline_compare = true;
+            } else if (starts_with(a, "--engine"))
+                engine = next_value(argc, argv, i, "--engine");
+            else if (starts_with(a, "--meta"))
+                meta = next_value(argc, argv, i, "--meta");
+            else if (starts_with(a, "--image"))
+                image = next_value(argc, argv, i, "--image");
+            else if (starts_with(a, "--batches"))
+                batches_arg = next_value(argc, argv, i, "--batches");
+            else if (starts_with(a, "--warmup"))
+                warmup = parse_int(next_value(argc, argv, i, "--warmup"), "--warmup");
+            else if (starts_with(a, "--iters"))
+                iters = parse_int(next_value(argc, argv, i, "--iters"), "--iters");
+            else if (starts_with(a, "--threshold"))
+                threshold = parse_float(next_value(argc, argv, i, "--threshold"), "--threshold");
+            else if (starts_with(a, "--json"))
+                json_out = next_value(argc, argv, i, "--json");
+            else if (a == "--cuda-graph")
+                cuda_graph = true;
+            else if (a == "--graph-compare") {
+                cuda_graph = true;
+                graph_compare = true;
+            } else if (a == "--gpu-decode")
+                gpu_decode = true;
+            else if (a == "--pipeline-compare")
+                pipeline_compare = true;
             else if (starts_with(a, "--src-size")) {
                 std::string v = next_value(argc, argv, i, "--src-size");
                 const auto x = v.find('x');
                 if (x == std::string::npos) throw std::runtime_error("--src-size expects WxH");
                 src_w = std::stoi(v.substr(0, x));
                 src_h = std::stoi(v.substr(x + 1));
-            } else throw std::runtime_error("unknown arg: " + std::string(a));
+            } else
+                throw std::runtime_error("unknown arg: " + std::string(a));
         }
-        if (engine.empty()) { std::fprintf(stderr, "error: --engine required\n"); return 2; }
+        if (engine.empty()) {
+            std::fprintf(stderr, "error: --engine required\n");
+            return 2;
+        }
 
         // Detector-level split-vs-full-graph comparison (P3); self-contained mode.
         if (pipeline_compare) {
@@ -303,7 +326,8 @@ int main(int argc, char** argv) {
         // Meta (sidecar or default) for input dims + tensor names.
         dfine::EngineMeta m;
         if (meta.empty()) {
-            std::filesystem::path alt = engine; alt.replace_extension(".json");
+            std::filesystem::path alt = engine;
+            alt.replace_extension(".json");
             if (std::filesystem::is_regular_file(engine.string() + ".json"))
                 m = dfine::EngineMeta::from_json_file(engine.string() + ".json");
             else if (std::filesystem::is_regular_file(alt))
@@ -328,10 +352,12 @@ int main(int argc, char** argv) {
             loaded = dfine_app::load_image_rgb(image.string());
             if (!loaded) throw std::runtime_error("cannot decode image: " + image.string());
             base = loaded.view();
-            src_w = base.width; src_h = base.height;
+            src_w = base.width;
+            src_h = base.height;
         } else {
             synth.resize(static_cast<std::size_t>(src_w) * src_h * 3);
-            for (std::size_t i = 0; i < synth.size(); ++i) synth[i] = static_cast<std::uint8_t>((i * 37 + 11) & 0xFF);
+            for (std::size_t i = 0; i < synth.size(); ++i)
+                synth[i] = static_cast<std::uint8_t>((i * 37 + 11) & 0xFF);
             base = dfine::ImageU8{synth.data(), src_h, src_w, 3, src_w * 3, false};
         }
 
@@ -340,23 +366,26 @@ int main(int argc, char** argv) {
         pre.set_std(m.std[0], m.std[1], m.std[2]);
 
         const dfine::BindingInfo* b_logits = find_output(session, "logits", 80);
-        const dfine::BindingInfo* b_boxes  = find_output(session, "boxes", 4);
-        if (!b_logits || !b_boxes) throw std::runtime_error("dfine_bench: cannot resolve logits/boxes outputs");
+        const dfine::BindingInfo* b_boxes = find_output(session, "boxes", 4);
+        if (!b_logits || !b_boxes)
+            throw std::runtime_error("dfine_bench: cannot resolve logits/boxes outputs");
         const int N = static_cast<int>(b_logits->shape.d[b_logits->shape.nbDims - 2]);
         const int C = static_cast<int>(b_logits->shape.d[b_logits->shape.nbDims - 1]);
 
         cudaStream_t stream = session.stream();
         cudaEvent_t e0, e1, e2, e3;
-        DFINE_CUDA_CHECK(cudaEventCreate(&e0)); DFINE_CUDA_CHECK(cudaEventCreate(&e1));
-        DFINE_CUDA_CHECK(cudaEventCreate(&e2)); DFINE_CUDA_CHECK(cudaEventCreate(&e3));
+        DFINE_CUDA_CHECK(cudaEventCreate(&e0));
+        DFINE_CUDA_CHECK(cudaEventCreate(&e1));
+        DFINE_CUDA_CHECK(cudaEventCreate(&e2));
+        DFINE_CUDA_CHECK(cudaEventCreate(&e3));
 
         const auto batches = parse_batches(batches_arg);
-        std::printf("dfine_bench: engine=%s  variant=%s  input=%dx%d  src=%dx%d  warmup=%d iters=%d%s\n",
-                    engine.filename().c_str(), m.variant.empty() ? "?" : m.variant.c_str(),
-                    W, H, src_w, src_h, warmup, iters,
-                    cuda_graph ? "  [cuda-graph: infer_ms includes D2H]" : "");
-        std::printf("%-6s %-11s %-11s %-11s %-11s %-11s %-11s %-8s\n",
-                    "batch", "total_p50", "total_p90", "total_p99", "pre_ms", "infer_ms", "decode_ms", "img/s");
+        std::printf(
+            "dfine_bench: engine=%s  variant=%s  input=%dx%d  src=%dx%d  warmup=%d iters=%d%s\n",
+            engine.filename().c_str(), m.variant.empty() ? "?" : m.variant.c_str(), W, H, src_w,
+            src_h, warmup, iters, cuda_graph ? "  [cuda-graph: infer_ms includes D2H]" : "");
+        std::printf("%-6s %-11s %-11s %-11s %-11s %-11s %-11s %-8s\n", "batch", "total_p50",
+                    "total_p90", "total_p99", "pre_ms", "infer_ms", "decode_ms", "img/s");
 
         std::string json = "{\"engine\":\"" + engine.string() + "\",\"input\":[" +
                            std::to_string(W) + "," + std::to_string(H) + "]," +
@@ -365,57 +394,75 @@ int main(int argc, char** argv) {
         std::size_t peak_used_mib = 0;
 
         for (int B : batches) {
-            if (dynamic) session.set_input_shape(in_name, nvinfer1::Dims4{B, 3, H, W});
-            else if (B != 1) { std::printf("(static engine — skipping batch %d)\n", B); continue; }
+            if (dynamic)
+                session.set_input_shape(in_name, nvinfer1::Dims4{B, 3, H, W});
+            else if (B != 1) {
+                std::printf("(static engine — skipping batch %d)\n", B);
+                continue;
+            }
 
             const std::size_t single = static_cast<std::size_t>(3) * H * W;
             float* d_input = static_cast<float*>(session.device_buffer(in_name));
             std::vector<float> h_logits(static_cast<std::size_t>(B) * N * C);
             std::vector<float> h_boxes(static_cast<std::size_t>(B) * N * 4);
             void* d_logits = session.device_buffer(b_logits->name);
-            void* d_boxes  = session.device_buffer(b_boxes->name);
+            void* d_boxes = session.device_buffer(b_boxes->name);
             const std::size_t logits_bytes = h_logits.size() * sizeof(float);
-            const std::size_t boxes_bytes  = h_boxes.size() * sizeof(float);
+            const std::size_t boxes_bytes = h_boxes.size() * sizeof(float);
 
             // CUDA-graph replay copies into pinned buffers (a captured graph cannot D2H
             // into pageable memory — it would force a sync and abort capture).
             dfine::HostPtr p_logits, p_boxes;
             if (cuda_graph) {
                 void* p = nullptr;
-                DFINE_CUDA_CHECK(cudaMallocHost(&p, logits_bytes)); p_logits.reset(p);
-                DFINE_CUDA_CHECK(cudaMallocHost(&p, boxes_bytes));  p_boxes.reset(p);
+                DFINE_CUDA_CHECK(cudaMallocHost(&p, logits_bytes));
+                p_logits.reset(p);
+                DFINE_CUDA_CHECK(cudaMallocHost(&p, boxes_bytes));
+                p_boxes.reset(p);
             }
             float* pl = static_cast<float*>(p_logits.get());
             float* pb = static_cast<float*>(p_boxes.get());
             dfine::CudaGraphExec graph_exec;  // empty => plain enqueueV3 path
 
-            dfine::PostprocessParams pp; pp.num_queries = N; pp.num_classes = C; pp.topk = N; pp.threshold = threshold;
+            dfine::PostprocessParams pp;
+            pp.num_queries = N;
+            pp.num_classes = C;
+            pp.topk = N;
+            pp.threshold = threshold;
 
             // GPU-decode scratch (Zero-D2H): replaces the full-logits D2H + CPU decode
             // with on-device kernels + a compact survivor D2H, folded into the d2h stage.
             dfine::DevPtr g_keys, g_vals, g_ko, g_vo, g_seg, g_temp, g_out, g_counts, g_scale;
             dfine::GpuDecodeScratch gdec;
             std::vector<dfine::DetectionGPU> gh_out;
-            std::vector<uint32_t>            gh_counts;
+            std::vector<uint32_t> gh_counts;
             if (gpu_decode) {
-                const int    n_cand = N * C;
+                const int n_cand = N * C;
                 const std::size_t tot = static_cast<std::size_t>(B) * n_cand;
                 auto da = [](dfine::DevPtr& p, std::size_t bytes) -> void* {
-                    void* q = nullptr; DFINE_CUDA_CHECK(cudaMalloc(&q, bytes)); p.reset(q); return q; };
-                gdec.keys     = static_cast<float*>(da(g_keys, tot * sizeof(float)));
-                gdec.vals     = static_cast<uint32_t*>(da(g_vals, tot * sizeof(uint32_t)));
+                    void* q = nullptr;
+                    DFINE_CUDA_CHECK(cudaMalloc(&q, bytes));
+                    p.reset(q);
+                    return q;
+                };
+                gdec.keys = static_cast<float*>(da(g_keys, tot * sizeof(float)));
+                gdec.vals = static_cast<uint32_t*>(da(g_vals, tot * sizeof(uint32_t)));
                 gdec.keys_out = static_cast<float*>(da(g_ko, tot * sizeof(float)));
                 gdec.vals_out = static_cast<uint32_t*>(da(g_vo, tot * sizeof(uint32_t)));
-                gdec.seg_off  = static_cast<int*>(da(g_seg, static_cast<std::size_t>(B + 1) * sizeof(int)));
-                gdec.out      = static_cast<dfine::DetectionGPU*>(
+                gdec.seg_off =
+                    static_cast<int*>(da(g_seg, static_cast<std::size_t>(B + 1) * sizeof(int)));
+                gdec.out = static_cast<dfine::DetectionGPU*>(
                     da(g_out, static_cast<std::size_t>(B) * N * sizeof(dfine::DetectionGPU)));
-                gdec.counts   = static_cast<uint32_t*>(da(g_counts, static_cast<std::size_t>(B) * sizeof(uint32_t)));
-                gdec.scale_wh = static_cast<float2*>(da(g_scale, static_cast<std::size_t>(B) * sizeof(float2)));
+                gdec.counts = static_cast<uint32_t*>(
+                    da(g_counts, static_cast<std::size_t>(B) * sizeof(uint32_t)));
+                gdec.scale_wh =
+                    static_cast<float2*>(da(g_scale, static_cast<std::size_t>(B) * sizeof(float2)));
                 gdec.cub_temp_bytes = dfine::gpu_decode_temp_bytes(B, n_cand);
                 gdec.cub_temp = da(g_temp, gdec.cub_temp_bytes);
                 dfine::gpu_decode_fill_segoff(gdec.seg_off, B, n_cand, stream);
-                std::vector<float2> hs(static_cast<std::size_t>(B),
-                                       float2{static_cast<float>(src_w), static_cast<float>(src_h)});
+                std::vector<float2> hs(
+                    static_cast<std::size_t>(B),
+                    float2{static_cast<float>(src_w), static_cast<float>(src_h)});
                 DFINE_CUDA_CHECK(cudaMemcpyAsync(gdec.scale_wh, hs.data(),
                                                  static_cast<std::size_t>(B) * sizeof(float2),
                                                  cudaMemcpyHostToDevice, stream));
@@ -430,10 +477,12 @@ int main(int argc, char** argv) {
                 DFINE_CUDA_CHECK(cudaEventRecord(e1, stream));
                 if (gpu_decode) {
                     // infer -> on-device decode -> compact survivor D2H (no CPU decode).
-                    if (!session.context()->enqueueV3(stream)) throw std::runtime_error("enqueueV3 failed");
+                    if (!session.context()->enqueueV3(stream))
+                        throw std::runtime_error("enqueueV3 failed");
                     DFINE_CUDA_CHECK(cudaEventRecord(e2, stream));
                     dfine::gpu_decode_enqueue(static_cast<const float*>(d_logits),
-                                              static_cast<const float*>(d_boxes), B, N, C, N, threshold,
+                                              static_cast<const float*>(d_boxes), B, N, C, N,
+                                              threshold,
                                               /*threshold_dev=*/nullptr, gdec, stream);
                     DFINE_CUDA_CHECK(cudaMemcpyAsync(gh_out.data(), gdec.out,
                                                      gh_out.size() * sizeof(dfine::DetectionGPU),
@@ -443,7 +492,10 @@ int main(int argc, char** argv) {
                                                      cudaMemcpyDeviceToHost, stream));
                     DFINE_CUDA_CHECK(cudaEventRecord(e3, stream));
                     DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
-                    pre_ms = ev_ms(e0, e1); inf_ms = ev_ms(e1, e2); d2h_ms = ev_ms(e2, e3); dec_ms = 0.0;
+                    pre_ms = ev_ms(e0, e1);
+                    inf_ms = ev_ms(e1, e2);
+                    d2h_ms = ev_ms(e2, e3);
+                    dec_ms = 0.0;
                     return;
                 }
                 if (graph_exec) {
@@ -452,34 +504,45 @@ int main(int argc, char** argv) {
                     DFINE_CUDA_CHECK(cudaEventRecord(e2, stream));
                     DFINE_CUDA_CHECK(cudaEventRecord(e3, stream));
                 } else {
-                    if (!session.context()->enqueueV3(stream)) throw std::runtime_error("enqueueV3 failed");
+                    if (!session.context()->enqueueV3(stream))
+                        throw std::runtime_error("enqueueV3 failed");
                     DFINE_CUDA_CHECK(cudaEventRecord(e2, stream));
-                    DFINE_CUDA_CHECK(cudaMemcpyAsync(h_logits.data(), d_logits, logits_bytes, cudaMemcpyDeviceToHost, stream));
-                    DFINE_CUDA_CHECK(cudaMemcpyAsync(h_boxes.data(), d_boxes, boxes_bytes, cudaMemcpyDeviceToHost, stream));
+                    DFINE_CUDA_CHECK(cudaMemcpyAsync(h_logits.data(), d_logits, logits_bytes,
+                                                     cudaMemcpyDeviceToHost, stream));
+                    DFINE_CUDA_CHECK(cudaMemcpyAsync(h_boxes.data(), d_boxes, boxes_bytes,
+                                                     cudaMemcpyDeviceToHost, stream));
                     DFINE_CUDA_CHECK(cudaEventRecord(e3, stream));
                 }
                 DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
-                pre_ms = ev_ms(e0, e1); inf_ms = ev_ms(e1, e2); d2h_ms = ev_ms(e2, e3);
+                pre_ms = ev_ms(e0, e1);
+                inf_ms = ev_ms(e1, e2);
+                d2h_ms = ev_ms(e2, e3);
                 const float* Lsrc = graph_exec ? pl : h_logits.data();
                 const float* Bsrc = graph_exec ? pb : h_boxes.data();
                 const auto t0 = std::chrono::steady_clock::now();
                 for (int b = 0; b < B; ++b)
                     (void)dfine::decode_detections(Lsrc + static_cast<std::size_t>(b) * N * C,
-                                                   Bsrc + static_cast<std::size_t>(b) * N * 4, src_w, src_h, pp);
-                dec_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                                                   Bsrc + static_cast<std::size_t>(b) * N * 4,
+                                                   src_w, src_h, pp);
+                dec_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                        .count();
             };
 
             double a, bb, c, d;
-            for (int w = 0; w < warmup; ++w) one_iter(a, bb, c, d);  // enqueueV3 path: flush tactics + shape
+            for (int w = 0; w < warmup; ++w)
+                one_iter(a, bb, c, d);  // enqueueV3 path: flush tactics + shape
 
             if (cuda_graph && session.num_aux_streams() != 0) {
-                std::printf("(engine uses %d aux streams — ThreadLocal capture unsafe, using enqueueV3)\n",
-                            session.num_aux_streams());
+                std::printf(
+                    "(engine uses %d aux streams — ThreadLocal capture unsafe, using enqueueV3)\n",
+                    session.num_aux_streams());
             } else if (cuda_graph) {
                 // Capture enqueueV3 + D2H after the warm-up has flushed deferred setup.
                 session.context()->setEnqueueEmitsProfile(false);
                 cudaGraph_t g = nullptr;
-                bool ok = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) == cudaSuccess;
+                bool ok =
+                    cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) == cudaSuccess;
                 if (ok) {
                     ok = session.context()->enqueueV3(stream);
                     cudaMemcpyAsync(pl, d_logits, logits_bytes, cudaMemcpyDeviceToHost, stream);
@@ -498,7 +561,10 @@ int main(int argc, char** argv) {
             }
 
             if (graph_compare) {
-                if (!graph_exec) { std::printf("[graph-compare] batch %d: capture failed, skipping\n", B); continue; }
+                if (!graph_exec) {
+                    std::printf("[graph-compare] batch %d: capture failed, skipping\n", B);
+                    continue;
+                }
                 // Rigorous same-run comparison. Per iteration, run BOTH the enqueueV3+D2H path
                 // and the graph-replay path back-to-back (microseconds apart → identical GPU-clock
                 // state; drift cancels). Time each on the CPU (dispatch/launch cost — exactly what
@@ -512,39 +578,49 @@ int main(int argc, char** argv) {
                 std::vector<double> ng_cpu, g_cpu, ng_wall, g_wall, ng_gpu, g_gpu;
                 for (int it = 0; it < iters; ++it) {
                     for (int b = 0; b < B; ++b) pre.process(base, d_input + b * single, stream);
-                    DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));  // exclude preprocess from both
+                    DFINE_CUDA_CHECK(
+                        cudaStreamSynchronize(stream));  // exclude preprocess from both
                     // no-graph: enqueueV3 + D2H
                     DFINE_CUDA_CHECK(cudaEventRecord(e0, stream));
                     const auto c0 = Clock::now();
-                    if (!session.context()->enqueueV3(stream)) throw std::runtime_error("enqueueV3 failed");
-                    DFINE_CUDA_CHECK(cudaMemcpyAsync(h_logits.data(), d_logits, logits_bytes, cudaMemcpyDeviceToHost, stream));
-                    DFINE_CUDA_CHECK(cudaMemcpyAsync(h_boxes.data(), d_boxes, boxes_bytes, cudaMemcpyDeviceToHost, stream));
-                    const auto c1 = Clock::now();               // CPU dispatch done (work is async)
+                    if (!session.context()->enqueueV3(stream))
+                        throw std::runtime_error("enqueueV3 failed");
+                    DFINE_CUDA_CHECK(cudaMemcpyAsync(h_logits.data(), d_logits, logits_bytes,
+                                                     cudaMemcpyDeviceToHost, stream));
+                    DFINE_CUDA_CHECK(cudaMemcpyAsync(h_boxes.data(), d_boxes, boxes_bytes,
+                                                     cudaMemcpyDeviceToHost, stream));
+                    const auto c1 = Clock::now();  // CPU dispatch done (work is async)
                     DFINE_CUDA_CHECK(cudaEventRecord(e1, stream));
                     DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
-                    const auto c1s = Clock::now();              // full wall done
+                    const auto c1s = Clock::now();  // full wall done
                     // graph: single replay (enqueueV3+D2H fused)
                     DFINE_CUDA_CHECK(cudaEventRecord(e2, stream));
                     const auto c2 = Clock::now();
                     DFINE_CUDA_CHECK(cudaGraphLaunch(graph_exec.get(), stream));
-                    const auto c3 = Clock::now();               // CPU dispatch done
+                    const auto c3 = Clock::now();  // CPU dispatch done
                     DFINE_CUDA_CHECK(cudaEventRecord(e3, stream));
                     DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
                     const auto c3s = Clock::now();
-                    ng_cpu.push_back(cpu_ms(c0, c1));   g_cpu.push_back(cpu_ms(c2, c3));
-                    ng_wall.push_back(cpu_ms(c0, c1s)); g_wall.push_back(cpu_ms(c2, c3s));
-                    ng_gpu.push_back(ev_ms(e0, e1));    g_gpu.push_back(ev_ms(e2, e3));
+                    ng_cpu.push_back(cpu_ms(c0, c1));
+                    g_cpu.push_back(cpu_ms(c2, c3));
+                    ng_wall.push_back(cpu_ms(c0, c1s));
+                    g_wall.push_back(cpu_ms(c2, c3s));
+                    ng_gpu.push_back(ev_ms(e0, e1));
+                    g_gpu.push_back(ev_ms(e2, e3));
                 }
                 const Stats nc = summarize(ng_cpu), gc = summarize(g_cpu);
                 const Stats nw = summarize(ng_wall), gw = summarize(g_wall);
-                const Stats ng = summarize(ng_gpu),  gg = summarize(g_gpu);
+                const Stats ng = summarize(ng_gpu), gg = summarize(g_gpu);
                 std::printf("[graph-compare] batch %d (%d iters, p50 ms):\n", B, iters);
-                std::printf("  CPU dispatch : enqueueV3 %.3f  vs graphLaunch %.3f   -> graph removes %.3f ms of CPU launch\n",
-                            nc.p50, gc.p50, nc.p50 - gc.p50);
+                std::printf(
+                    "  CPU dispatch : enqueueV3 %.3f  vs graphLaunch %.3f   -> graph removes %.3f "
+                    "ms of CPU launch\n",
+                    nc.p50, gc.p50, nc.p50 - gc.p50);
                 std::printf("  GPU wall     : no-graph  %.3f  vs graph       %.3f   (Δ %.3f)\n",
                             ng.p50, gg.p50, ng.p50 - gg.p50);
-                std::printf("  full wall    : no-graph  %.3f  vs graph       %.3f   (Δ %.3f ms, %+.1f%%)\n",
-                            nw.p50, gw.p50, nw.p50 - gw.p50, nw.p50 > 0 ? (gw.p50 / nw.p50 - 1) * 100 : 0);
+                std::printf(
+                    "  full wall    : no-graph  %.3f  vs graph       %.3f   (Δ %.3f ms, %+.1f%%)\n",
+                    nw.p50, gw.p50, nw.p50 - gw.p50, nw.p50 > 0 ? (gw.p50 / nw.p50 - 1) * 100 : 0);
                 continue;
             }
 
@@ -558,19 +634,24 @@ int main(int argc, char** argv) {
             totals.reserve(iters);
             for (int it = 0; it < iters; ++it) {
                 one_iter(a, bb, c, d);
-                pres.push_back(a); infs.push_back(bb); d2hs.push_back(c); decs.push_back(d);
+                pres.push_back(a);
+                infs.push_back(bb);
+                d2hs.push_back(c);
+                decs.push_back(d);
                 totals.push_back(a + bb + c + d);
             }
             const Stats st = summarize(totals);
-            const Stats sp = summarize(pres), si = summarize(infs), s2 = summarize(d2hs), sd = summarize(decs);
+            const Stats sp = summarize(pres), si = summarize(infs), s2 = summarize(d2hs),
+                        sd = summarize(decs);
             const double imgs_per_s = 1000.0 * B / st.p50;
-            std::printf("%-6d %-11.3f %-11.3f %-11.3f %-11.3f %-11.3f %-11.3f %-8.1f\n",
-                        B, st.p50, st.p90, st.p99, sp.p50, si.p50, sd.p50, imgs_per_s);
+            std::printf("%-6d %-11.3f %-11.3f %-11.3f %-11.3f %-11.3f %-11.3f %-8.1f\n", B, st.p50,
+                        st.p90, st.p99, sp.p50, si.p50, sd.p50, imgs_per_s);
 
             if (!first_json) json += ",";
             first_json = false;
             char buf[512];
-            std::snprintf(buf, sizeof buf,
+            std::snprintf(
+                buf, sizeof buf,
                 "{\"batch\":%d,\"total_p50\":%.4f,\"total_p90\":%.4f,\"total_p99\":%.4f,"
                 "\"preprocess_p50\":%.4f,\"infer_p50\":%.4f,\"d2h_p50\":%.4f,\"decode_p50\":%.4f,"
                 "\"img_per_s\":%.2f,\"gpu_mem_mib\":%zu}",
@@ -578,9 +659,13 @@ int main(int argc, char** argv) {
             json += buf;
         }
         json += "],\"peak_gpu_mem_mib\":" + std::to_string(peak_used_mib) + "}\n";
-        std::printf("peak GPU mem (engine+buffers): %zu MiB / %zu total\n", peak_used_mib, total_mem / (1024 * 1024));
+        std::printf("peak GPU mem (engine+buffers): %zu MiB / %zu total\n", peak_used_mib,
+                    total_mem / (1024 * 1024));
 
-        cudaEventDestroy(e0); cudaEventDestroy(e1); cudaEventDestroy(e2); cudaEventDestroy(e3);
+        cudaEventDestroy(e0);
+        cudaEventDestroy(e1);
+        cudaEventDestroy(e2);
+        cudaEventDestroy(e3);
         if (!json_out.empty()) {
             std::ofstream jf(json_out);
             jf << json;

@@ -8,11 +8,15 @@ namespace dfine {
 namespace detail {
 
 struct DevFree {
-    void operator()(void* p) const noexcept { if (p) cudaFree(p); }
+    void operator()(void* p) const noexcept {
+        if (p) cudaFree(p);
+    }
 };
 
 struct HostFree {
-    void operator()(void* p) const noexcept { if (p) cudaFreeHost(p); }
+    void operator()(void* p) const noexcept {
+        if (p) cudaFreeHost(p);
+    }
 };
 
 }  // namespace detail
@@ -27,10 +31,12 @@ using HostPtr = std::unique_ptr<void, detail::HostFree>;
 // caller so it is destroyed even if construction later throws. Move nulls the
 // source so the handle is never double-destroyed.
 class CudaStream {
-   public:
+ public:
     CudaStream() = default;
     explicit CudaStream(cudaStream_t s) noexcept : s_(s) {}
-    ~CudaStream() { if (s_) cudaStreamDestroy(s_); }
+    ~CudaStream() {
+        if (s_) cudaStreamDestroy(s_);
+    }
 
     CudaStream(CudaStream&& o) noexcept : s_(std::exchange(o.s_, nullptr)) {}
     CudaStream& operator=(CudaStream&& o) noexcept {
@@ -40,22 +46,24 @@ class CudaStream {
         }
         return *this;
     }
-    CudaStream(const CudaStream&)            = delete;
+    CudaStream(const CudaStream&) = delete;
     CudaStream& operator=(const CudaStream&) = delete;
 
     cudaStream_t get() const noexcept { return s_; }
     explicit operator bool() const noexcept { return s_ != nullptr; }
 
-   private:
+ private:
     cudaStream_t s_{nullptr};
 };
 
 // Owning CUDA event, same ownership contract as CudaStream.
 class CudaEvent {
-   public:
+ public:
     CudaEvent() = default;
     explicit CudaEvent(cudaEvent_t e) noexcept : e_(e) {}
-    ~CudaEvent() { if (e_) cudaEventDestroy(e_); }
+    ~CudaEvent() {
+        if (e_) cudaEventDestroy(e_);
+    }
 
     CudaEvent(CudaEvent&& o) noexcept : e_(std::exchange(o.e_, nullptr)) {}
     CudaEvent& operator=(CudaEvent&& o) noexcept {
@@ -65,23 +73,25 @@ class CudaEvent {
         }
         return *this;
     }
-    CudaEvent(const CudaEvent&)            = delete;
+    CudaEvent(const CudaEvent&) = delete;
     CudaEvent& operator=(const CudaEvent&) = delete;
 
     cudaEvent_t get() const noexcept { return e_; }
     explicit operator bool() const noexcept { return e_ != nullptr; }
 
-   private:
+ private:
     cudaEvent_t e_{nullptr};
 };
 
 // Owning captured CUDA graph (the template produced by stream capture), same
 // ownership contract as CudaStream. Destroyed with cudaGraphDestroy.
 class CudaGraph {
-   public:
+ public:
     CudaGraph() = default;
     explicit CudaGraph(cudaGraph_t g) noexcept : g_(g) {}
-    ~CudaGraph() { if (g_) cudaGraphDestroy(g_); }
+    ~CudaGraph() {
+        if (g_) cudaGraphDestroy(g_);
+    }
 
     CudaGraph(CudaGraph&& o) noexcept : g_(std::exchange(o.g_, nullptr)) {}
     CudaGraph& operator=(CudaGraph&& o) noexcept {
@@ -91,23 +101,25 @@ class CudaGraph {
         }
         return *this;
     }
-    CudaGraph(const CudaGraph&)            = delete;
+    CudaGraph(const CudaGraph&) = delete;
     CudaGraph& operator=(const CudaGraph&) = delete;
 
     cudaGraph_t get() const noexcept { return g_; }
     cudaGraph_t* addr() noexcept { return &g_; }  // for cudaStreamEndCapture(&g_)
     explicit operator bool() const noexcept { return g_ != nullptr; }
 
-   private:
+ private:
     cudaGraph_t g_{nullptr};
 };
 
 // Owning instantiated (executable) CUDA graph. Destroyed with cudaGraphExecDestroy.
 class CudaGraphExec {
-   public:
+ public:
     CudaGraphExec() = default;
     explicit CudaGraphExec(cudaGraphExec_t e) noexcept : e_(e) {}
-    ~CudaGraphExec() { if (e_) cudaGraphExecDestroy(e_); }
+    ~CudaGraphExec() {
+        if (e_) cudaGraphExecDestroy(e_);
+    }
 
     CudaGraphExec(CudaGraphExec&& o) noexcept : e_(std::exchange(o.e_, nullptr)) {}
     CudaGraphExec& operator=(CudaGraphExec&& o) noexcept {
@@ -117,13 +129,13 @@ class CudaGraphExec {
         }
         return *this;
     }
-    CudaGraphExec(const CudaGraphExec&)            = delete;
+    CudaGraphExec(const CudaGraphExec&) = delete;
     CudaGraphExec& operator=(const CudaGraphExec&) = delete;
 
     cudaGraphExec_t get() const noexcept { return e_; }
     explicit operator bool() const noexcept { return e_ != nullptr; }
 
-   private:
+ private:
     cudaGraphExec_t e_{nullptr};
 };
 

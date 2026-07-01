@@ -14,6 +14,9 @@
 #include "dfine/tasks/detector.hpp"
 #include "dfine/version.hpp"
 
+#include <cuda_runtime_api.h>
+
+#include <cstddef>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -28,6 +31,8 @@ int main(int argc, char** argv) {
     int batch = 1;
     bool cuda_graph = false;
     bool gpu_decode = false;
+    bool own_dev_mem = false;
+    bool do_freeze = false;
     try {
         for (int i = 1; i < argc; ++i) {
             std::string_view a = argv[i];
@@ -45,6 +50,8 @@ int main(int argc, char** argv) {
             else if (starts_with(a, "--batch"))         batch = parse_int(next_value(argc, argv, i, "--batch"), "--batch");
             else if (a == "--cuda-graph")               cuda_graph = true;
             else if (a == "--gpu-decode")               gpu_decode = true;
+            else if (a == "--own-device-memory")        own_dev_mem = true;
+            else if (a == "--freeze")                   do_freeze = true;
             else throw std::runtime_error("unknown arg: " + std::string(a));
         }
         if (engine.empty() || images_dir.empty() || filelist.empty() || out.empty()) {
@@ -57,8 +64,15 @@ int main(int argc, char** argv) {
         opts.threshold = threshold;
         opts.use_cuda_graph = cuda_graph;  // validates the graph path produces == mAP
         opts.gpu_decode = gpu_decode;      // validates the GPU-decode path == CPU-decode mAP
+        opts.own_device_memory = own_dev_mem;  // validates the kUSER_MANAGED activation path
         dfine::DFineDetector det = meta.empty() ? dfine::DFineDetector(engine, opts)
                                                 : dfine::DFineDetector(engine, meta, opts);
+
+        std::size_t free_after_freeze = 0, total_vram = 0;
+        if (do_freeze) {
+            det.freeze(batch);  // warm to peak + lock; steady state must not allocate
+            cudaMemGetInfo(&free_after_freeze, &total_vram);
+        }
 
         std::ifstream fl(filelist);
         if (!fl) throw std::runtime_error("cannot open filelist: " + filelist.string());
@@ -116,6 +130,14 @@ int main(int argc, char** argv) {
         os << "]\n";
         std::fprintf(stderr, "[dfine_coco_eval] done: %lld images, %lld detections, %lld missing "
                      "(batch=%d)\n", n_imgs, n_dets, n_missing, batch);
+        if (do_freeze) {
+            std::size_t free_end = 0, tot = 0;
+            cudaMemGetInfo(&free_end, &tot);
+            const long long delta = static_cast<long long>(free_after_freeze) -
+                                    static_cast<long long>(free_end);
+            std::fprintf(stderr, "[dfine_coco_eval] frozen: free VRAM delta over %lld images = "
+                         "%+lld bytes (0 == no steady-state allocation)\n", n_imgs, delta);
+        }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;

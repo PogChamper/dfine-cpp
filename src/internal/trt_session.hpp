@@ -39,9 +39,13 @@ struct BindingInfo {
 // ("images", "logits", "boxes"); nothing here is hardcoded.
 class TrtSession {
    public:
+    // user_managed_memory: create the execution context with kUSER_MANAGED so TRT
+    // allocates NO activation memory; the caller must then supply it once via
+    // set_device_memory() before the first infer (see device_memory_size()).
     explicit TrtSession(const std::filesystem::path& engine_path,
                         nvinfer1::ILogger::Severity log_severity =
-                            nvinfer1::ILogger::Severity::kWARNING);
+                            nvinfer1::ILogger::Severity::kWARNING,
+                        bool user_managed_memory = false);
     ~TrtSession();
 
     // Non-movable by choice: the type is always owned in place (behind a PIMPL),
@@ -86,6 +90,19 @@ class TrtSession {
 
     cudaStream_t stream() const noexcept { return stream_.get(); }
 
+    // --- Frozen-memory contract (intensive-core P2) --------------------------------
+    // Device-memory size TRT needs for activation across all profiles (upper bound).
+    [[nodiscard]] int64_t device_memory_size() const noexcept;
+    // Supply user-managed activation memory (kUSER_MANAGED contexts only). `ptr` must
+    // stay alive for the context's lifetime; `size` >= device_memory_size().
+    void set_device_memory(void* ptr, int64_t size);
+    // Freeze: after this, a shape change that would GROW a binding buffer throws
+    // instead of reallocating — so device addresses never move (needed for CUDA-graph
+    // capture) and no allocation happens on the steady-state path. Warm up at the max
+    // shape first so every buffer has already reached peak capacity.
+    void freeze() noexcept { frozen_ = true; }
+    [[nodiscard]] bool frozen() const noexcept { return frozen_; }
+
     // Internal use — CUDA Graph capture hook.
     nvinfer1::IExecutionContext* context() const noexcept { return context_.get(); }
 
@@ -101,6 +118,8 @@ class TrtSession {
 
    private:
     void load_engine_(const std::filesystem::path& path);
+    bool user_managed_memory_{false};
+    bool frozen_{false};
     void parse_bindings_();
     void allocate_buffers_();
     void free_buffers_() noexcept;

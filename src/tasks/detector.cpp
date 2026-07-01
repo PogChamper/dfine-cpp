@@ -6,9 +6,12 @@
 #include "internal/cuda_check.hpp"
 #include "internal/cuda_preprocess.cuh"
 #include "internal/decode_gpu.cuh"
+#include "internal/device_arena.hpp"
 #include "internal/trt_session.hpp"
 
 #include "internal/cuda_raii.hpp"
+
+#include <memory>
 
 #include <NvInferRuntime.h>
 #include <cuda_runtime_api.h>
@@ -26,6 +29,10 @@
 namespace dfine {
 
 struct DFineDetector::Impl {
+    // Declared first so it is destroyed LAST (after `session` and its context): TRT
+    // requires user-managed device memory to outlive the execution context.
+    DevPtr                             act_mem_;  // TRT activation block (own_device_memory)
+
     TrtSession                         session;
     EngineMeta                         meta;
     std::unique_ptr<ImagePreprocessor> preprocessor;
@@ -74,17 +81,21 @@ struct DFineDetector::Impl {
     // survivors ([B*N] DetectionGPU + counts) — no full-logits D2H, no CPU decode.
     bool             gpu_decode_supported_{false};  // FP32 outputs
     bool             gpu_decode_warned_{false};
-    GpuDecodeScratch gdec_;                          // raw device pointers (own below)
-    DevPtr gdec_keys_, gdec_vals_, gdec_keys_out_, gdec_vals_out_;
-    DevPtr gdec_seg_, gdec_temp_, gdec_out_, gdec_counts_, gdec_scale_;
+    GpuDecodeScratch gdec_;                          // raw device pointers into gdec_arena_
+    std::unique_ptr<DeviceArena> gdec_arena_;         // one block backing all 9 scratch slabs
     int    gdec_cap_batch_{0};                       // buffers sized for this many images
     std::vector<DetectionGPU> gdec_host_out_;        // D2H compact results [cap*N]
     std::vector<uint32_t>     gdec_host_counts_;     // survivors per image [cap]
     std::vector<float2>       gdec_scale_host_;       // per-image (origW, origH) staging
 
+    // --- Frozen-memory contract (P2) ----------------------------------------------
+    // (act_mem_ is declared at the top of Impl for destruction ordering.)
+    bool   frozen_{false};       // freeze() called: no further device allocation allowed
+
     Impl(const std::filesystem::path& engine_path, const std::filesystem::path& meta_path,
          const DetectorOptions& options)
-        : session(engine_path), opts(options) {
+        : session(engine_path, nvinfer1::ILogger::Severity::kWARNING, options.own_device_memory),
+          opts(options) {
         // Resolve the sidecar: the given path, else `<engine-stem>.json` (the
         // convention the Python build_engine.py writes, e.g. dfine_m_fp32.json).
         std::filesystem::path mp = meta_path;
@@ -165,6 +176,19 @@ struct DFineDetector::Impl {
         // stream, so (unlike graph capture) it is fine with aux streams.
         gpu_decode_supported_ = b_logits->dtype == nvinfer1::DataType::kFLOAT &&
                                 b_boxes->dtype == nvinfer1::DataType::kFLOAT;
+
+        // Own TRT's activation memory in a single block (context was created
+        // kUSER_MANAGED). The size is static (all profiles), so allocate once now and
+        // hand it to the context before any inference.
+        if (opts.own_device_memory) {
+            const int64_t sz = session.device_memory_size();
+            if (sz > 0) {
+                void* p = nullptr;
+                DFINE_CUDA_CHECK(cudaMalloc(&p, static_cast<std::size_t>(sz)));
+                act_mem_.reset(p);
+                session.set_device_memory(p, sz);
+            }
+        }
     }
 
     // Locate the logits/boxes output bindings by name, falling back to shape
@@ -328,6 +352,11 @@ struct DFineDetector::Impl {
     // seg_off is batch-invariant, so a scratch sized for `cap` serves any B <= cap.
     void ensure_gpu_decode_(int B) {
         if (B <= gdec_cap_batch_) return;
+        if (frozen_) {
+            throw std::runtime_error("dfine: detector is frozen but gpu_decode needs batch " +
+                                     std::to_string(B) + " > frozen max " +
+                                     std::to_string(gdec_cap_batch_));
+        }
         const int cap    = B > max_batch_ ? B : (max_batch_ > 0 ? max_batch_ : B);
         const int n_cand = N * C;
         // The GPU decode carries the candidate count (cap * n_cand) in 32-bit int
@@ -337,36 +366,61 @@ struct DFineDetector::Impl {
             throw std::runtime_error("dfine: gpu_decode candidate count (batch*queries*classes) "
                                      "exceeds INT_MAX; reduce batch or disable gpu_decode");
         }
-        const auto total = static_cast<std::size_t>(cap) * n_cand;
+        const auto        total     = static_cast<std::size_t>(cap) * n_cand;
+        const std::size_t cub_bytes = gpu_decode_temp_bytes(cap, n_cand);
 
-        auto dalloc = [](DevPtr& p, std::size_t bytes) -> void* {
-            void* q = nullptr;
-            DFINE_CUDA_CHECK(cudaMalloc(&q, bytes));
-            p.reset(q);
-            return q;
-        };
-        gdec_.keys     = static_cast<float*>(dalloc(gdec_keys_, total * sizeof(float)));
-        gdec_.vals     = static_cast<uint32_t*>(dalloc(gdec_vals_, total * sizeof(uint32_t)));
-        gdec_.keys_out = static_cast<float*>(dalloc(gdec_keys_out_, total * sizeof(float)));
-        gdec_.vals_out = static_cast<uint32_t*>(dalloc(gdec_vals_out_, total * sizeof(uint32_t)));
-        gdec_.seg_off =
-            static_cast<int*>(dalloc(gdec_seg_, static_cast<std::size_t>(cap + 1) * sizeof(int)));
-        gdec_.out = static_cast<DetectionGPU*>(
-            dalloc(gdec_out_, static_cast<std::size_t>(cap) * N * sizeof(DetectionGPU)));
-        gdec_.counts =
-            static_cast<uint32_t*>(dalloc(gdec_counts_, static_cast<std::size_t>(cap) * sizeof(uint32_t)));
-        gdec_.scale_wh =
-            static_cast<float2*>(dalloc(gdec_scale_, static_cast<std::size_t>(cap) * sizeof(float2)));
-        gdec_.cub_temp_bytes = gpu_decode_temp_bytes(cap, n_cand);
-        gdec_.cub_temp       = dalloc(gdec_temp_, gdec_.cub_temp_bytes);
+        // Pack all nine scratch buffers into ONE device allocation. sub() offsets are
+        // 256-byte aligned (safe for CUB temp + coalescing); commit() does one cudaMalloc.
+        auto       arena   = std::make_unique<DeviceArena>();
+        const auto o_keys  = arena->sub(total * sizeof(float));
+        const auto o_vals  = arena->sub(total * sizeof(uint32_t));
+        const auto o_ko    = arena->sub(total * sizeof(float));
+        const auto o_vo    = arena->sub(total * sizeof(uint32_t));
+        const auto o_seg   = arena->sub(static_cast<std::size_t>(cap + 1) * sizeof(int));
+        const auto o_out   = arena->sub(static_cast<std::size_t>(cap) * N * sizeof(DetectionGPU));
+        const auto o_cnt   = arena->sub(static_cast<std::size_t>(cap) * sizeof(uint32_t));
+        const auto o_scale = arena->sub(static_cast<std::size_t>(cap) * sizeof(float2));
+        const auto o_temp  = arena->sub(cub_bytes);
+        arena->commit();
+
+        gdec_.keys           = arena->at<float>(o_keys);
+        gdec_.vals           = arena->at<uint32_t>(o_vals);
+        gdec_.keys_out       = arena->at<float>(o_ko);
+        gdec_.vals_out       = arena->at<uint32_t>(o_vo);
+        gdec_.seg_off        = arena->at<int>(o_seg);
+        gdec_.out            = arena->at<DetectionGPU>(o_out);
+        gdec_.counts         = arena->at<uint32_t>(o_cnt);
+        gdec_.scale_wh       = arena->at<float2>(o_scale);
+        gdec_.cub_temp       = arena->at(o_temp);
+        gdec_.cub_temp_bytes = cub_bytes;
 
         gpu_decode_fill_segoff(gdec_.seg_off, cap, n_cand, session.stream());
         DFINE_CUDA_CHECK(cudaStreamSynchronize(session.stream()));  // seg_off ready before first use
 
+        gdec_arena_ = std::move(arena);  // frees the previous block (grow-only replacement)
         gdec_host_out_.resize(static_cast<std::size_t>(cap) * N);
         gdec_host_counts_.resize(static_cast<std::size_t>(cap));
         gdec_scale_host_.resize(static_cast<std::size_t>(cap));
         gdec_cap_batch_ = cap;
+    }
+
+    // Warm every grow-only buffer to peak, then lock: no further device allocation.
+    void freeze_(int batch) {
+        int b = batch > 0 ? batch : (max_batch_ > 0 ? max_batch_ : 1);
+        // Warm up at the peak shape so bindings + decode scratch reach max capacity.
+        const std::size_t px = static_cast<std::size_t>(in_h_) * in_w_ * 3;
+        std::vector<std::uint8_t> gray(px, 114);
+        std::vector<ImageU8>      imgs(static_cast<std::size_t>(b));
+        for (auto& im : imgs) {
+            im.data = gray.data();
+            im.height = in_h_;
+            im.width = in_w_;
+            im.channels = 3;
+        }
+        (void)run_batch(imgs, opts.threshold);  // settles binding + decode allocations
+        session.freeze();                        // binding grow -> throw hereafter
+        frozen_ = true;                          // gpu-decode grow -> throw hereafter
+        if (gdec_arena_) gdec_arena_->lock();
     }
 
     // Zero-D2H path: enqueueV3 -> on-device decode -> D2H only the survivors.
@@ -543,6 +597,11 @@ std::vector<Detections> DFineDetector::detect_batch(const std::vector<ImageU8>& 
         if (!img.data) throw std::runtime_error("dfine: detect_batch: image in batch is empty");
     }
     return impl_->run_batch(images, threshold);
+}
+
+void DFineDetector::freeze(int batch) {
+    if (!impl_) throw std::runtime_error("dfine: DFineDetector: moved-from object");
+    impl_->freeze_(batch);
 }
 
 const std::string& DFineDetector::variant()     const noexcept { return impl_->meta.variant; }

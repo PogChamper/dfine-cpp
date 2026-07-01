@@ -30,8 +30,8 @@ std::vector<char> read_file(const std::filesystem::path& path) {
 }  // namespace
 
 TrtSession::TrtSession(const std::filesystem::path& engine_path,
-                       nvinfer1::ILogger::Severity log_severity)
-    : logger_(log_severity) {
+                       nvinfer1::ILogger::Severity log_severity, bool user_managed_memory)
+    : user_managed_memory_(user_managed_memory), logger_(log_severity) {
     load_engine_(engine_path);
     parse_bindings_();
     // Non-blocking flag: avoids implicit sync with the legacy NULL stream if any
@@ -88,8 +88,22 @@ void TrtSession::load_engine_(const std::filesystem::path& path) {
 
     engine_.reset(runtime_->deserializeCudaEngine(blob.data(), blob.size()));
     if (!engine_) throw std::runtime_error("dfine: deserializeCudaEngine failed");
-    context_.reset(engine_->createExecutionContext());
+    // kUSER_MANAGED: TRT allocates no activation memory; the caller supplies it via
+    // set_device_memory() before infer (a single detector-owned block). Default
+    // (kSTATIC) pre-allocates TRT's activation once here, which is fine too.
+    context_.reset(user_managed_memory_
+                       ? engine_->createExecutionContext(
+                             nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED)
+                       : engine_->createExecutionContext());
     if (!context_) throw std::runtime_error("dfine: createExecutionContext failed");
+}
+
+int64_t TrtSession::device_memory_size() const noexcept {
+    return engine_ ? engine_->getDeviceMemorySizeV2() : 0;
+}
+
+void TrtSession::set_device_memory(void* ptr, int64_t size) {
+    context_->setDeviceMemoryV2(ptr, size);
 }
 
 void TrtSession::parse_bindings_() {
@@ -167,6 +181,12 @@ void TrtSession::update_binding_shape_(int idx, const nvinfer1::Dims& dims) {
                   : 0;
 
     if (b.bytes > buffer_capacity_[idx]) {
+        if (frozen_) {
+            throw std::runtime_error(
+                "dfine: TrtSession is frozen but binding '" + b.name + "' must grow to " +
+                std::to_string(b.bytes) + " bytes (shape/batch exceeds the frozen maximum; "
+                "warm up at the max shape before freeze())");
+        }
         // Grow-only: free old buffers first (RAII reset), then re-allocate.
         device_buffers_[idx].reset();
         host_buffers_[idx].reset();

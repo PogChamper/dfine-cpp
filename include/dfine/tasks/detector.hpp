@@ -27,6 +27,11 @@ struct DetectorOptions {
     // are mAP-equivalent to the CPU decode (the score differs by <=1 ULP: GPU expf
     // vs libm), not byte-identical. Takes precedence over use_cuda_graph for now.
     bool gpu_decode{false};
+
+    // Own TRT's activation memory in a single detector-allocated block (kUSER_MANAGED
+    // + setDeviceMemoryV2) instead of letting TRT self-manage it — part of the
+    // frozen-memory contract (see freeze()). No accuracy or mean-latency effect.
+    bool own_device_memory{false};
 };
 
 // Public D-FINE detector. Hides all TensorRT/CUDA (and OpenCV) headers behind a
@@ -62,6 +67,12 @@ class DFineDetector {
     // results[i] holds the detections for images[i].
     [[nodiscard]] std::vector<Detections> detect_batch(const std::vector<ImageU8>& images,
                                                         float threshold = -1.0f);
+
+    // Freeze the memory footprint: warm every grow-only buffer to peak (at `batch`,
+    // default the engine max), then lock so the steady-state path performs no device
+    // allocation and device addresses never move. A subsequent detect with a larger
+    // batch than the frozen peak throws. Idempotent. (Intensive-core P2.)
+    void freeze(int batch = 0);
 
     [[nodiscard]] const std::string& variant()     const noexcept;
     [[nodiscard]] int                input_h()     const noexcept;

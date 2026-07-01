@@ -54,6 +54,10 @@ def main(args):
         cmd += ["--cuda-graph"]
     if args.gpu_decode:
         cmd += ["--gpu-decode"]
+    if args.own_device_memory:
+        cmd += ["--own-device-memory"]
+    if args.freeze:
+        cmd += ["--freeze"]
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = args.ld_library_path + ":" + env.get("LD_LIBRARY_PATH", "")
     print("[cpp_coco] $", " ".join(cmd))
@@ -91,6 +95,8 @@ def parse_args():
     p.add_argument("--ld-library-path", default=DEFAULT_LD)
     p.add_argument("--cuda-graph", action="store_true", help="pass --cuda-graph to the binary")
     p.add_argument("--gpu-decode", action="store_true", help="pass --gpu-decode (Zero-D2H) to the binary")
+    p.add_argument("--own-device-memory", action="store_true", help="pass --own-device-memory")
+    p.add_argument("--freeze", action="store_true", help="pass --freeze (frozen-memory contract)")
     return p.parse_args()
 
 

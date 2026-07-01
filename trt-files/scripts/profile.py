@@ -95,13 +95,15 @@ def latency_python(be, bgr, batch, warmup, iters, W, H, num_classes, topk, img_s
             "infer_p50": pi["p50"], "img_per_s": 1000.0 * batch / pe["p50"]}
 
 
-def latency_cpp(engine, batches, warmup, iters, env, workdir, image=None):
+def latency_cpp(engine, batches, warmup, iters, env, workdir, image=None, cuda_graph=False):
     binj = REPO / "build" / "dfine_bench"
-    out = Path(workdir) / "profile_cpp_bench.json"
+    out = Path(workdir) / f"profile_cpp_bench{'_graph' if cuda_graph else ''}.json"
     cmd = [str(binj), "--engine", engine, "--batches", ",".join(map(str, batches)),
            "--warmup", str(warmup), "--iters", str(iters), "--json", str(out)]
     if image:
         cmd += ["--image", str(image)]
+    if cuda_graph:
+        cmd += ["--cuda-graph"]
     subprocess.run(cmd, check=True, env=env, stdout=subprocess.DEVNULL)
     data = json.loads(out.read_text())
     res = {}
@@ -135,11 +137,13 @@ def accuracy_python(be, coco, img_ids, img_dir, cont2cat, num_classes, topk, sco
     return results
 
 
-def accuracy_cpp(engine, coco, img_ids, img_dir, filelist, env, score_thresh, workdir):
+def accuracy_cpp(engine, coco, img_ids, img_dir, filelist, env, score_thresh, workdir, cuda_graph=False):
     binj = REPO / "build" / "dfine_coco_eval"
-    out = Path(workdir) / "profile_cpp_dets.json"
+    out = Path(workdir) / f"profile_cpp_dets{'_graph' if cuda_graph else ''}.json"
     cmd = [str(binj), "--engine", engine, "--images-dir", str(img_dir), "--filelist", str(filelist),
            "--out", str(out), "--threshold", str(score_thresh)]
+    if cuda_graph:
+        cmd += ["--cuda-graph"]
     subprocess.run(cmd, check=True, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     raw = json.loads(out.read_text())
     cats = sorted(coco.getCatIds())
@@ -205,16 +209,17 @@ def main(args):
         entry = {"latency": {}, "map": None}
         base0 = gpu_used_mib()
 
-        if name == "cpp":
+        if name in ("cpp", "cpp-graph"):
+            cg = name == "cpp-graph"
             if args.do_latency:
                 lat = latency_cpp(args.engine, args.batches, args.warmup, args.iters, env,
-                                  args.workdir, sample_path)
+                                  args.workdir, sample_path, cuda_graph=cg)
                 for B, v in lat.items():
                     entry["latency"][B] = v
                     rows.append((name, B, v, None, v.get("gpu_mem_mib")))
             if args.do_accuracy:
                 res = accuracy_cpp(args.engine, coco, img_ids, args.images, filelist, env,
-                                   args.score_thresh, args.workdir)
+                                   args.score_thresh, args.workdir, cuda_graph=cg)
                 ap, ap50 = score_map(coco, res, img_ids)
                 entry["map"] = {"AP": ap, "AP50": ap50}
         else:
@@ -265,7 +270,7 @@ def main(args):
 def parse_args():
     p = argparse.ArgumentParser(description="D-FINE cross-backend profiler (latency + mem + mAP)")
     p.add_argument("--backends", nargs="+", default=["trt", "onnx"],
-                   choices=["trt", "trt-baseline", "onnx", "torch", "cpp"])
+                   choices=["trt", "trt-baseline", "onnx", "torch", "cpp", "cpp-graph"])
     p.add_argument("--batches", type=int, nargs="+", default=[1, 2, 4, 8])
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--iters", type=int, default=100)

@@ -60,6 +60,7 @@ EngineMeta EngineMeta::from_json_file(const std::filesystem::path& path) {
 
     m.input_names = read_string_array(j, "input_names", {"images"});
     m.output_names = read_string_array(j, "output_names", {"logits", "boxes"});
+    m.class_names = read_string_array(j, "class_names", {});
     return m;
 }
 
@@ -85,6 +86,7 @@ void EngineMeta::to_json_file(const std::filesystem::path& path) const {
         {"input_names", input_names},
         {"output_names", output_names},
     };
+    if (!class_names.empty()) j["class_names"] = class_names;
     std::ofstream out(path);
     if (!out) {
         throw std::runtime_error("dfine: cannot write meta sidecar: " + path.string());

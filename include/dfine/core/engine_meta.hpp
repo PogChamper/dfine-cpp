@@ -43,6 +43,10 @@ struct EngineMeta {
     std::vector<std::string> input_names{"images"};
     std::vector<std::string> output_names{"logits", "boxes"};
 
+    // Optional display names for class ids 0..num_classes-1 (custom label sets).
+    // Empty = unknown; consumers fall back to COCO-80 when num_classes == 80.
+    std::vector<std::string> class_names;
+
     [[nodiscard]] static EngineMeta from_json_file(const std::filesystem::path& path);
     void to_json_file(const std::filesystem::path& path) const;
 };

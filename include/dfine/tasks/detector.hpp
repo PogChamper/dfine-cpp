@@ -124,6 +124,9 @@ class DFineDetector {
     [[nodiscard]] int input_w() const noexcept;
     [[nodiscard]] int num_queries() const noexcept;
     [[nodiscard]] int num_classes() const noexcept;
+    // Display name for a class id: the sidecar's class_names entry when present,
+    // else the COCO-80 table when the engine has 80 classes, else "class_<id>".
+    [[nodiscard]] std::string class_name(int class_id) const;
     // 1 for a static engine; the profile max for a dynamic engine; 0 if dynamic
     // but the max is unknown (no/partial sidecar).
     [[nodiscard]] int max_batch() const noexcept;

@@ -1,5 +1,6 @@
 #include "dfine/tasks/detector.hpp"
 
+#include "dfine/core/coco_classes.hpp"
 #include "dfine/core/engine_meta.hpp"
 #include "dfine/core/log.hpp"
 #include "dfine/core/postprocess.hpp"
@@ -1084,6 +1085,17 @@ int DFineDetector::num_queries() const noexcept {
 int DFineDetector::num_classes() const noexcept {
     return impl_ ? impl_->C : 0;
 }
+
+std::string DFineDetector::class_name(int class_id) const {
+    if (impl_ && class_id >= 0) {
+        const auto& names = impl_->meta.class_names;
+        if (class_id < static_cast<int>(names.size()))
+            return names[static_cast<std::size_t>(class_id)];
+        if (names.empty() && impl_->C == 80 && class_id < 80) return coco_class_name(class_id);
+    }
+    return "class_" + std::to_string(class_id);
+}
+
 int DFineDetector::max_batch() const noexcept {
     // 0 = dynamic engine whose profile max is unknown (no/partial sidecar);
     // detect_batch then defers the bound to TensorRT's setInputShape.

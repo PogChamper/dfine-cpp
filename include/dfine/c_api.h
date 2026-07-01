@@ -248,6 +248,14 @@ DFINE_API void dfine_detections_free_batch(dfine_detections_t** results, int cou
  */
 DFINE_API const char* dfine_class_name(int class_id);
 
+/*
+ * Model-aware class name: the engine sidecar's class_names entry when present
+ * (custom label sets), else the COCO-80 table for 80-class engines, else
+ * "class_<id>". Returns "" for a NULL detector or an id outside
+ * 0..num_classes-1. The pointer stays valid until dfine_detector_destroy().
+ */
+DFINE_API const char* dfine_detector_class_name(const dfine_detector_t* det, int class_id);
+
 /* Library version string, e.g. "0.1.0". */
 DFINE_API const char* dfine_version(void);
 

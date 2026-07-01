@@ -122,7 +122,14 @@ struct DetectorHandle {
 // The opaque struct the header forward-declares.
 struct dfine_detector_s {
     DetectorHandle h;
-    explicit dfine_detector_s(dfine::DFineDetector&& d) : h(std::move(d)) {}
+    // Class-name strings cached per handle so dfine_detector_class_name can hand
+    // out pointers that stay valid for the detector's lifetime.
+    std::vector<std::string> class_names;
+    explicit dfine_detector_s(dfine::DFineDetector&& d) : h(std::move(d)) {
+        const int c = h.obj.num_classes();
+        class_names.reserve(c > 0 ? static_cast<std::size_t>(c) : 0);
+        for (int i = 0; i < c; ++i) class_names.push_back(h.obj.class_name(i));
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -146,6 +153,13 @@ const char* dfine_version(void) {
 
 const char* dfine_class_name(int class_id) {
     return dfine::coco_class_name(class_id);
+}
+
+const char* dfine_detector_class_name(const dfine_detector_t* det, int class_id) {
+    if (!det || class_id < 0 || static_cast<std::size_t>(class_id) >= det->class_names.size()) {
+        return "";
+    }
+    return det->class_names[static_cast<std::size_t>(class_id)].c_str();
 }
 
 // ----- lifecycle -----

@@ -119,11 +119,41 @@ def _scalar(value) -> float:
     return float(t[0])
 
 
+# COCO-80 display names in contiguous-id order (matches include/dfine/core/coco_classes.hpp).
+COCO80_NAMES = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog",
+    "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
+    "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
+    "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich",
+    "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
+    "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
+    "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+
+
+def _resolve_class_names(args: argparse.Namespace) -> list[str]:
+    """--class-names as a file (one per line) or a comma list; COCO-80 by default
+    for 80-class models; empty (field omitted) otherwise."""
+    if args.class_names:
+        p = Path(args.class_names)
+        names = ([ln.strip() for ln in p.read_text().splitlines() if ln.strip()]
+                 if p.is_file() else [s.strip() for s in args.class_names.split(",") if s.strip()])
+        if len(names) != args.num_classes:
+            raise SystemExit(f"--class-names gave {len(names)} names for "
+                             f"{args.num_classes} classes")
+        return names
+    return COCO80_NAMES if args.num_classes == 80 else []
+
+
 def _collect_meta(model: nn.Module, args: argparse.Namespace) -> dict:
     """Read engine-contract constants off the built (deployed) model."""
     dec = model.decoder
     enc = model.encoder
     eval_idx = int(getattr(dec, "eval_idx"))
+    class_names = _resolve_class_names(args)
     return {
         "model": "d-fine",
         "variant": args.model_name,
@@ -158,6 +188,7 @@ def _collect_meta(model: nn.Module, args: argparse.Namespace) -> dict:
         "opset": args.opset,
         "deform_core": args.deform,
         "trt_min_version": "8.5",
+        **({"class_names": class_names} if class_names else {}),
     }
 
 
@@ -340,6 +371,9 @@ def parse_args() -> argparse.Namespace:
                    help="batch size of the tracing dummy; must be >=2 to keep the batch axis dynamic")
     p.add_argument("--opset", type=int, default=16)
     p.add_argument("--checkpoint", required=True, help="path to a D-FINE detection .pt/.pth")
+    p.add_argument("--class-names", default="",
+                   help="display names for the sidecar: a file (one name per line) or a comma "
+                        "list; must match --num-classes. Default: COCO-80 when num_classes==80")
     p.add_argument("--dfine-src",
                    default=os.environ.get("DFINE_SEG_SRC",
                                           "/home/dxdxxd/projects/custom-dfine/D-FINE-seg"),

@@ -160,6 +160,12 @@ def _configure(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.dfine_class_name.restype = c_char_p
     lib.dfine_class_name.argtypes = [c_int]
 
+    # Model-aware names (sidecar class_names -> COCO-80 -> "class_<id>").
+    # Guarded: absent from libdfine builds older than the sidecar-names feature.
+    if hasattr(lib, "dfine_detector_class_name"):
+        lib.dfine_detector_class_name.restype = c_char_p
+        lib.dfine_detector_class_name.argtypes = [c_void_p, c_int]
+
     lib.dfine_set_log_callback.restype = None
     lib.dfine_set_log_callback.argtypes = [LOG_FN]
 

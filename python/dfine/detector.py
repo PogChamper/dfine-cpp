@@ -146,10 +146,18 @@ class Detector:
         return int(self._lib.dfine_detector_max_batch(self._require()))
 
     def class_name(self, class_id: int) -> str:
+        # Explicit constructor override wins; then the model-aware C call (engine
+        # sidecar class_names -> COCO-80 for 80-class engines -> "class_<id>");
+        # then the static COCO table for libdfine builds predating that call.
         if self._class_names is not None:
             return self._class_names[class_id] if 0 <= class_id < len(self._class_names) else str(
                 class_id
             )
+        if self._handle is not None and hasattr(self._lib, "dfine_detector_class_name"):
+            # Authoritative: "" means out of range for THIS model — do not fall
+            # back to the COCO table (a 3-class model must not label id 5 "bus").
+            raw = self._lib.dfine_detector_class_name(self._handle, int(class_id))
+            return raw.decode("utf-8", "replace") if raw else str(class_id)
         raw = self._lib.dfine_class_name(int(class_id))
         return raw.decode("utf-8", "replace") if raw else "?"
 

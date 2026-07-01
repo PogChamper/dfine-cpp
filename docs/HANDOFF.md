@@ -13,7 +13,12 @@ modeled on `rf-detr-cpp`. Repo: `/home/dxdxxd/projects/custom-dfine/D-FINE-cpp`.
   vs the Python engine reference 0.5507 (PyTorch 0.5509) — a 0.0001 match.** `detect_batch` (batch 8)
   gives the identical AP to batch 1; dynamic batch N=1/2/8 verified; `dfine_build` rebuilds the engine
   in pure C++ (mAP-equal). See "M1 — C++ detector (DONE)" below.
-- The big M0 discovery (and its fix) is the most important thing to carry forward — see "Decisions" below.
+- **M2 = production hardening: FP16 + CUDA-graph DONE and validated; INT8 rejected.** Strongly-typed FP16
+  (backbone+encoder FP16, decoder FP32) is **1.6–2.2× faster at −0.2% mAP**; opt-in CUDA-graph replay adds
+  another ~1 ms at batch 1 (byte-identical outputs). The weakly-typed `kFP16` flag is a trap (fixed −6.8 AP),
+  and BF16/INT8 are dead — all for the same reason: D-FINE's FDR needs mantissa precision. See "M2" below.
+- The big M0/M2 discovery is the through-line: **D-FINE's FDR box-decode is exquisitely FP-precision-sensitive**
+  (grid_sample, the kFP16 flag, BF16 and INT8 all fail through it) — see "Decisions" and the M2 section.
 
 ## The validated pipeline (reproduce)
 
@@ -56,9 +61,10 @@ are the user's RRS food-detector validation — leave them.)
 5. **Dynamic batch:** trace export with **batch ≥ 2** (`--trace-batch 2`, default) or the batch axis bakes to
    1 and the engine rejects N>1. Build sets a min/opt/max profile (default 1/1/8). Validated N=1/2/8 for both
    grid_sample and explicit engines. CUDA-graph (M2) needs static shape → keep it opt-in with fallback.
-6. **Precision:** FP32 baseline (build `--no-tf32` for FP32-faithful; TF32 on costs ~2× box L1). FP16 must
-   keep the decoder FP32 (FP16 corrupts it) — **not yet mAP-validated**. INT8 backbone/encoder only (GridSample
-   FP32/FP16-only) — **not done**.
+6. **Precision:** FP32 baseline (build `--no-tf32` for FP32-faithful; TF32 on costs ~2× box L1). **FP16 works
+   only via strong typing** (backbone+encoder FP16 baked into ONNX types, decoder FP32) — the weakly-typed
+   `kFP16` builder flag costs a fixed −6.8 AP regardless of pinning. BF16 and INT8 are worse (mantissa too
+   coarse for the FDR). Validated: FP16 mAP −0.2% at 1.6–2.2×. See the M2 section.
 7. **Per-size invariants:** `num_queries=300`, `reg_max=32`, 640² fixed across sizes. Varies: backbone B0–B5,
    `hidden_dim` 128/256/384, `num_layers` 3/3/4/6/6, `reg_scale` 4 (X=8), `num_levels` 2 (nano) else 3.
 8. **Eval gotcha:** `COCOeval.params.imgIds` must be set to the processed subset, else missing images count as misses.
@@ -155,9 +161,7 @@ ours **0.6606 AP** ≈ onnx 0.6602 ≈ cpp 0.6596, vs grid_sample baseline **0.5
 the payoff of the explicit-deform export. The baseline engine is built via
 `export_dfine_onnx.py --deform gridsample` + `build_engine.py`.
 
-## M2 — production hardening (next milestone)
-
-Feature parity vs a production C++/TRT detector (rf-detr-cpp is the model). **Done in M1** unless noted:
+## M2 — production hardening (DONE for detection: FP16 + CUDA-graph; INT8 rejected)
 
 | Capability | Status | Notes |
 |---|---|---|
@@ -168,43 +172,98 @@ Feature parity vs a production C++/TRT detector (rf-detr-cpp is the model). **Do
 | FP32 accuracy == reference | ✅ | 0.5506 == 0.5507 |
 | Full RAII / sanitizer-clean / warning-clean | ✅ | see Quality bar |
 | Profiling (latency/mem/mAP, cross-backend) | ✅ | `dfine_bench` + `profile.py` |
-| **FP16 (decoder pinned FP32)** | ⛔ M2 | biggest latency win; naive global FP16 corrupts the decoder |
-| **CUDA-graph replay** | ⛔ M2 | currently per-frame `enqueueV3`; saves dispatch overhead |
-| **INT8 (QDQ, backbone/encoder)** | ⛔ M2 | not the deprecated implicit calibrator |
+| **FP16 (strongly-typed, backbone+encoder)** | ✅ M2.1 | **1.6–2.2× infer, mAP −0.2%**; the `kFP16` *flag* is the trap, not FP16 |
+| **CUDA-graph replay (opt-in)** | ✅ M2.2 | byte-identical outputs; −0.7…1.3 ms dispatch, best at batch 1 |
+| **INT8 (QDQ)** | ⛔ rejected | builds, but mAP collapses to ~0.13 — D-FINE's FDR needs ≥FP16 precision |
 | **Instance segmentation** | ⛔ M3 | D-FINE-seg mask head, threshold 0.5 (masks pre-sigmoid'd) |
 
-**M2.1 — FP16 with FP32-pinned decoder (do first; ~1.5–2× latency).** A global `kFP16` flag corrupts D-FINE's
-decoder the same way grid_sample did (~10 AP loss — quantify it as the anti-example with `profile.py`). Keep
-backbone+encoder FP16 but pin the decoder head (class head, `bbox_head`, FDR Integral/LQE, distance2bbox) to
-FP32. In `build_engine.py`: either a strongly-typed network driven by ONNX dtypes, or per-layer
-`layer->setPrecision(kFLOAT)` + `setOutputType` on the decoder subgraph with `kPREFER_PRECISION_CONSTRAINTS`.
-Identify decoder layers by name from the ONNX. **The C++ runtime already supports FP16 outputs**
-(`get_output_f32` kHALF branch) — no C++ change needed if outputs stay FP32; if any output goes FP16 it's
-handled. **Validate:** `profile.py --backends trt torch --subset 2000` — mAP must hold ~0.55; expect
-`infer` to drop ~1.5–2×. Update the sidecar `precision` field. Do NOT ship FP16 from `dfine_build` until
-mAP-validated (it currently rejects non-fp32 on purpose).
+Numbers below are RTX 4070 Ti SUPER, COCO subset-2000, m variant, FP32 baseline **0.5669** (trt) /
+0.5666 (cpp). GPU clocks not lockable and the box was sometimes shared — mAP is deterministic (trustworthy);
+latency was measured **back-to-back per pair** so the *relative* speedups hold.
 
-**M2.2 — CUDA-graph replay (opt-in).** Add to the **task layer** (`detector.cpp`), NOT `TrtSession` (see
-`impl/cpp_skeleton_spec.md` §2.4g). After warm-up, `cudaStreamBeginCapture(session.stream())` over
-`enqueueV3` + the D2H copies (keep H2D/preprocess outside the graph — image bytes differ per frame), then
-`cudaGraphLaunch` each call. Needs a **static shape**, so capture one graph per batch size seen, and **fall
-back to `enqueueV3` if capture fails** (transformer decoders can have data-dependent internal shapes — rf-detr
-hits this and falls back). Add `DetectorOptions.use_cuda_graph` + a `cuda_graph_compat` meta flag. RAII the
-`cudaGraph_t`/`cudaGraphExec_t` (add wrappers to `cuda_raii.hpp`). **Validate:** `dfine_bench` `infer` p50/p99
-should drop; mAP unchanged.
+### M2.1 — FP16, DONE via **strong typing** (the `kFP16` flag is the real trap)
 
-**M2.3 — INT8 (QDQ).** Insert QDQ nodes via a calibration pass over COCO (a `convert_int8.py`, ONNX-level —
-NOT TRT's deprecated implicit `IInt8EntropyCalibrator2`), keep the decoder FP32, build with `kINT8`. Expect
-some mAP loss — quantify with `profile.py`. Backbone/encoder only.
+**★ The headline finding: the weakly-typed `config.set_flag(kFP16)` path is unusable for D-FINE.** It costs a
+**fixed ~6.8 AP** (0.5669 → 0.4985) **regardless of per-layer FP32 pinning** — proven by a control that pinned
+*every* `/model` compute layer FP32 under `kOBEY_PRECISION_CONSTRAINTS` with `kFP16` on and *still* got 0.4985.
+TRT inserts uncontrolled FP16 reformats on the FDR's precision-critical data path that OBEY/`setPrecision`
+don't cover. Same failure *class* as the M0 grid_sample trap (the FDR integral amplifies tiny FP deltas).
+Every weakly-typed placement gives the same 0.498 (decoder-only / encoder+decoder / backbone-only / even
+stem-only FP32-pinned), i.e. one FP16 reformat anywhere → the fixed loss.
 
-**M2.4 — instance segmentation (M3, optional).** D-FINE-seg mask head → extra `masks` output; add a GPU
-bilinear-upsample+threshold decode (model on rf-detr `mask_decode.cu`), threshold at 0.5 (masks are
-pre-sigmoid'd, so compare >0.5 not logit>0), populate a mask field on `Detection`.
+**The fix: bake precision into ONNX types, build strongly-typed, NO `kFP16` flag.**
+1. `convert_fp16.py` — `onnxconverter_common` casts backbone+encoder to FP16, block-lists the whole decoder
+   (kept FP32, found by ONNX name prefix `/model/decoder`,`model.decoder`; all compute is cleanly scoped, the
+   OTHER-region nodes are shape/constant only), and **retypes graph outputs back to FP32** (the converter
+   otherwise leaves a trailing output→FP16 downcast).
+2. `build_engine.py --strongly-typed --no-tf32 --onnx <fp16 onnx>` — precision is 100% from the ONNX types;
+   TRT cannot leak FP16.
+
+**Result (subset-2000): mAP 0.5654 vs FP32 0.5666 = −0.0012 (0.2%).** Latency (`dfine_bench` infer p50, ms):
+
+| batch | FP32 infer | FP16 infer | speedup | FP32 e2e | FP16 e2e |
+|---|---|---|---|---|---|
+| 1 | 5.63 | 3.46 | 1.63× | 6.09 | 3.86 |
+| 2 | 9.09 | 5.27 | 1.73× | 9.85 | 5.99 |
+| 4 | 17.99 | 8.26 | 2.18× | 19.17 | 9.42 |
+| 8 | 34.71 | 16.03 | 2.16× | 36.92 | 18.24 |
+
+GPU mem 674→**520 MiB**. The 2144 boundary Casts do not eat the win. Engine I/O stays FP32 → **no C++ change**,
+and CUDA-graph works on it. Build:
+```sh
+$PY $S/convert_fp16.py --output trt-files/onnx/dfine_m_fp16_st.onnx
+$PY $S/build_engine.py --strongly-typed --no-tf32 --max-batch 8 --cuda-graph \
+    --onnx trt-files/onnx/dfine_m_fp16_st.onnx --output trt-files/engines/dfine_m_fp16_st.engine
+$PY $S/profile.py --backends cpp --engine trt-files/engines/dfine_m_fp16_st.engine --subset 2000 --no-latency
+```
+**Anti-examples (quantified):** weakly-typed `--fp16` (or `--fp16-decoder-fp32`) = 0.4985; `--bf16-decoder-fp32`
+= **0.2968** — *worse* than FP16, because D-FINE's FDR needs mantissa precision and BF16 trades 2 mantissa bits
+for range it doesn't use (`dump_activations.py`: activations peak ~5.4e3, nowhere near FP16's 65504 — **no
+overflow**; the loss is pure mantissa). `dfine_build` (C++) stays FP32-only on purpose.
+
+### M2.2 — CUDA-graph replay, DONE (task layer, opt-in)
+
+`detector.cpp` captures `enqueueV3` + the two output D2H copies (into detector-owned pinned buffers) after
+≥2 warm-up enqueues (`setEnqueueEmitsProfile(false)`, `cudaStreamCaptureModeThreadLocal`), and
+`cudaGraphLaunch`es each call; preprocess/H2D stay outside. One graph per batch size (`graphs_` map), only
+replayed when the shape is already flushed (`graph_ctx_batch_ == B`), re-captured if a grow-only realloc moves
+a baked pointer (`graph_stale_`, 5-pointer check), and **no-throw fallback to `enqueueV3`** if capture fails /
+outputs aren't FP32 / the engine uses aux streams. `DetectorOptions.use_cuda_graph` + `cuda_graph_compat`
+sidecar flag; `CudaGraph`/`CudaGraphExec` RAII in `cuda_raii.hpp`; `--cuda-graph` on `dfine_bench`/
+`dfine_detect`/`dfine_coco_eval`. Our RAW single-input/FP32-output export sidesteps rf-detr's two graph hazards
+(int64 `labels`, `orig_target_sizes`) — see `research/P12_cuda_graph.md`.
+- **mAP unchanged:** graph vs no-graph detections are **byte-identical** (`dfine_coco_eval` diff, 500 imgs).
+- **Latency (dispatch saved, ms):** batch 1 FP32 5.76→4.57, FP16 3.55→2.33; the win is the kernel-launch
+  overhead, biggest at batch 1. **Stacked: batch-1 e2e 6.09 (FP32) → 3.86 (FP16) → 2.58 (FP16+graph) = 2.36×.**
+
+### M2.3 — INT8 (QDQ), investigated, **rejected** (mAP 0.13)
+
+`convert_int8.py` (ORT `quantize_static`, QDQ, **symmetric** + **no bias-quant** — both TRT requirements —
+Conv/MatMul, decoder excluded) + `build_engine.py --int8`. Builds cleanly and is fast, but **mAP collapses to
+0.1274 (weakly-typed) / 0.1314 (strongly-typed)** vs 0.5666 — a −0.44 AP loss either way. INT8's 8-bit
+precision on the backbone/encoder features is far below what D-FINE's FDR tolerates (FP16's 10-bit mantissa is
+already the floor). **Not recommended for D-FINE-M.** Script kept for future variants / less FP-sensitive heads.
+
+### M2.4 — instance segmentation (M3, optional)
+
+D-FINE-seg mask head → extra `masks` output; add a GPU bilinear-upsample+threshold decode (model on rf-detr
+`mask_decode.cu`), threshold at 0.5 (masks are pre-sigmoid'd, so compare >0.5 not logit>0), populate a mask
+field on `Detection`.
+
+**M2 new files:** `convert_fp16.py` (strongly-typed FP16 ONNX), `convert_int8.py` (INT8 QDQ), `build_engine.py`
+(`--fp16-decoder-fp32`/`--bf16-decoder-fp32`/`--int8`/`--strongly-typed`/`--decoder-prefixes`/`--constraints`/
+`--cuda-graph`). `profile.py` gained a fix for its own filename shadowing stdlib `profile` (crashed the torch
+backend via `cProfile`). C++: `CudaGraph`/`CudaGraphExec` RAII, `TrtSession::num_aux_streams()`,
+`DetectorOptions.use_cuda_graph`, `EngineMeta.cuda_graph_compat`.
+
+**Quality bar (M2):** adversarial multi-agent review (correctness / cpp-pro / CUDA-TRT dimensions, each finding
+independently verified) — 1 real defect found and fixed (capture path now no-throw so the enqueueV3 fallback
+actually runs). Builds `-Wall -Wextra -Wpedantic` clean; graph path re-verified byte-identical post-fix.
 
 **Known latent (harmless today, non-happy-path):** `max_batch()` returns 0 when a dynamic engine's sidecar is
-absent (TRT then bounds the batch itself); moved-from `DFineDetector` accessors are UB by convention (as in
-most C++ types). Neither is on any exercised path.
+absent (TRT then bounds the batch itself); moved-from `DFineDetector` accessors are UB by convention. Neither
+is on any exercised path (review confirmed both as non-triggering).
 
-**Where to start:** read this file top-to-bottom, then `impl/M0_STATUS.md` (the deform gotcha — the FP16 work
-will re-encounter decoder FP-sensitivity), then `impl/cpp_skeleton_spec.md` §2.4g for the graph hook. Build +
-run the pipeline (commands above), then `profile.py` to see the current baseline before changing anything.
+**Where to start (M3):** read this file, then `impl/M0_STATUS.md` (FDR FP-sensitivity — the through-line behind
+grid_sample, kFP16-flag, BF16 and INT8 all failing the same way). The FP16 engine + CUDA-graph are the
+production speed path; seg (M2.4) is the next feature.

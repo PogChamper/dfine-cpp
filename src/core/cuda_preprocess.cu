@@ -5,6 +5,7 @@
 
 #include <cstring>
 #include <stdexcept>
+#include <string>
 
 namespace dfine {
 
@@ -114,6 +115,12 @@ void ImagePreprocessor::set_std(float r, float g, float b) noexcept {
 
 void ImagePreprocessor::ensure_capacity_(std::size_t bytes) {
     if (bytes <= capacity_) return;
+    if (frozen_) {
+        throw std::runtime_error(
+            "dfine: ImagePreprocessor is frozen but the source frame needs " +
+            std::to_string(bytes) + " staging bytes (capacity " + std::to_string(capacity_) +
+            "); freeze() with src_w/src_h covering the largest steady-state frame");
+    }
     d_src_.reset();
     h_pinned_.reset();
     capacity_ = 0;

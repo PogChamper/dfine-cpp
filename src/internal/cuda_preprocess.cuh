@@ -47,12 +47,20 @@ class ImagePreprocessor {
     // image: HWC uint8 view (3 channels). d_dst: 3*dst_h*dst_w floats on device.
     void process(const ImageU8& image, float* d_dst, cudaStream_t stream);
 
+    // Part of the frozen-memory contract (intensive-core P2/P3): after freeze(), a
+    // source frame needing a LARGER staging buffer throws instead of silently
+    // cudaMalloc-ing on the hot path. Warm with the largest steady-state frame
+    // first (DFineDetector::freeze(FreezeSpec) does this).
+    void freeze() noexcept { frozen_ = true; }
+    [[nodiscard]] bool frozen() const noexcept { return frozen_; }
+
     int dst_h() const noexcept { return dst_h_; }
     int dst_w() const noexcept { return dst_w_; }
 
    private:
     void ensure_capacity_(std::size_t bytes);
 
+    bool frozen_{false};
     int  dst_h_{0};
     int  dst_w_{0};
     float mean_[3]{0.0f, 0.0f, 0.0f};

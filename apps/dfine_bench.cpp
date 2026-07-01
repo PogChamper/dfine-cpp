@@ -13,6 +13,7 @@
 
 #include "dfine/core/engine_meta.hpp"
 #include "dfine/core/postprocess.hpp"
+#include "dfine/tasks/detector.hpp"
 #include "dfine/version.hpp"
 #include "internal/cuda_check.hpp"
 #include "internal/cuda_preprocess.cuh"
@@ -26,6 +27,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -85,6 +87,164 @@ const dfine::BindingInfo* find_output(const dfine::TrtSession& s, const char* na
     return nullptr;
 }
 
+// Bit-pattern float compare: the parity contract is byte-exactness, and operator==
+// would report bit-identical NaNs (degenerate engine outputs) as a mismatch.
+bool same_bits(float a, float b) {
+    std::uint32_t x, y;
+    std::memcpy(&x, &a, sizeof x);
+    std::memcpy(&y, &b, sizeof y);
+    return x == y;
+}
+
+bool detections_equal(const std::vector<dfine::Detections>& a,
+                      const std::vector<dfine::Detections>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (a[i].size() != b[i].size()) return false;
+        for (std::size_t k = 0; k < a[i].size(); ++k) {
+            const auto& x = a[i][k];
+            const auto& y = b[i][k];
+            if (x.class_id != y.class_id || !same_bits(x.score, y.score) ||
+                !same_bits(x.box.x1, y.box.x1) || !same_bits(x.box.y1, y.box.y1) ||
+                !same_bits(x.box.x2, y.box.x2) || !same_bits(x.box.y2, y.box.y2)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// --pipeline-compare: the split gpu_decode path vs the P3 full-pipeline graph,
+// measured through the public DFineDetector API. Two detector instances on the
+// same engine (one frozen with full_pipeline_graph), interleaved per iteration so
+// GPU clock drift cancels. Per-stage CPU columns come from Timings; every
+// iteration's detections are compared byte-exact (same kernels either way — any
+// mismatch is a capture bug).
+int run_pipeline_compare(const std::filesystem::path& engine, const std::filesystem::path& meta,
+                         const std::vector<int>& batches, const std::filesystem::path& image,
+                         int src_w, int src_h, int warmup, int iters, float threshold) {
+    dfine_app::LoadedImage loaded;
+    std::vector<std::uint8_t> synth;
+    dfine::ImageU8 base;
+    if (!image.empty()) {
+        loaded = dfine_app::load_image_rgb(image.string());
+        if (!loaded) throw std::runtime_error("cannot decode image: " + image.string());
+        base = loaded.view();
+        src_w = base.width;
+        src_h = base.height;
+    } else {
+        synth.resize(static_cast<std::size_t>(src_w) * src_h * 3);
+        for (std::size_t i = 0; i < synth.size(); ++i)
+            synth[i] = static_cast<std::uint8_t>((i * 37 + 11) & 0xFF);
+        base = dfine::ImageU8{synth.data(), src_h, src_w, 3, src_w * 3, false};
+    }
+
+    for (int B : batches) {
+        dfine::DetectorOptions oa;
+        oa.threshold         = threshold;
+        oa.gpu_decode        = true;
+        oa.own_device_memory = true;
+        dfine::DetectorOptions ob = oa;
+        ob.full_pipeline_graph    = true;
+
+        // freeze() is one-way and per-configuration, so each batch size gets fresh
+        // detector instances (one engine deserialize each — seconds, not per-iter).
+        dfine::DFineDetector split = meta.empty() ? dfine::DFineDetector(engine, oa)
+                                                  : dfine::DFineDetector(engine, meta, oa);
+        dfine::DFineDetector graph = meta.empty() ? dfine::DFineDetector(engine, ob)
+                                                  : dfine::DFineDetector(engine, meta, ob);
+        dfine::FreezeSpec fs;
+        fs.batch = B;
+        fs.src_w = src_w;
+        fs.src_h = src_h;
+        split.freeze(fs);
+        graph.freeze(fs);
+        if (!graph.full_pipeline_graph_active()) {
+            std::printf("[pipeline-compare] batch %d: full-pipeline graph NOT active — the "
+                        "engine must have FP32 outputs and be built with --max-aux-streams 0\n",
+                        B);
+            return 1;
+        }
+
+        const std::vector<dfine::ImageU8> frames(static_cast<std::size_t>(B), base);
+        for (int w = 0; w < warmup; ++w) {
+            (void)split.detect_batch(frames, threshold);
+            (void)graph.detect_batch(frames, threshold);
+        }
+        // Snapshot after warmup: full_graph_replays() is a lifetime counter, and
+        // counting the warmup replays would let up to `warmup` fallback iterations
+        // slip past the contamination check below.
+        const std::uint64_t replays_before = graph.full_graph_replays();
+
+        std::vector<double> s_pre, s_disp, s_wait, s_dec, s_tot;
+        std::vector<double> g_pre, g_disp, g_wait, g_dec, g_tot;
+        long long mismatches = 0;
+        std::size_t n_dets = 0;
+        for (int it = 0; it < iters; ++it) {
+            const auto ra = split.detect_batch(frames, threshold);
+            const auto ts = split.last_timings();
+            const auto rb = graph.detect_batch(frames, threshold);
+            const auto tg = graph.last_timings();
+            s_pre.push_back(ts.preprocess_cpu_ms);
+            s_disp.push_back(ts.dispatch_ms);
+            s_wait.push_back(ts.wait_ms);
+            s_dec.push_back(ts.decode_host_ms);
+            s_tot.push_back(ts.total_ms);
+            g_pre.push_back(tg.preprocess_cpu_ms);
+            g_disp.push_back(tg.dispatch_ms);
+            g_wait.push_back(tg.wait_ms);
+            g_dec.push_back(tg.decode_host_ms);
+            g_tot.push_back(tg.total_ms);
+            if (!detections_equal(ra, rb)) ++mismatches;
+            n_dets = ra.empty() ? 0 : ra.front().size();
+        }
+        const std::uint64_t measured_replays = graph.full_graph_replays() - replays_before;
+        if (measured_replays < static_cast<std::uint64_t>(iters)) {
+            std::printf("[pipeline-compare] batch %d: only %llu/%d measured iterations replayed "
+                        "the graph — results below are contaminated by fallback calls\n",
+                        B, static_cast<unsigned long long>(measured_replays), iters);
+        }
+
+        const Stats sp = summarize(s_pre), sd = summarize(s_disp), sw = summarize(s_wait),
+                    sc = summarize(s_dec), st = summarize(s_tot);
+        const Stats gp = summarize(g_pre), gd = summarize(g_disp), gw = summarize(g_wait),
+                    gc = summarize(g_dec), gt = summarize(g_tot);
+        std::printf("[pipeline-compare] batch %d (%d iters, p50 ms, src %dx%d):\n", B, iters,
+                    src_w, src_h);
+        std::printf("  %-18s %-12s %-12s %s\n", "stage (CPU)", "split", "full-graph", "delta");
+        auto row = [](const char* name, double a, double b) {
+            std::printf("  %-18s %-12.3f %-12.3f %+.3f\n", name, a, b, b - a);
+        };
+        row("pre (pack+issue)", sp.p50, gp.p50);
+        row("dispatch", sd.p50, gd.p50);
+        row("wait (GPU-bound)", sw.p50, gw.p50);
+        row("decode host", sc.p50, gc.p50);
+        const double cpu_s = sp.p50 + sd.p50 + sc.p50;
+        const double cpu_g = gp.p50 + gd.p50 + gc.p50;
+        std::printf("  %-18s %-12.3f %-12.3f %+.3f  <- CPU freed per call\n",
+                    "CPU total", cpu_s, cpu_g, cpu_g - cpu_s);
+        std::printf("  %-18s %-12.3f %-12.3f %+.3f (%+.1f%%)\n", "total wall", st.p50, gt.p50,
+                    gt.p50 - st.p50, st.p50 > 0 ? (gt.p50 / st.p50 - 1) * 100 : 0);
+        std::printf("  parity: %lld/%d iterations mismatched (%zu detections/frame)%s\n",
+                    mismatches, iters, n_dets,
+                    mismatches == 0 ? " — byte-identical" : "  ** CAPTURE BUG **");
+        if (mismatches != 0) return 1;
+
+        // Live-threshold probe: a per-call override differing from the frozen
+        // opts.threshold must match on both paths — the captured decode kernel
+        // reads the threshold through mapped pinned memory at execution time, so
+        // a baked (capture-time) value would show up here as a count mismatch.
+        const float probe = threshold * 0.5f + 1e-4f;
+        const auto  pa    = split.detect_batch(frames, probe);
+        const auto  pb    = graph.detect_batch(frames, probe);
+        const bool  ok    = detections_equal(pa, pb);
+        std::printf("  threshold probe (%.4f vs frozen %.4f): %s\n", probe, threshold,
+                    ok ? "byte-identical" : "** MISMATCH — threshold baked into graph **");
+        if (!ok) return 1;
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -95,6 +255,7 @@ int main(int argc, char** argv) {
     bool cuda_graph = false;
     bool graph_compare = false;
     bool gpu_decode = false;
+    bool pipeline_compare = false;
     std::filesystem::path json_out;
     try {
         for (int i = 1; i < argc; ++i) {
@@ -117,6 +278,7 @@ int main(int argc, char** argv) {
             else if (a == "--cuda-graph")              cuda_graph = true;
             else if (a == "--graph-compare")           { cuda_graph = true; graph_compare = true; }
             else if (a == "--gpu-decode")              gpu_decode = true;
+            else if (a == "--pipeline-compare")        pipeline_compare = true;
             else if (starts_with(a, "--src-size")) {
                 std::string v = next_value(argc, argv, i, "--src-size");
                 const auto x = v.find('x');
@@ -126,6 +288,12 @@ int main(int argc, char** argv) {
             } else throw std::runtime_error("unknown arg: " + std::string(a));
         }
         if (engine.empty()) { std::fprintf(stderr, "error: --engine required\n"); return 2; }
+
+        // Detector-level split-vs-full-graph comparison (P3); self-contained mode.
+        if (pipeline_compare) {
+            return run_pipeline_compare(engine, meta, parse_batches(batches_arg), image, src_w,
+                                        src_h, warmup, iters, threshold);
+        }
 
         // Baseline free memory before we build anything (force context init first).
         DFINE_CUDA_CHECK(cudaFree(nullptr));
@@ -266,7 +434,7 @@ int main(int argc, char** argv) {
                     DFINE_CUDA_CHECK(cudaEventRecord(e2, stream));
                     dfine::gpu_decode_enqueue(static_cast<const float*>(d_logits),
                                               static_cast<const float*>(d_boxes), B, N, C, N, threshold,
-                                              gdec, stream);
+                                              /*threshold_dev=*/nullptr, gdec, stream);
                     DFINE_CUDA_CHECK(cudaMemcpyAsync(gh_out.data(), gdec.out,
                                                      gh_out.size() * sizeof(dfine::DetectionGPU),
                                                      cudaMemcpyDeviceToHost, stream));

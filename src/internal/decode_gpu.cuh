@@ -65,7 +65,12 @@ void gpu_decode_fill_segoff(int* seg_off, int max_batch, int n_cand, cudaStream_
 // s.counts[B]. `s.scale_wh` must already hold the per-image (origW, origH).
 //   logits : [B, Q, C] device, raw logits
 //   boxes  : [B, Q, 4] device, cxcywh normalized to [0,1]
+//   threshold_dev : optional device-readable float overriding `threshold` at kernel
+//     EXECUTION time (nullptr = use `threshold`). Point it at mapped pinned memory
+//     and the score threshold stays a live per-call knob even inside a captured
+//     CUDA graph, where a by-value argument would be baked at capture (P3).
 void gpu_decode_enqueue(const float* logits, const float* boxes, int B, int Q, int C, int topk,
-                        float threshold, const GpuDecodeScratch& s, cudaStream_t stream);
+                        float threshold, const float* threshold_dev, const GpuDecodeScratch& s,
+                        cudaStream_t stream);
 
 }  // namespace dfine

@@ -2,6 +2,7 @@
 
 #include "dfine/core/types.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -32,6 +33,28 @@ struct DetectorOptions {
     // + setDeviceMemoryV2) instead of letting TRT self-manage it — part of the
     // frozen-memory contract (see freeze()). No accuracy or mean-latency effect.
     bool own_device_memory{false};
+
+    // Opt-in single-launch steady state (intensive-core P3): capture the ENTIRE
+    // per-frame pipeline — input H2D, preprocess, enqueueV3, GPU decode, survivor
+    // D2H — into one CUDA graph, replayed with a single cudaGraphLaunch per call.
+    // Implies gpu_decode. The capture happens inside freeze(FreezeSpec) (before the
+    // allocation lock) and requires a 0-aux-stream engine with FP32 outputs. After
+    // freeze, calls whose batch/source-resolution/channel-order match the FreezeSpec
+    // replay the graph; anything else falls back (no-throw) to the split gpu_decode
+    // path. The score threshold stays a live per-call knob (read by the captured
+    // decode kernel through mapped pinned memory, not baked into the graph).
+    bool full_pipeline_graph{false};
+};
+
+// Steady-state configuration freeze() warms, captures, and locks for. Zeros mean
+// "engine defaults": batch = the engine's max batch, src_w/src_h = the engine input
+// size. src_w/src_h bound the LARGEST source frame the frozen detector will accept —
+// a larger frame after freeze() throws instead of allocating on the hot path.
+struct FreezeSpec {
+    int  batch{0};
+    int  src_w{0};
+    int  src_h{0};
+    bool src_is_bgr{false};  // channel order the full-pipeline graph is captured for
 };
 
 // Public D-FINE detector. Hides all TensorRT/CUDA (and OpenCV) headers behind a
@@ -71,8 +94,30 @@ class DFineDetector {
     // Freeze the memory footprint: warm every grow-only buffer to peak (at `batch`,
     // default the engine max), then lock so the steady-state path performs no device
     // allocation and device addresses never move. A subsequent detect with a larger
-    // batch than the frozen peak throws. Idempotent. (Intensive-core P2.)
+    // batch than the frozen peak throws. (Intensive-core P2.)
+    //
+    // A spec with explicit src_w/src_h additionally bounds the steady-state SOURCE
+    // frame: the preprocessor staging is warmed to that peak and locked (a larger
+    // frame afterwards throws instead of allocating on the hot path), and it is the
+    // configuration DetectorOptions.full_pipeline_graph captures its graph for
+    // (intensive-core P3). freeze(batch) leaves the source size unbounded — the
+    // legacy P2 behavior, where an oversized frame still grows the preprocessor
+    // staging on the hot path (the one documented exception to the zero-allocation
+    // contract).
+    //
+    // Re-freezing with the same resolved configuration is a no-op; a DIFFERENT
+    // configuration throws (locked buffers cannot be re-sized — create a new
+    // detector to reconfigure).
     void freeze(int batch = 0);
+    void freeze(const FreezeSpec& spec);
+
+    // True once freeze(FreezeSpec) captured the full-pipeline graph (P3): matching
+    // calls now run as one cudaGraphLaunch. False = not requested / not capturable
+    // (aux streams, non-FP32 outputs) / capture failed — split path in effect.
+    [[nodiscard]] bool full_pipeline_graph_active() const noexcept;
+    // Number of calls served by full-graph replay so far (observability: a frozen
+    // fixed-resolution pipeline should show this equal to its frame count).
+    [[nodiscard]] std::uint64_t full_graph_replays() const noexcept;
 
     [[nodiscard]] const std::string& variant()     const noexcept;
     [[nodiscard]] int                input_h()     const noexcept;
@@ -88,6 +133,19 @@ class DFineDetector {
         double infer_ms{0};
         double postprocess_ms{0};
         double total_ms{0};
+
+        // Host-side (CPU) wall time per stage of the last call. Separates what the
+        // CPU spends ISSUING work from what it spends WAITING on the GPU — the
+        // dispatch cost is what the full-pipeline graph collapses (hundreds of
+        // kernel launches -> one cudaGraphLaunch). preprocess_cpu_ms covers the
+        // frame pack + H2D/kernel issue loop (or the pinned-slab pack on the
+        // full-graph path); dispatch_ms covers enqueueV3 + decode-kernel issue (or
+        // the single cudaGraphLaunch); wait_ms is the final stream sync;
+        // decode_host_ms is the CPU decode or survivor->Detections conversion.
+        double preprocess_cpu_ms{0};
+        double dispatch_ms{0};
+        double wait_ms{0};
+        double decode_host_ms{0};
     };
     [[nodiscard]] const Timings& last_timings() const noexcept;
 

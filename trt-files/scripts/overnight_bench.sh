@@ -72,6 +72,57 @@ for sz in $SIZES; do
     timeout 600 "$REPO/build/dfine_bench" --engine $E16G --batches 1,4,8 --warmup 30 --iters 200 \
         --graph-compare > "$OUTDIR/graph_${sz}.txt" 2>>"$LOG" && log "  ✓ $sz graph-compare" || log "  ✗ $sz graph-compare"
   fi
+
+  # P3 full-pipeline graph: per-stage CPU cost (pack/dispatch/wait/decode) of the
+  # split gpu-decode path vs the single-launch graph, + in-run byte parity and the
+  # live-threshold probe. NSYS=1 additionally records an Nsight Systems trace
+  # (cuda,nvtx,osrt) to verify visually that the CPU idles while the graph runs
+  # and that no hidden cudaMalloc/sync appears inside the captured region.
+  if [ -f "$E16G" ]; then
+    log "▶ $sz pipeline-compare (P3, 0-aux FP16)"
+    NSYS_PREFIX=""
+    if [ "${NSYS:-0}" = "1" ] && command -v nsys >/dev/null 2>&1; then
+      NSYS_PREFIX="nsys profile -t cuda,nvtx,osrt --force-overwrite true -o $OUTDIR/nsys_pipeline_${sz}"
+      log "  (nsys trace → $OUTDIR/nsys_pipeline_${sz}.nsys-rep)"
+    fi
+    timeout 900 $NSYS_PREFIX "$REPO/build/dfine_bench" --engine $E16G --batches 1,4,8 --warmup 30 \
+        --iters 200 --pipeline-compare > "$OUTDIR/pipeline_${sz}.txt" 2>>"$LOG" \
+        && log "  ✓ $sz pipeline-compare" || log "  ✗ $sz pipeline-compare"
+  fi
+
+  # mAP config matrix on the 0-aux engine — every runtime iteration isolated:
+  # cpu-decode -> gpu-decode -> frozen(+own-mem) -> frozen b8 -> full-graph.
+  # The full-graph run uses the fixed-resolution regime (640x480 val2017 subset,
+  # 1061 real images) and is byte-diffed against the identically-filtered split
+  # path: identical files == the graph replays exactly the split kernels.
+  if [ -f "$E16G" ] && [ "${CONFIG_MATRIX:-1}" = "1" ]; then
+    CM_LIMIT=${CM_LIMIT:-2000}
+    run_map() {
+      local name=$1; shift
+      log "▶ $sz mAP config [$name]"
+      if timeout 3600 $PY $S/cpp_coco_eval.py --engine $E16G --limit $CM_LIMIT "$@" \
+           > "$OUTDIR/map_${sz}_${name}.txt" 2>>"$LOG"; then
+        log "  ✓ $sz mAP [$name]: $(grep -o 'AP@\[.50:.95\]=[0-9.]*' "$OUTDIR/map_${sz}_${name}.txt" | tail -1)"
+      else
+        log "  ✗ $sz mAP [$name] (see run.log)"
+      fi
+    }
+    run_map cpu
+    run_map gpudecode --gpu-decode
+    run_map frozen    --gpu-decode --freeze --own-device-memory
+    run_map frozen_b8 --gpu-decode --freeze --own-device-memory --batch 8
+    run_map fullgraph      --full-graph --own-device-memory --filter-res 640x480 \
+                           --limit 0 --out "$OUTDIR/dets_${sz}_fullgraph.json"
+    run_map split_filtered --gpu-decode --freeze --own-device-memory --filter-res 640x480 \
+                           --limit 0 --out "$OUTDIR/dets_${sz}_split.json"
+    if cmp -s "$OUTDIR/dets_${sz}_fullgraph.json" "$OUTDIR/dets_${sz}_split.json"; then
+      log "  ✓ $sz P3 byte-parity: full-graph == split gpu-decode (640x480 subset)"
+      echo PASS > "$OUTDIR/parity_${sz}.txt"
+    else
+      log "  ✗ $sz P3 BYTE-PARITY FAILED (dets_${sz}_fullgraph.json != dets_${sz}_split.json)"
+      echo FAIL > "$OUTDIR/parity_${sz}.txt"
+    fi
+  fi
 done
 
 log "=== consolidating → $REPORT ==="
@@ -128,6 +179,47 @@ for sz in SIZES:
     L.append(f"| {NAMES.get(sz,sz)} | {f(b1)} | {d(b1)} | {f(b8)} | {d(b8)} | {cpu} |")
 L.append("\n**Recommendation:** batch-1 streaming → build `--max-aux-streams 0` + `use_cuda_graph`; "
          "batch throughput → default (2-aux) engine. See docs/HANDOFF.md M2.2.\n")
+
+# P3 full-pipeline graph: per-stage CPU cost + parity (dfine_bench --pipeline-compare)
+L.append("\n## P3 full-pipeline graph (`dfine_bench --pipeline-compare`, 0-aux FP16)\n")
+L.append("Per-stage HOST (CPU) cost, split gpu-decode path vs one `cudaGraphLaunch` per frame. "
+         "`parity` counts byte-identical iterations; the threshold probe verifies the score "
+         "threshold stays a live per-call knob inside the captured graph.\n")
+L.append("| size | batch | CPU split | CPU graph | CPU freed | wall Δ | parity |")
+L.append("|---|---|---|---|---|---|---|")
+prow=re.compile(r"batch (\d+) \((\d+) iters.*?CPU total\s+([\d.]+)\s+([\d.]+)\s+([+\-\d.]+).*?"
+                r"total wall\s+([\d.]+)\s+([\d.]+)\s+[+\-\d.]+ \(([+\-\d.]+)%\).*?"
+                r"parity: (\d+)/(\d+) iterations mismatched",re.S)
+for sz in SIZES:
+    p=os.path.join(OUT,f"pipeline_{sz}.txt")
+    if not os.path.exists(p): continue
+    for m in prow.findall(open(p).read()):
+        b,it,cs,cg,cf,ws,wg,wd,mm,tot=m
+        ok = "OK" if mm=="0" else f"**{mm}/{tot} MISMATCH**"
+        L.append(f"| {NAMES.get(sz,sz)} | {b} | {float(cs):.3f} ms | {float(cg):.3f} ms | "
+                 f"{float(cf):+.3f} ms | {wd}% | {ok} |")
+
+# mAP config matrix: every runtime iteration isolated
+L.append("\n## mAP config matrix (0-aux FP16 engine, `cpp_coco_eval.py`)\n")
+L.append("Each runtime feature isolated on the same engine. `fullgraph`/`split_filtered` run the "
+         "fixed-resolution regime (640x480 val2017 subset); byte-parity below diffs their raw "
+         "detection files.\n")
+L.append("| size | cpu-decode | gpu-decode | frozen | frozen b8 | full-graph* | split*| byte-parity |")
+L.append("|---|---|---|---|---|---|---|---|")
+apre=re.compile(r"AP@\[\.50:\.95\]=([\d.]+)")
+for sz in SIZES:
+    def ap(name):
+        p=os.path.join(OUT,f"map_{sz}_{name}.txt")
+        if not os.path.exists(p): return "—"
+        m=apre.findall(open(p).read())
+        return m[-1] if m else "—"
+    par=os.path.join(OUT,f"parity_{sz}.txt")
+    parity=open(par).read().strip() if os.path.exists(par) else "—"
+    row=[ap("cpu"),ap("gpudecode"),ap("frozen"),ap("frozen_b8"),ap("fullgraph"),ap("split_filtered")]
+    if all(v=="—" for v in row): continue
+    L.append(f"| {NAMES.get(sz,sz)} | "+" | ".join(row)+f" | {parity} |")
+L.append("\n\\* 640x480-only subset — compare full-graph vs split within the column pair, not "
+         "against the full-set columns.\n")
 open(os.path.join(OUT,"REPORT.md"),"w").write("\n".join(L)+"\n")
 print("wrote REPORT.md")
 PYEOF

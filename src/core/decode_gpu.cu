@@ -54,13 +54,21 @@ __global__ void k_decode_topk(const float* __restrict__ keys_sorted,
                               const float* __restrict__ boxes,
                               const float2* __restrict__ scale_wh, DetectionGPU* __restrict__ out,
                               uint32_t* __restrict__ counts, int B, int Q, int C, int qc, int topk,
-                              float threshold) {
+                              float threshold, const float* __restrict__ threshold_dev) {
     const int b = blockIdx.x;
     if (b >= B) return;
 
+    // threshold_dev (mapped pinned) is read at EXECUTION time — one zero-copy load
+    // per block, broadcast through shared memory — so a captured graph replays with
+    // the caller's current threshold instead of the value baked at capture (P3).
     __shared__ unsigned int s_count;
-    if (threadIdx.x == 0) s_count = 0u;
+    __shared__ float        s_thr;
+    if (threadIdx.x == 0) {
+        s_count = 0u;
+        s_thr   = threshold_dev ? *threshold_dev : threshold;
+    }
     __syncthreads();
+    threshold = s_thr;
 
     const float2 sw   = scale_wh[b];
     const int    base = b * qc;
@@ -120,7 +128,8 @@ void gpu_decode_fill_segoff(int* seg_off, int max_batch, int n_cand, cudaStream_
 }
 
 void gpu_decode_enqueue(const float* logits, const float* boxes, int B, int Q, int C, int topk,
-                        float threshold, const GpuDecodeScratch& s, cudaStream_t stream) {
+                        float threshold, const float* threshold_dev, const GpuDecodeScratch& s,
+                        cudaStream_t stream) {
     const int qc    = Q * C;
     const int total = B * qc;
 
@@ -133,7 +142,7 @@ void gpu_decode_enqueue(const float* logits, const float* boxes, int B, int Q, i
         s.seg_off + 1, 0, static_cast<int>(sizeof(float) * 8), stream));
 
     k_decode_topk<<<B, 256, 0, stream>>>(s.keys_out, s.vals_out, boxes, s.scale_wh, s.out, s.counts,
-                                         B, Q, C, qc, topk, threshold);
+                                         B, Q, C, qc, topk, threshold, threshold_dev);
     DFINE_CUDA_CHECK(cudaGetLastError());
 }
 

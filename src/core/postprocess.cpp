@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 namespace dfine {
@@ -50,7 +51,12 @@ Detections decode_detections(const float* logits, const float* boxes, int img_w,
     for (int q = 0; q < N; ++q) {
         const float* lq = logits + static_cast<std::size_t>(q) * C;
         for (int c = 0; c < C; ++c) {
-            cand.push_back({lq[c], q, c});
+            // A NaN logit breaks partial_sort's strict weak ordering (UB) and
+            // compares as neither above nor below the threshold. Map it to -inf:
+            // it sorts past the top-k and sigmoid(-inf) = 0 drops it — mirroring
+            // the GPU decode's k_pack (decode_gpu.cu).
+            const float lg = lq[c];
+            cand.push_back({std::isnan(lg) ? -std::numeric_limits<float>::infinity() : lg, q, c});
         }
     }
 

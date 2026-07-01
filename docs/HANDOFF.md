@@ -24,6 +24,13 @@ modeled on `rf-detr-cpp`. Repo: `/home/dxdxxd/projects/custom-dfine/D-FINE-cpp`.
   `dfine_detect`** — proven by `dfine_capi_parity` and 14 pytests. `-Werror`- and UBSan-clean; hardened by an
   adversarial multi-agent review (16 findings, all fixed incl. a negative-numpy-stride OOB). See "M4" below.
   **M3 instance-seg stays deliberately shelved** (no seg checkpoints / use-case).
+- **Intensive core P1+P2+P3: DONE and validated** (P4 pending). P1 Zero-D2H GPU decode
+  (`DetectorOptions.gpu_decode`), P2 arena + `freeze()` (zero steady-state allocation, VRAM Δ = +0 B),
+  P3 full-pipeline CUDA graph (`DetectorOptions.full_pipeline_graph` + `freeze(FreezeSpec)`): **one
+  `cudaGraphLaunch` per frame** covering H2D→preprocess→enqueueV3→GPU-decode→survivor-D2H. B=1 CPU/frame
+  4.30 → 0.195 ms, e2e wall −34.3% on m FP16 0-aux; byte-parity vs the split path on 1061 real 640×480
+  val2017 images; mAP configs identical (0.5660 subset-2000). See "Intensive core (P1–P3)" below and
+  `impl/INTENSIVE_CORE_PLAN.md` for the full spec/validation record.
 - The big M0/M2 discovery is the through-line: **D-FINE's FDR box-decode is exquisitely FP-precision-sensitive**
   (grid_sample, the kFP16 flag, BF16 and INT8 all fail through it) — see "Decisions" and the M2 section.
 
@@ -361,6 +368,30 @@ output name matches what `build`/`predict` look up; `bench` shells to the C++ `d
 `predict` on existing engines, and the full **build→cache→resolve** loop (built nano fp32 into the cache, then
 `info --model n` resolved the cached engine). *No HF auto-download helper exists in this repo* — `export`
 requires the D-FINE-seg checkpoints (mapped per model) or an explicit `--checkpoint`.
+
+## Intensive core (P1–P3) — device-resident frozen pipeline (DONE; P4 pending)
+
+Execution spec + full validation record: `impl/INTENSIVE_CORE_PLAN.md`. Summary of what shipped:
+
+- **P1 — Zero-D2H GPU decode** (`DetectorOptions.gpu_decode`, FP32-output engines): sigmoid→top-k→
+  threshold→xyxy as CUDA kernels (`decode_gpu.cu`: k_pack → CUB segmented radix sort by raw logit →
+  k_decode_topk); D2H shrinks to the compact survivors. mAP == CPU decode; ~1 ULP score delta (GPU expf),
+  ranking bit-identical.
+- **P2 — arena + freeze** (`DetectorOptions.own_device_memory`, `DFineDetector::freeze`): one `DeviceArena`
+  block for the 9 decode slabs, TRT activation in a detector-owned kUSER_MANAGED block, grow-guards that
+  throw post-freeze. Zero steady-state allocation (VRAM Δ = +0 B over full runs).
+- **P3 — full-pipeline graph** (`DetectorOptions.full_pipeline_graph`, implies gpu_decode): capture inside
+  `freeze(FreezeSpec{batch, src_w, src_h, src_is_bgr})`, pre-lock. Steady state = pack frames into a pinned
+  slab + **one `cudaGraphLaunch`** + sync. Gates: 0-aux engine (`build_engine.py --max-aux-streams 0`) +
+  FP32 outputs + exact config match; otherwise no-throw fallback to the split path. Threshold stays a live
+  per-call knob (mapped-pinned scalar read at kernel execution). `freeze(int)` = legacy unbounded-source
+  behavior (staging may still grow for oversized frames — the one documented zero-alloc exception);
+  explicit `src_w/src_h` locks the preprocessor too; re-freeze with a different config throws.
+- **Timings** now splits host cost per stage: `preprocess_cpu_ms / dispatch_ms / wait_ms / decode_host_ms` —
+  the dispatch column is what the graph collapses (m, B=1: 4.18 → 0.12 ms; B=8: 18.7 → 0.18 ms).
+- **Measure**: `dfine_bench --pipeline-compare` (per-stage CPU table, in-run byte parity, live-threshold
+  probe); `dfine_coco_eval --full-graph --filter-res WxH` (fixed-resolution regime over real COCO);
+  `overnight_bench.sh` (config matrix + parity per size; `NSYS=1` for an Nsight trace).
 
 ### Not done (next): pre-compiled wheels + GitHub Actions, and the visual README gif.
 No git remote here, so "GitHub release artifact" wheel hosting is deferred. A true PyPI manylinux wheel is

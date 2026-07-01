@@ -34,6 +34,13 @@ def main(args):
     cat_ids = sorted(coco.getCatIds())
     cont2cat = {i: c for i, c in enumerate(cat_ids)}  # RT-DETR/D-FINE convention
     img_ids = sorted(coco.getImgIds())
+    if args.filter_res:
+        # Restrict BOTH the filelist and the scored imgIds to the fixed resolution —
+        # skipped images left in ev.params.imgIds would count as misses (gotcha #8).
+        fw, fh = (int(v) for v in args.filter_res.split("x"))
+        img_ids = [iid for iid in img_ids
+                   if coco.loadImgs(iid)[0]["width"] == fw
+                   and coco.loadImgs(iid)[0]["height"] == fh]
     if args.limit:
         img_ids = img_ids[: args.limit]
     print(f"[cpp_coco] images={len(img_ids)} classes={len(cat_ids)}")
@@ -58,6 +65,12 @@ def main(args):
         cmd += ["--own-device-memory"]
     if args.freeze:
         cmd += ["--freeze"]
+    if args.full_graph:
+        cmd += ["--full-graph"]
+    if args.filter_res:
+        cmd += ["--filter-res", args.filter_res]
+    if args.batch > 1:
+        cmd += ["--batch", str(args.batch)]
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = args.ld_library_path + ":" + env.get("LD_LIBRARY_PATH", "")
     print("[cpp_coco] $", " ".join(cmd))
@@ -97,6 +110,11 @@ def parse_args():
     p.add_argument("--gpu-decode", action="store_true", help="pass --gpu-decode (Zero-D2H) to the binary")
     p.add_argument("--own-device-memory", action="store_true", help="pass --own-device-memory")
     p.add_argument("--freeze", action="store_true", help="pass --freeze (frozen-memory contract)")
+    p.add_argument("--full-graph", action="store_true",
+                   help="pass --full-graph (P3 single-launch pipeline; pair with --filter-res)")
+    p.add_argument("--filter-res", default="",
+                   help="WxH: eval only images of exactly this size (fixed-resolution regime)")
+    p.add_argument("--batch", type=int, default=1, help="pass --batch to the binary")
     return p.parse_args()
 
 

@@ -50,8 +50,23 @@ C++ FP16 is **~8.7× the PyTorch throughput** at batch 1. FP16 is essentially lo
 −34.5%** (3.90 → 2.55 ms) — D-FINE is *dispatch-bound* at small batch (the CPU spends ~3.9 ms in `enqueueV3`
 launching hundreds of kernels; `cudaGraphLaunch` is ~0.05 ms). See [docs/HANDOFF.md](docs/HANDOFF.md) §M2.2.
 
-Reproduce any of this with `trt-files/scripts/profile.py` and `build/dfine_bench`; a full n→x sweep is
-`bash trt-files/scripts/overnight_bench.sh`.
+### Benchmark & compare backends yourself
+
+The repo ships a **cross-backend profiler** — measure **PyTorch, ONNXRuntime-GPU, and TensorRT (FP32/FP16)
++ the C++ runtime** side by side on the same images, reporting latency, **FPS**, **GPU memory**, and **mAP**
+in one table:
+
+```sh
+# PyTorch vs ONNXRuntime-GPU vs TensorRT vs C++ (+ CUDA-graph), full COCO val:
+python trt-files/scripts/profile.py --backends torch onnx trt cpp cpp-graph \
+       --engine trt-files/engines/dfine_m_fp16_st.engine --full --batches 1 8
+```
+
+`--backends` picks any subset of `torch · onnx · trt · trt-baseline · cpp · cpp-graph`. Per-stage C++ latency
+(preprocess / infer / D2H / decode, percentiles) is `build/dfine_bench`; the honest CUDA-graph delta is
+`dfine_bench --graph-compare` (on a `--max-aux-streams 0` engine); a full **n→x** sweep across all backends is
+`bash trt-files/scripts/overnight_bench.sh`. (The `torch` backend and `.pt`→ONNX export need the D-FINE-seg
+source on `PYTHONPATH`; the ONNX/TRT/C++ paths are self-contained.)
 
 ## Quickstart
 

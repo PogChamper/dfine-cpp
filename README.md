@@ -7,6 +7,11 @@ C++ decode — at up to **~460 FPS** on an RTX 4070 Ti SUPER, matching PyTorch m
 <!-- badges: build/license/release — wire up once a remote + CI are set (see .github/workflows) -->
 `C++17` · `TensorRT 10.13` · `CUDA 12.8` · `Apache-2.0`
 
+![PyTorch vs D-FINE-cpp throughput](assets/demo.gif)
+*10× slow motion, same wall-clock window: frame counters advance at each backend's measured e2e
+throughput. Both panels draw identical detections from the C++ runtime. Reproduce:
+`trt-files/scripts/make_demo_gif.py`.*
+
 ---
 
 ## Why

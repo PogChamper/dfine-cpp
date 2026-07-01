@@ -4,7 +4,13 @@ trt-files/onnx/*.json
 trt-files/engines/*.engine
 trt-files/engines/*.json
 *.timing.cache
-third_party/
+# third_party: vendor the small stb header (needed to build the image-decode apps on a
+# fresh clone), but ignore third_party/tensorrt (its libs are machine-specific symlinks
+# into the sibling D-FINE-seg venv; its public headers are re-fetched — see third_party/README.md).
+third_party/*
+!third_party/stb/
+!third_party/stb/**
+!third_party/README.md
 # Python
 __pycache__/
 *.pyc

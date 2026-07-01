@@ -1,0 +1,41 @@
+# Python bindings for D-FINE-cpp. Pure-Python ctypes wrapper over libdfine.so
+# (the stable C ABI in include/dfine/c_api.h). The native library is discovered
+# at runtime (DFINE_LIBRARY env, bundled next to the package, or the dev
+# build/ tree); a wheel additionally bundles libdfine.so via package-data.
+#
+#   pip install -e ".[dev]"        # editable, for running the tests
+#   pytest tests                   # needs a GPU + engine + LD_LIBRARY_PATH (see README)
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dfine"
+version = "0.1.0"
+description = "Python bindings for D-FINE-cpp — C++/TensorRT D-FINE object detection"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+dependencies = ["numpy>=1.21"]
+
+[project.scripts]
+dfine = "dfine.cli:main"
+
+[project.optional-dependencies]
+# TensorRT is not redistributable and is CUDA/arch-specific; declare it as an
+# extra rather than vendoring it. The user's local TRT 10.13 + CUDA 12 must match
+# the engine's build.
+tensorrt = ["tensorrt==10.13.*"]
+cli = ["pillow>=9"]
+dev = ["pytest>=7", "pillow>=9"]
+
+[tool.setuptools]
+packages = ["dfine"]
+
+[tool.setuptools.package-data]
+# Present only when a build step copies the compiled library into the package
+# before `pip wheel` (see docs; the .so is CUDA/arch/TRT-specific).
+dfine = ["*.so", "*.so.*", "lib/*.so", "lib/*.so.*"]
+
+[tool.ruff]
+line-length = 100

@@ -197,19 +197,25 @@ stem-only FP32-pinned), i.e. one FP16 reformat anywhere → the fixed loss.
    OTHER-region nodes are shape/constant only), and **retypes graph outputs back to FP32** (the converter
    otherwise leaves a trailing output→FP16 downcast).
 2. `build_engine.py --strongly-typed --no-tf32 --onnx <fp16 onnx>` — precision is 100% from the ONNX types;
-   TRT cannot leak FP16.
+   TRT cannot leak FP16. (`convert_fp16.py` also runs a `harmonize_float_types` pass: onnxconverter_common
+   leaves size-dependent mixed Half/Float nodes strongly-typed TRT rejects — a stray FP32 attention-scale
+   constant in the FP16 encoder, a missing FP16→FP32 boundary cast into the decoder — so it duplicates the
+   shared scale per FP16/FP32 consumer and inserts boundary casts. Without it, s/l/x/n fail to parse.)
 
-**Result (subset-2000): mAP 0.5654 vs FP32 0.5666 = −0.0012 (0.2%).** Latency (`dfine_bench` infer p50, ms):
+**Validated on FULL COCO val2017 (5000 imgs), all sizes — FP16 is essentially lossless and the speedup scales
+with model size** (C++ detector; latency e2e p50 ms and infer-only p50 ms on the RTX 4070 Ti SUPER):
 
-| batch | FP32 infer | FP16 infer | speedup | FP32 e2e | FP16 e2e |
-|---|---|---|---|---|---|
-| 1 | 5.63 | 3.46 | 1.63× | 6.09 | 3.86 |
-| 2 | 9.09 | 5.27 | 1.73× | 9.85 | 5.99 |
-| 4 | 17.99 | 8.26 | 2.18× | 19.17 | 9.42 |
-| 8 | 34.71 | 16.03 | 2.16× | 36.92 | 18.24 |
+| size | FP32 AP | FP16 AP | ΔAP | infer b1 F32→F16 | infer b8 F32→F16 | e2e b8 F32→F16 |
+|---|---|---|---|---|---|---|
+| nano   | 0.4280 | 0.4280 | +0.0000 | 2.36→1.78 (1.32×) | 8.63→4.48 (1.93×)  | 10.76→6.60 (1.63×) |
+| small  | 0.5074 | 0.5069 | −0.0005 | 3.77→2.60 (1.45×) | 20.40→10.23 (1.99×)| 22.57→12.45 (1.81×) |
+| medium | 0.5506 | 0.5500 | −0.0006 | 5.42→3.27 (1.66×) | 32.95→15.07 (2.19×)| 35.20→17.28 (2.04×) |
+| large  | 0.5725 | 0.5723 | −0.0002 | 6.92→4.15 (1.67×) | 44.85→20.50 (2.19×)| 47.16→23.18 (2.03×) |
+| xlarge | 0.5931 | 0.5927 | −0.0004 | 11.96→5.40 (2.21×)| 85.76→30.50 (2.81×)| 87.90→32.59 (2.70×) |
 
-GPU mem 674→**520 MiB**. The 2144 boundary Casts do not eat the win. Engine I/O stays FP32 → **no C++ change**,
-and CUDA-graph works on it. Build:
+Worst-case −0.0006 AP (0.1%); the FP32 column reproduces the canonical D-FINE obj2coco numbers (m = 0.5506 =
+the M0/M1 full-val figure) so the whole export→build→eval pipeline is validated at full-val on all sizes. GPU
+mem (m) 674→**520 MiB**. Engine I/O stays FP32 → **no C++ change**, and CUDA-graph works on it. Build:
 ```sh
 $PY $S/convert_fp16.py --output trt-files/onnx/dfine_m_fp16_st.onnx
 $PY $S/build_engine.py --strongly-typed --no-tf32 --max-batch 8 --cuda-graph \

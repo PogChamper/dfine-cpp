@@ -89,10 +89,22 @@ def draw_panel(img: np.ndarray, dets, label: str, fps: float, processed: int,
     return panel
 
 
+def extract_video_frames(video: str, out_dir: Path, limit: int) -> list[Path]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    import os
+    env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", video,
+                    "-frames:v", str(limit), str(out_dir / "s%05d.png")], check=True, env=env)
+    return sorted(out_dir.glob("s*.png"))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", required=True)
-    ap.add_argument("--images-dir", required=True)
+    ap.add_argument("--images-dir", help="image-sequence source (slideshow mode)")
+    ap.add_argument("--video", help="video source: frames are extracted in order, so the two "
+                                    "panels race through the SAME clip at their throughputs")
+    ap.add_argument("--credit", default="", help="source credit appended to the caption")
     ap.add_argument("--limit", type=int, default=400)
     ap.add_argument("--threshold", type=float, default=0.5)
     ap.add_argument("--left-fps", type=float, required=True)
@@ -108,9 +120,15 @@ def main() -> int:
 
     out = Path(args.out_dir)
     (out / "frames").mkdir(parents=True, exist_ok=True)
-    images = sorted(Path(args.images_dir).glob("*.jpg"))[: args.limit]
+    if args.video:
+        images = extract_video_frames(args.video, out / "src_frames", args.limit)
+    elif args.images_dir:
+        images = sorted(Path(args.images_dir).glob("*.jpg"))[: args.limit]
+    else:
+        print("need --video or --images-dir", file=sys.stderr)
+        return 1
     if not images:
-        print("no images found", file=sys.stderr)
+        print("no source frames found", file=sys.stderr)
         return 1
 
     print(f"[demo] detecting on {len(images)} images ...")
@@ -121,9 +139,11 @@ def main() -> int:
     n_frames = int(args.seconds * DISPLAY_FPS)
     W = PANEL_W * 2 + 12
     H = PANEL_H + HEADER_H + FOOTER_H
-    caption = (f"{args.slowmo:g}x slow motion · COCO val2017 · D-FINE-M · {args.gpu_name} · "
+    src = "video" if args.video else "COCO val2017"
+    caption = (f"{args.slowmo:g}x slow motion · {src} · D-FINE-M · {args.gpu_name} · "
                f"identical detections both panels (C++ runtime); frame counters advance at each "
-               f"backend's measured e2e throughput")
+               f"backend's measured e2e throughput"
+               + (f" · {args.credit}" if args.credit else ""))
 
     print(f"[demo] rendering {n_frames} frames ...")
     for f in range(n_frames):

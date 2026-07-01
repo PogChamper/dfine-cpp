@@ -7,10 +7,10 @@ C++ decode — at up to **~460 FPS** on an RTX 4070 Ti SUPER, matching PyTorch m
 <!-- badges: build/license/release — wire up once a remote + CI are set (see .github/workflows) -->
 `C++17` · `TensorRT 10.13` · `CUDA 12.8` · `Apache-2.0`
 
-![PyTorch vs D-FINE-cpp throughput](assets/demo.gif)
-*10× slow motion, same wall-clock window: frame counters advance at each backend's measured e2e
-throughput. Both panels draw identical detections from the C++ runtime. Reproduce:
-`trt-files/scripts/make_demo_gif.py`.*
+![PyTorch vs D-FINE-cpp throughput](assets/demo_video.gif)
+*Both panels race through the same clip at 10× slow motion; frame counters advance at each backend's
+measured e2e throughput (D-FINE-M, RTX 4070 Ti SUPER). Detections are identical — the C++ runtime
+produced both. Reproduce: `trt-files/scripts/make_demo_gif.py` (clip: Mixkit free license).*
 
 ---
 
@@ -30,6 +30,9 @@ and ships a lean, dependency-light C++ runtime:
   all TensorRT/CUDA behind a PIMPL. RAII everywhere, sanitizer-clean, `-Werror` clean.
 
 ## Benchmarks
+
+![Throughput over COCO stills](assets/demo.gif)
+*The same comparison over COCO val2017 stills — one wall-clock window, per-backend frame counters.*
 
 RTX 4070 Ti SUPER · COCO val2017 (5000 imgs) · D-FINE-M · latency = e2e p50 ms (preprocess+infer+decode).
 

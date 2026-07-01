@@ -1,0 +1,65 @@
+name: CI
+
+# This is hosted (GPU-less) CI: lint/format/shell checks only. D-FINE-cpp is a
+# C++/TensorRT inference library — the real build+run validation (build.sh,
+# dfine_smoke, mAP checks) needs an NVIDIA GPU + TensorRT and does not run here.
+# See CONTRIBUTING.md / docs/HANDOFF.md for the full local validation workflow.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    name: ruff (trt-files/scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff
+      - name: ruff check
+        run: ruff check trt-files/scripts
+
+  shell:
+    name: shellcheck (bash scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck build.sh trt-files/scripts/overnight_bench.sh || true
+
+  cpp-format:
+    name: clang-format --dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+      # Existing C++ files are intentionally NOT bulk-reformatted to this style
+      # yet (see .clang-format / CONTRIBUTING.md "Style") — only new/changed
+      # code is expected to be clang-format-clean. Until a one-time repo-wide
+      # reformat lands, this check is informational only (continue-on-error),
+      # so it will not fail the build.
+      - name: clang-format --dry-run --Werror
+        continue-on-error: true
+        run: |
+          clang-format --dry-run --Werror $(git ls-files "*.cpp" "*.hpp" "*.cu" "*.cuh" | grep -v third_party)
+
+  # gpu-build:
+  #   name: build.sh WERROR=ON + dfine_smoke
+  #   # Requires a self-hosted runner with an NVIDIA GPU, TensorRT 10.13, and
+  #   # CUDA 12 installed (see docs/HANDOFF.md "Environment"). GitHub-hosted
+  #   # runners have no GPU, so this job is disabled here and left as a stub
+  #   # for whenever a self-hosted [self-hosted, gpu] runner is wired up.
+  #   runs-on: [self-hosted, gpu]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Build (WERROR=ON)
+  #       run: WERROR=ON ./build.sh
+  #     - name: Smoke test
+  #       run: ./build/dfine_smoke

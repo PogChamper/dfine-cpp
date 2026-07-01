@@ -1,0 +1,34 @@
+# Pre-commit hooks for D-FINE-cpp.
+#
+#   pip install pre-commit && pre-commit install
+#
+# Notes:
+#   - clang-format only targets new/changed C++ (existing files are not bulk-
+#     reformatted, see CONTRIBUTING.md "Style" and .clang-format).
+#   - This does not build or run the C++ (needs GPU + TensorRT); see build.sh.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^trt-files/scripts/
+      - id: ruff-format
+        files: ^trt-files/scripts/
+
+  - repo: local
+    hooks:
+      - id: clang-format
+        name: clang-format
+        entry: clang-format -i
+        language: system
+        files: \.(cpp|hpp|cu|cuh)$
+        exclude: ^third_party/

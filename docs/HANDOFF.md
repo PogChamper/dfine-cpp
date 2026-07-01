@@ -83,11 +83,24 @@ are the user's RRS food-detector validation — leave them.)
   `n` = `D-FINE-seg/dfine_n_coco.pt` (nano has no obj2coco on HF). Auto-downloadable via `ensure_pretrained`.
 - **Data:** COCO val2017 at `/mnt/d/datasets/coco`. Engines/onnx are gitignored build outputs (regenerate via scripts).
 
+## Repo entry points (added in the hardening pass)
+
+Top-level OSS/production files now exist: **`README.md`** (public landing page + benchmark tables),
+**`docs/ROADMAP.md`** (prioritized 4-tier plan for M3+), `CONTRIBUTING.md` (the invariants + build/validate
+flow), `LICENSE`/`NOTICE` (Apache-2.0), `build.sh` (one-command build wrapping the toolchain gotchas),
+`pyproject.toml` (uv env for the scripts), `Dockerfile`/`.dockerignore`, `.clang-format`/`.editorconfig`,
+`.pre-commit-config.yaml`, `.github/` (CI: GPU-less lint/format + a documented GPU-runner stub; issue/PR
+templates), `docs/README.md` (navigation map of the research notes), `examples/`. This HANDOFF remains the
+single source of truth for *state*; README is the front door; ROADMAP is what's next.
+
 ## Doc map (reading order)
 
 | Doc | Role |
 |---|---|
 | **`HANDOFF.md`** (this) | Current state + how to continue. **Start here.** |
+| `README.md` (root) | Public landing page — benchmarks, quickstart, precision guide. |
+| `docs/ROADMAP.md` | Prioritized roadmap for M3+ (segmentation, C ABI/bindings, WASM demo, serving, FP8, …). |
+| `docs/README.md` | Navigation map of the 90 research notes + reading order. |
 | `impl/M0_STATUS.md` | M0 findings log — the grid_sample investigation, fixes tried, per-size validation. The "why". |
 | `impl/DFINE_SEG_TRT_BUG_REPORT.md` | PR-ready writeup of the bug + fix for the D-FINE-seg author. |
 | `impl/cpp_skeleton_spec.md` | Copy-faithful spec of the rf-detr-cpp C++ skeleton to port (TrtSession, EngineMeta, build app, CMake). |

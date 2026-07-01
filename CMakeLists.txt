@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(dfine VERSION 0.1.0 LANGUAGES CXX CUDA)
+project(dfine VERSION 0.1.0 LANGUAGES C CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,6 +31,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 option(DFINE_BUILD_APPS "Build CLI apps" ON)
+option(DFINE_BUILD_C_API "Build the stable C ABI (c_api.h/.cpp) into libdfine" ON)
 option(DFINE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 # Warning flags carried as an INTERFACE target so they apply to our C++ sources
@@ -76,6 +77,13 @@ add_library(dfine SHARED
   src/tasks/detector.cpp)
 add_library(dfine::dfine ALIAS dfine)
 
+# Stable C ABI (extern "C") compiled into libdfine. DFINE_BUILDING_LIB drives the
+# dllexport side of DFINE_API on Windows; harmless on ELF (visibility default).
+if(DFINE_BUILD_C_API)
+  target_sources(dfine PRIVATE src/c_api/c_api.cpp)
+  target_compile_definitions(dfine PRIVATE DFINE_BUILDING_LIB)
+endif()
+
 target_include_directories(dfine
   PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -120,12 +128,31 @@ if(DFINE_BUILD_APPS)
   add_executable(dfine_bench apps/dfine_bench.cpp)
   target_include_directories(dfine_bench PRIVATE include src)
   target_link_libraries(dfine_bench PRIVATE dfine::dfine dfine_image_io)
+
+  # C-ABI test harnesses (only when the C ABI is compiled in).
+  if(DFINE_BUILD_C_API)
+    # Pure-C smoke: proves c_api.h is valid C and no exception escapes the ABI.
+    add_executable(dfine_capi_smoke apps/dfine_capi_smoke.c)
+    target_include_directories(dfine_capi_smoke PRIVATE include)
+    target_link_libraries(dfine_capi_smoke PRIVATE dfine::dfine)
+    target_compile_options(dfine_capi_smoke PRIVATE
+      -Wall -Wextra -Wpedantic $<$<BOOL:${DFINE_WARNINGS_AS_ERRORS}>:-Werror>)
+
+    # C++ parity check: C ABI detections must equal DFineDetector::detect exactly.
+    add_executable(dfine_capi_parity apps/dfine_capi_parity.cpp)
+    target_include_directories(dfine_capi_parity PRIVATE include)
+    target_link_libraries(dfine_capi_parity PRIVATE dfine::dfine dfine_image_io)
+  endif()
 endif()
 
-# Apply warning flags to our own targets (dfine_image_io compiles vendored stb, skip it).
+# Apply warning flags to our own targets (dfine_image_io compiles vendored stb, skip it;
+# dfine_capi_smoke is C and carries its own flags above).
 set(_dfine_warned dfine)
 if(DFINE_BUILD_APPS)
   list(APPEND _dfine_warned dfine_inspect dfine_smoke dfine_build dfine_detect dfine_coco_eval dfine_bench)
+  if(DFINE_BUILD_C_API)
+    list(APPEND _dfine_warned dfine_capi_parity)
+  endif()
 endif()
 foreach(_t IN LISTS _dfine_warned)
   target_link_libraries(${_t} PRIVATE dfine_warnings)

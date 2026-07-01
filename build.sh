@@ -30,6 +30,7 @@ echo "[build] configure (type=$BUILD_TYPE arch=$CUDA_ARCH werror=$WERROR)"
   -DCMAKE_CUDA_HOST_COMPILER="$PWD/cmake/cuda_host_ccbin.sh" \
   -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" \
   -DCMAKE_CXX_FLAGS=-B/usr/bin \
+  -DCMAKE_C_FLAGS=-B/usr/bin \
   -DDFINE_WARNINGS_AS_ERRORS="$WERROR"
 
 echo "[build] compile (-j$JOBS)"

@@ -1,0 +1,16 @@
+D-FINE-cpp
+Copyright 2026 D-FINE-cpp contributors
+
+This project is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+D-FINE-cpp is a C++/TensorRT inference port of D-FINE
+(https://github.com/Peterande/D-FINE), which is licensed under Apache-2.0.
+
+Bundled / vendored third-party components:
+  - third_party/stb (stb_image) — public domain / MIT
+  - nlohmann/json — MIT (fetched at build time)
+
+This software links against NVIDIA TensorRT and NVIDIA CUDA, which are
+proprietary NVIDIA SDKs. They are not distributed with this repository;
+the user must install them separately.

@@ -1,0 +1,22 @@
+# Matches the existing D-FINE-cpp style: Google base, 4-space indent, 100-col,
+# attached braces, aligned consecutive declarations. New/changed C++ should be
+# clang-formatted with this file (see CONTRIBUTING.md); existing files are not
+# bulk-reformatted to keep git history readable.
+---
+Language: Cpp
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 100
+AccessModifierOffset: -3
+AlignConsecutiveDeclarations: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+BreakBeforeBraces: Attach
+DerivePointerAlignment: false
+PointerAlignment: Left
+SortIncludes: false
+SpacesBeforeTrailingComments: 2
+IncludeBlocks: Preserve
+---
+Language: Cpp
+Standard: c++17

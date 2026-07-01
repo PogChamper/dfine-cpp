@@ -21,6 +21,7 @@ int main(int argc, char** argv) {
     std::filesystem::path engine, meta, image;
     float threshold = 0.5f;
     bool cuda_graph = false;
+    bool gpu_decode = false;
     try {
         for (int i = 1; i < argc; ++i) {
             std::string_view a = argv[i];
@@ -33,6 +34,7 @@ int main(int argc, char** argv) {
             else if (starts_with(a, "--image"))        image = next_value(argc, argv, i, "--image");
             else if (starts_with(a, "--threshold"))    threshold = parse_float(next_value(argc, argv, i, "--threshold"), "--threshold");
             else if (a == "--cuda-graph")              cuda_graph = true;
+            else if (a == "--gpu-decode")              gpu_decode = true;
             else throw std::runtime_error("unknown arg: " + std::string(a));
         }
         if (engine.empty() || image.empty()) {
@@ -46,6 +48,7 @@ int main(int argc, char** argv) {
         dfine::DetectorOptions opts;
         opts.threshold = threshold;
         opts.use_cuda_graph = cuda_graph;
+        opts.gpu_decode = gpu_decode;
         dfine::DFineDetector det = meta.empty() ? dfine::DFineDetector(engine, opts)
                                                 : dfine::DFineDetector(engine, meta, opts);
 

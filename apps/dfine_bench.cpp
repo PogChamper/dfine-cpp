@@ -16,6 +16,8 @@
 #include "dfine/version.hpp"
 #include "internal/cuda_check.hpp"
 #include "internal/cuda_preprocess.cuh"
+#include "internal/cuda_raii.hpp"
+#include "internal/decode_gpu.cuh"
 #include "internal/trt_session.hpp"
 
 #include <NvInferRuntime.h>
@@ -92,6 +94,7 @@ int main(int argc, char** argv) {
     float threshold = 0.001f;
     bool cuda_graph = false;
     bool graph_compare = false;
+    bool gpu_decode = false;
     std::filesystem::path json_out;
     try {
         for (int i = 1; i < argc; ++i) {
@@ -113,6 +116,7 @@ int main(int argc, char** argv) {
             else if (starts_with(a, "--json"))         json_out = next_value(argc, argv, i, "--json");
             else if (a == "--cuda-graph")              cuda_graph = true;
             else if (a == "--graph-compare")           { cuda_graph = true; graph_compare = true; }
+            else if (a == "--gpu-decode")              gpu_decode = true;
             else if (starts_with(a, "--src-size")) {
                 std::string v = next_value(argc, argv, i, "--src-size");
                 const auto x = v.find('x');
@@ -219,10 +223,61 @@ int main(int argc, char** argv) {
 
             dfine::PostprocessParams pp; pp.num_queries = N; pp.num_classes = C; pp.topk = N; pp.threshold = threshold;
 
+            // GPU-decode scratch (Zero-D2H): replaces the full-logits D2H + CPU decode
+            // with on-device kernels + a compact survivor D2H, folded into the d2h stage.
+            dfine::DevPtr g_keys, g_vals, g_ko, g_vo, g_seg, g_temp, g_out, g_counts, g_scale;
+            dfine::GpuDecodeScratch gdec;
+            std::vector<dfine::DetectionGPU> gh_out;
+            std::vector<uint32_t>            gh_counts;
+            if (gpu_decode) {
+                const int    n_cand = N * C;
+                const std::size_t tot = static_cast<std::size_t>(B) * n_cand;
+                auto da = [](dfine::DevPtr& p, std::size_t bytes) -> void* {
+                    void* q = nullptr; DFINE_CUDA_CHECK(cudaMalloc(&q, bytes)); p.reset(q); return q; };
+                gdec.keys     = static_cast<float*>(da(g_keys, tot * sizeof(float)));
+                gdec.vals     = static_cast<uint32_t*>(da(g_vals, tot * sizeof(uint32_t)));
+                gdec.keys_out = static_cast<float*>(da(g_ko, tot * sizeof(float)));
+                gdec.vals_out = static_cast<uint32_t*>(da(g_vo, tot * sizeof(uint32_t)));
+                gdec.seg_off  = static_cast<int*>(da(g_seg, static_cast<std::size_t>(B + 1) * sizeof(int)));
+                gdec.out      = static_cast<dfine::DetectionGPU*>(
+                    da(g_out, static_cast<std::size_t>(B) * N * sizeof(dfine::DetectionGPU)));
+                gdec.counts   = static_cast<uint32_t*>(da(g_counts, static_cast<std::size_t>(B) * sizeof(uint32_t)));
+                gdec.scale_wh = static_cast<float2*>(da(g_scale, static_cast<std::size_t>(B) * sizeof(float2)));
+                gdec.cub_temp_bytes = dfine::gpu_decode_temp_bytes(B, n_cand);
+                gdec.cub_temp = da(g_temp, gdec.cub_temp_bytes);
+                dfine::gpu_decode_fill_segoff(gdec.seg_off, B, n_cand, stream);
+                std::vector<float2> hs(static_cast<std::size_t>(B),
+                                       float2{static_cast<float>(src_w), static_cast<float>(src_h)});
+                DFINE_CUDA_CHECK(cudaMemcpyAsync(gdec.scale_wh, hs.data(),
+                                                 static_cast<std::size_t>(B) * sizeof(float2),
+                                                 cudaMemcpyHostToDevice, stream));
+                DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
+                gh_out.resize(static_cast<std::size_t>(B) * N);
+                gh_counts.resize(static_cast<std::size_t>(B));
+            }
+
             auto one_iter = [&](double& pre_ms, double& inf_ms, double& d2h_ms, double& dec_ms) {
                 DFINE_CUDA_CHECK(cudaEventRecord(e0, stream));
                 for (int b = 0; b < B; ++b) pre.process(base, d_input + b * single, stream);
                 DFINE_CUDA_CHECK(cudaEventRecord(e1, stream));
+                if (gpu_decode) {
+                    // infer -> on-device decode -> compact survivor D2H (no CPU decode).
+                    if (!session.context()->enqueueV3(stream)) throw std::runtime_error("enqueueV3 failed");
+                    DFINE_CUDA_CHECK(cudaEventRecord(e2, stream));
+                    dfine::gpu_decode_enqueue(static_cast<const float*>(d_logits),
+                                              static_cast<const float*>(d_boxes), B, N, C, N, threshold,
+                                              gdec, stream);
+                    DFINE_CUDA_CHECK(cudaMemcpyAsync(gh_out.data(), gdec.out,
+                                                     gh_out.size() * sizeof(dfine::DetectionGPU),
+                                                     cudaMemcpyDeviceToHost, stream));
+                    DFINE_CUDA_CHECK(cudaMemcpyAsync(gh_counts.data(), gdec.counts,
+                                                     gh_counts.size() * sizeof(uint32_t),
+                                                     cudaMemcpyDeviceToHost, stream));
+                    DFINE_CUDA_CHECK(cudaEventRecord(e3, stream));
+                    DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
+                    pre_ms = ev_ms(e0, e1); inf_ms = ev_ms(e1, e2); d2h_ms = ev_ms(e2, e3); dec_ms = 0.0;
+                    return;
+                }
                 if (graph_exec) {
                     // replay = enqueueV3 + both D2H copies fused; d2h folds into infer.
                     DFINE_CUDA_CHECK(cudaGraphLaunch(graph_exec.get(), stream));

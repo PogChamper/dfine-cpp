@@ -74,6 +74,7 @@ add_library(dfine SHARED
   src/core/trt_session.cpp
   src/core/postprocess.cpp
   src/core/cuda_preprocess.cu
+  src/core/decode_gpu.cu
   src/tasks/detector.cpp)
 add_library(dfine::dfine ALIAS dfine)
 

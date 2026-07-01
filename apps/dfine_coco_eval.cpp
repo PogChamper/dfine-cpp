@@ -27,6 +27,7 @@ int main(int argc, char** argv) {
     float threshold = 0.001f;  // low threshold: emit for mAP (matches coco_eval.py)
     int batch = 1;
     bool cuda_graph = false;
+    bool gpu_decode = false;
     try {
         for (int i = 1; i < argc; ++i) {
             std::string_view a = argv[i];
@@ -43,6 +44,7 @@ int main(int argc, char** argv) {
             else if (starts_with(a, "--threshold"))     threshold = parse_float(next_value(argc, argv, i, "--threshold"), "--threshold");
             else if (starts_with(a, "--batch"))         batch = parse_int(next_value(argc, argv, i, "--batch"), "--batch");
             else if (a == "--cuda-graph")               cuda_graph = true;
+            else if (a == "--gpu-decode")               gpu_decode = true;
             else throw std::runtime_error("unknown arg: " + std::string(a));
         }
         if (engine.empty() || images_dir.empty() || filelist.empty() || out.empty()) {
@@ -54,6 +56,7 @@ int main(int argc, char** argv) {
         dfine::DetectorOptions opts;
         opts.threshold = threshold;
         opts.use_cuda_graph = cuda_graph;  // validates the graph path produces == mAP
+        opts.gpu_decode = gpu_decode;      // validates the GPU-decode path == CPU-decode mAP
         dfine::DFineDetector det = meta.empty() ? dfine::DFineDetector(engine, opts)
                                                 : dfine::DFineDetector(engine, meta, opts);
 

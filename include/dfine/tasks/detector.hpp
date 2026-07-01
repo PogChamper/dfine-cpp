@@ -19,6 +19,14 @@ struct DetectorOptions {
     // Best for fixed-resolution, steady-batch streaming.
     bool use_cuda_graph{false};
     int  graph_warmup_iters{3};  // full enqueue cycles before capture (TRT needs >=2)
+
+    // Opt-in GPU-side decode (Zero-D2H): run sigmoid/top-k/threshold/box-decode as
+    // CUDA kernels reading the engine outputs on-device, so only the survivors cross
+    // PCIe instead of the full logits, and the CPU does no per-frame decode work.
+    // Requires FP32 engine outputs (falls back to the CPU decode otherwise). Results
+    // are mAP-equivalent to the CPU decode (the score differs by <=1 ULP: GPU expf
+    // vs libm), not byte-identical. Takes precedence over use_cuda_graph for now.
+    bool gpu_decode{false};
 };
 
 // Public D-FINE detector. Hides all TensorRT/CUDA (and OpenCV) headers behind a

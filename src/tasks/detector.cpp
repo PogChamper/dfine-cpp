@@ -5,6 +5,7 @@
 #include "dfine/core/postprocess.hpp"
 #include "internal/cuda_check.hpp"
 #include "internal/cuda_preprocess.cuh"
+#include "internal/decode_gpu.cuh"
 #include "internal/trt_session.hpp"
 
 #include "internal/cuda_raii.hpp"
@@ -15,6 +16,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -66,6 +68,19 @@ struct DFineDetector::Impl {
     bool graph_supported_{false};   // FP32 outputs and no aux streams
     bool graph_disabled_{false};    // a capture attempt failed unrecoverably; stop trying
     bool graph_warned_{false};
+
+    // --- GPU decode (Zero-D2H) state (opt-in via DetectorOptions.gpu_decode) -------
+    // Kernels read the engine's FP32 logits/boxes on-device and emit only the compact
+    // survivors ([B*N] DetectionGPU + counts) — no full-logits D2H, no CPU decode.
+    bool             gpu_decode_supported_{false};  // FP32 outputs
+    bool             gpu_decode_warned_{false};
+    GpuDecodeScratch gdec_;                          // raw device pointers (own below)
+    DevPtr gdec_keys_, gdec_vals_, gdec_keys_out_, gdec_vals_out_;
+    DevPtr gdec_seg_, gdec_temp_, gdec_out_, gdec_counts_, gdec_scale_;
+    int    gdec_cap_batch_{0};                       // buffers sized for this many images
+    std::vector<DetectionGPU> gdec_host_out_;        // D2H compact results [cap*N]
+    std::vector<uint32_t>     gdec_host_counts_;     // survivors per image [cap]
+    std::vector<float2>       gdec_scale_host_;       // per-image (origW, origH) staging
 
     Impl(const std::filesystem::path& engine_path, const std::filesystem::path& meta_path,
          const DetectorOptions& options)
@@ -145,6 +160,11 @@ struct DFineDetector::Impl {
         graph_supported_ = b_logits->dtype == nvinfer1::DataType::kFLOAT &&
                            b_boxes->dtype == nvinfer1::DataType::kFLOAT &&
                            session.num_aux_streams() == 0;
+
+        // GPU decode only needs FP32 outputs — it runs after enqueueV3 on the main
+        // stream, so (unlike graph capture) it is fine with aux streams.
+        gpu_decode_supported_ = b_logits->dtype == nvinfer1::DataType::kFLOAT &&
+                                b_boxes->dtype == nvinfer1::DataType::kFLOAT;
     }
 
     // Locate the logits/boxes output bindings by name, falling back to shape
@@ -304,6 +324,114 @@ struct DFineDetector::Impl {
         return true;
     }
 
+    // (Re)allocate the GPU-decode scratch to hold at least `B` images (grow-only).
+    // seg_off is batch-invariant, so a scratch sized for `cap` serves any B <= cap.
+    void ensure_gpu_decode_(int B) {
+        if (B <= gdec_cap_batch_) return;
+        const int cap    = B > max_batch_ ? B : (max_batch_ > 0 ? max_batch_ : B);
+        const int n_cand = N * C;
+        // The GPU decode carries the candidate count (cap * n_cand) in 32-bit int
+        // (kernel indices, grid dims, CUB num_items). Unreachable for D-FINE
+        // (N*C=24000), but fail loudly rather than silently overflow on a huge engine.
+        if (static_cast<long long>(cap) * n_cand > std::numeric_limits<int>::max()) {
+            throw std::runtime_error("dfine: gpu_decode candidate count (batch*queries*classes) "
+                                     "exceeds INT_MAX; reduce batch or disable gpu_decode");
+        }
+        const auto total = static_cast<std::size_t>(cap) * n_cand;
+
+        auto dalloc = [](DevPtr& p, std::size_t bytes) -> void* {
+            void* q = nullptr;
+            DFINE_CUDA_CHECK(cudaMalloc(&q, bytes));
+            p.reset(q);
+            return q;
+        };
+        gdec_.keys     = static_cast<float*>(dalloc(gdec_keys_, total * sizeof(float)));
+        gdec_.vals     = static_cast<uint32_t*>(dalloc(gdec_vals_, total * sizeof(uint32_t)));
+        gdec_.keys_out = static_cast<float*>(dalloc(gdec_keys_out_, total * sizeof(float)));
+        gdec_.vals_out = static_cast<uint32_t*>(dalloc(gdec_vals_out_, total * sizeof(uint32_t)));
+        gdec_.seg_off =
+            static_cast<int*>(dalloc(gdec_seg_, static_cast<std::size_t>(cap + 1) * sizeof(int)));
+        gdec_.out = static_cast<DetectionGPU*>(
+            dalloc(gdec_out_, static_cast<std::size_t>(cap) * N * sizeof(DetectionGPU)));
+        gdec_.counts =
+            static_cast<uint32_t*>(dalloc(gdec_counts_, static_cast<std::size_t>(cap) * sizeof(uint32_t)));
+        gdec_.scale_wh =
+            static_cast<float2*>(dalloc(gdec_scale_, static_cast<std::size_t>(cap) * sizeof(float2)));
+        gdec_.cub_temp_bytes = gpu_decode_temp_bytes(cap, n_cand);
+        gdec_.cub_temp       = dalloc(gdec_temp_, gdec_.cub_temp_bytes);
+
+        gpu_decode_fill_segoff(gdec_.seg_off, cap, n_cand, session.stream());
+        DFINE_CUDA_CHECK(cudaStreamSynchronize(session.stream()));  // seg_off ready before first use
+
+        gdec_host_out_.resize(static_cast<std::size_t>(cap) * N);
+        gdec_host_counts_.resize(static_cast<std::size_t>(cap));
+        gdec_scale_host_.resize(static_cast<std::size_t>(cap));
+        gdec_cap_batch_ = cap;
+    }
+
+    // Zero-D2H path: enqueueV3 -> on-device decode -> D2H only the survivors.
+    std::vector<Detections> run_gpu_decode_(const std::vector<ImageU8>& images, int B, float thr,
+                                            std::chrono::steady_clock::time_point t0) {
+        ensure_gpu_decode_(B);
+        cudaStream_t stream = session.stream();
+
+        DFINE_TRT_CHECK(session.context()->enqueueV3(stream));  // outputs -> device_buffer(name)
+        graph_ctx_batch_ = B;  // context is now enqueued/flushed for this shape
+
+        for (int i = 0; i < B; ++i) {
+            gdec_scale_host_[i].x = static_cast<float>(images[i].width);
+            gdec_scale_host_[i].y = static_cast<float>(images[i].height);
+        }
+        DFINE_CUDA_CHECK(cudaMemcpyAsync(gdec_.scale_wh, gdec_scale_host_.data(),
+                                         static_cast<std::size_t>(B) * sizeof(float2),
+                                         cudaMemcpyHostToDevice, stream));
+
+        const auto* d_logits = static_cast<const float*>(session.device_buffer(b_logits->name));
+        const auto* d_boxes  = static_cast<const float*>(session.device_buffer(b_boxes->name));
+        gpu_decode_enqueue(d_logits, d_boxes, B, N, C, /*topk=*/N, thr, gdec_, stream);
+
+        const auto out_n = static_cast<std::size_t>(B) * N;
+        DFINE_CUDA_CHECK(cudaMemcpyAsync(gdec_host_out_.data(), gdec_.out,
+                                         out_n * sizeof(DetectionGPU), cudaMemcpyDeviceToHost,
+                                         stream));
+        DFINE_CUDA_CHECK(cudaMemcpyAsync(gdec_host_counts_.data(), gdec_.counts,
+                                         static_cast<std::size_t>(B) * sizeof(uint32_t),
+                                         cudaMemcpyDeviceToHost, stream));
+        DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
+        const auto t1 = std::chrono::steady_clock::now();
+
+        std::vector<Detections> results;
+        results.reserve(static_cast<std::size_t>(B));
+        for (int i = 0; i < B; ++i) {
+            const uint32_t      m    = gdec_host_counts_[static_cast<std::size_t>(i)];
+            const DetectionGPU* base = gdec_host_out_.data() + static_cast<std::size_t>(i) * N;
+            Detections          dets;
+            dets.reserve(m);
+            for (uint32_t k = 0; k < m; ++k) {
+                const DetectionGPU& g = base[k];
+                Detection           d;
+                d.box.x1   = g.x1;
+                d.box.y1   = g.y1;
+                d.box.x2   = g.x2;
+                d.box.y2   = g.y2;
+                d.class_id = g.class_id;
+                d.score    = g.score;
+                dets.push_back(d);
+            }
+            results.push_back(std::move(dets));
+        }
+        const auto t2 = std::chrono::steady_clock::now();
+
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        timings.preprocess_ms  = 0.0;
+        timings.infer_ms       = ms(t0, t1);
+        timings.postprocess_ms = ms(t1, t2);
+        timings.total_ms       = ms(t0, t2);
+        return results;
+    }
+
     std::vector<Detections> run_batch(const std::vector<ImageU8>& images, float threshold) {
         const int B = static_cast<int>(images.size());
         if (B == 0) return {};
@@ -316,6 +444,18 @@ struct DFineDetector::Impl {
         float* d_input = static_cast<float*>(session.device_buffer(input_name));
         for (int i = 0; i < B; ++i) {
             preprocessor->process(images[i], d_input + i * single, session.stream());
+        }
+
+        const float thr = (threshold >= 0.0f) ? threshold : opts.threshold;
+
+        // Zero-D2H GPU decode takes precedence when requested + supported (FP32 outputs).
+        if (opts.gpu_decode) {
+            if (gpu_decode_supported_) return run_gpu_decode_(images, B, thr, t0);
+            if (!gpu_decode_warned_) {
+                gpu_decode_warned_ = true;
+                log_message(LogSeverity::kWarning,
+                            "dfine: gpu_decode set but engine outputs aren't FP32; using CPU decode");
+            }
         }
 
         // Preprocess/H2D stayed outside; the graph (if any) covers enqueueV3 + D2H.
@@ -348,7 +488,7 @@ struct DFineDetector::Impl {
         }
         const auto t1 = Clock::now();
 
-        pp.threshold = (threshold >= 0.0f) ? threshold : opts.threshold;
+        pp.threshold = thr;
         std::vector<Detections> results;
         results.reserve(static_cast<std::size_t>(B));
         for (int i = 0; i < B; ++i) {

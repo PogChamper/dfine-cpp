@@ -4,7 +4,7 @@
 The exported graph takes a single ``images`` input and returns the decoder's raw
 ``logits`` (pre-sigmoid, [N, num_queries, num_classes]) and ``boxes`` (normalized
 cxcywh, [N, num_queries, 4]). Sigmoid + top-k + box conversion are intentionally
-left out of the graph and performed in C++ (see docs/synthesis/01_PLAN §5, §8).
+left out of the graph and performed in C++.
 
 The FDR/Integral/LQE box decode and the deformable attention stay inside the graph
 regardless of this choice; ``model.deploy()`` folds the weighting vector and truncates
@@ -14,7 +14,7 @@ A JSON sidecar with the same stem describes the engine contract (input geometry,
 normalization, per-variant constants) so the C++ runtime stays model-generic.
 
 Model construction uses the D-FINE-seg package, whose detection subnetwork is
-architecturally identical to authorial D-FINE (verified: docs/research/V00 §V07);
+architecturally identical to authorial D-FINE;
 the resulting graph is representative of either repo.
 """
 

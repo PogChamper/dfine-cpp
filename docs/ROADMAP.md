@@ -32,10 +32,10 @@ gap and are the direct prerequisites for almost everything else in this document
   decode kernel (mask logits are pre-sigmoid, so thresholding is a plain `> 0` compare on the logit rather
   than a sigmoid + `>0.5`), and populate a `mask` field on `Detection`. The existing OpenCV-free `ImageU8`
   and raw-export patterns extend directly to this task, and `rf-detr`'s `mask_decode.cu` is a working model
-  to follow (see `docs/research/D07_cpp_mask_decode.md`).
+  to follow.
 - **`extern "C"` ABI wrapper.** An opaque handle with no C++ types or exceptions crossing the boundary
   (catch internally, return error codes) unlocks every non-C++ consumer of `libdfine.so`. The plan is
-  already specced in `docs/synthesis/01_PLAN_dfine_cpp.md`, and this is a hard prerequisite for bindings of
+  already specced, and this is a hard prerequisite for bindings of
   any kind.
 - **Python bindings + pip wheel.** Built over the C ABI (pybind11 or ctypes), this is the single highest
   -leverage move for adoption and stars — most detector users are Python-first. The caveat is that
@@ -155,5 +155,3 @@ engineering.
    **hardcore-precision** (FP8, QAT, fused-FDR plugin) based on where demand actually shows up — both are
    legitimate next chapters, but trying to do both at once will stall progress on either.
 
-`docs/hardcore-ideas.md` holds the deeper backlog for anything in Tier 4 that needs more detailed design
-notes before it's picked up.

@@ -18,7 +18,7 @@ trt-files/onnx/
 trt-files/engines/
 
 # Design/research docs — not needed to build or run the C++ binaries.
-docs/research/
+
 
 # Python bytecode caches (e.g. trt-files/scripts/__pycache__/).
 **/__pycache__/

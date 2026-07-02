@@ -46,7 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /workspace/D-FINE-cpp
 
-# Respect .dockerignore: build/, .git, trt-files/{onnx,engines}, docs/research,
+# Respect .dockerignore: build/, .git, trt-files/{onnx,engines},
 # __pycache__ are excluded (the engines/onnx dirs alone are ~2 GB on the authoring
 # host and are build outputs anyway — see limitation (c) below).
 COPY . .

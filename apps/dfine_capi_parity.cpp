@@ -1,6 +1,6 @@
 // dfine_capi_parity — prove the C ABI returns detections byte-identical to the
 // C++ DFineDetector::detect on the same image. This is the acceptance test for
-// "dfine_detector_detect must be IDENTICAL to dfine_detect" (docs/NEXT_TASK.md).
+// "dfine_detector_detect must be IDENTICAL to dfine_detect".
 //
 // It decodes one image, runs the C++ API and the C ABI on the exact same pixel
 // buffer + threshold, and compares every detection field bit-for-bit (the C ABI

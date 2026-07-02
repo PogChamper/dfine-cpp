@@ -257,7 +257,7 @@ DFINE_API int dfine_detector_num_classes(const dfine_detector_t* det);
 DFINE_API int dfine_detector_max_batch(const dfine_detector_t* det);
 
 /* -------------------------------------------------------------------------
- * Frozen pipeline (intensive-core; see docs/impl/INTENSIVE_CORE_PLAN.md)
+ * Frozen pipeline (intensive-core; see include/dfine/tasks/detector.hpp)
  * ---------------------------------------------------------------------- */
 
 /*

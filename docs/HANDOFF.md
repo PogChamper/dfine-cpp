@@ -30,7 +30,7 @@ modeled on `rf-detr-cpp`. Repo: `/home/dxdxxd/projects/custom-dfine/D-FINE-cpp`.
   `cudaGraphLaunch` per frame** covering H2D→preprocess→enqueueV3→GPU-decode→survivor-D2H. B=1 CPU/frame
   4.30 → 0.195 ms, e2e wall −34.3% on m FP16 0-aux; byte-parity vs the split path on 1061 real 640×480
   val2017 images; mAP configs identical (0.5660 subset-2000). See "Intensive core (P1–P3)" below and
-  `impl/INTENSIVE_CORE_PLAN.md` for the full spec/validation record.
+  the "Intensive core (P1–P3)" section below for the full validated record.
 - The big M0/M2 discovery is the through-line: **D-FINE's FDR box-decode is exquisitely FP-precision-sensitive**
   (grid_sample, the kFP16 flag, BF16 and INT8 all fail through it) — see "Decisions" and the M2 section.
 
@@ -51,7 +51,7 @@ Scripts (canonical, `trt-files/scripts/`): `export_dfine_onnx.py` (raw export + 
 `build_engine.py` (native TRT build, dynamic-batch profile, precision flags), `verify_engine.py`
 (smoke), `coco_eval.py` (mAP, multi-backend), `parity_check.py` (per-image torch/ORT/TRT),
 `cuda_env.py` (onnxruntime-gpu bootstrap), `seg_export_repro.py` (the D-FINE-seg bug-report repro).
-`experiments/` holds superseded one-offs. (`compare_export_backends.py` + `EXPORT_BACKEND_COMPARISON_RRS.md`
+`experiments/` holds superseded one-offs. (`compare_export_backends.py`
 are the user's RRS food-detector validation — leave them.)
 
 ## Decisions & gotchas (the canonical truths — full detail in `impl/M0_STATUS.md`)
@@ -114,15 +114,8 @@ single source of truth for *state*; README is the front door; ROADMAP is what's 
 | **`HANDOFF.md`** (this) | Current state + how to continue. **Start here.** |
 | `README.md` (root) | Public landing page — benchmarks, quickstart, precision guide. |
 | `docs/ROADMAP.md` | Prioritized roadmap for M3+ (segmentation, C ABI/bindings, WASM demo, serving, FP8, …). |
-| `docs/README.md` | Navigation map of the 90 research notes + reading order. |
 | `impl/M0_STATUS.md` | M0 findings log — the grid_sample investigation, fixes tried, per-size validation. The "why". |
 | `impl/DFINE_SEG_TRT_BUG_REPORT.md` | PR-ready writeup of the bug + fix for the D-FINE-seg author. |
-| `impl/cpp_skeleton_spec.md` | Copy-faithful spec of the rf-detr-cpp C++ skeleton to port (TrtSession, EngineMeta, build app, CMake). |
-| `synthesis/01_PLAN_dfine_cpp.md` | The pre-M0 design plan (18 sections). Still the architecture reference, but where it
-  conflicts with M0 reality, **M0_STATUS/this doc win** (esp. deform core, export mode). |
-| `synthesis/00_INDEX.md` + repo summaries / comparisons / pitfalls | Distilled design-phase analysis. |
-| `research/*` (90 notes + `V00`) | Forensic evidence base with file:line proofs. Reference only. |
-| `hardcore-ideas.md` | Backlog of advanced optimizations beyond M2 (throughput, precision, kernel/graph tricks, frontier). A menu for future milestones — read after the M2 roadmap. |
 
 ## M1 — C++ detector (DONE)
 
@@ -264,7 +257,7 @@ a baked pointer (`graph_stale_`, 5-pointer check), and **no-throw fallback to `e
 outputs aren't FP32 / the engine uses aux streams. `DetectorOptions.use_cuda_graph` + `cuda_graph_compat`
 sidecar flag; `CudaGraph`/`CudaGraphExec` RAII in `cuda_raii.hpp`; `--cuda-graph` on `dfine_bench`/
 `dfine_detect`/`dfine_coco_eval`. Our RAW single-input/FP32-output export sidesteps rf-detr's two graph hazards
-(int64 `labels`, `orig_target_sizes`) — see `research/P12_cuda_graph.md`.
+(int64 `labels`, `orig_target_sizes`).
 
 **★ The graph requires a single-stream (0-aux) engine — this is the key gotcha.** TRT builds these D-FINE
 engines with **2 auxiliary streams** by default (`getNbAuxStreams()==2`), and `cudaStreamCaptureModeThreadLocal`
@@ -371,7 +364,7 @@ requires the D-FINE-seg checkpoints (mapped per model) or an explicit `--checkpo
 
 ## Intensive core (P1–P3) — device-resident frozen pipeline (DONE; P4 pending)
 
-Execution spec + full validation record: `impl/INTENSIVE_CORE_PLAN.md`. Summary of what shipped:
+Summary of what shipped (full per-task validation numbers are recorded in the sections above and docs/releases/):
 
 - **P1 — Zero-D2H GPU decode** (`DetectorOptions.gpu_decode`, FP32-output engines): sigmoid→top-k→
   threshold→xyxy as CUDA kernels (`decode_gpu.cu`: k_pack → CUB segmented radix sort by raw logit →
@@ -413,4 +406,4 @@ Python parity (gpu_decode / own_device_memory / full_pipeline_graph / letterbox 
 last_timings()). Optional letterbox preprocessing (options or sidecar `resize` field) is validated
 against host references to +0.0002 AP; stretch remains the default (training convention, ~2 AP
 better). Commit identity: PogChamper + noreply (repo-local config; no AI co-author trailers).
-Current state and next actions: docs/NEXT_TASK.md. Release notes: docs/releases/.
+Release notes: docs/releases/.

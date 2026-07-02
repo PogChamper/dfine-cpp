@@ -88,12 +88,18 @@ struct DFineDetector::Impl {
     // survivors ([B*N] DetectionGPU + counts) — no full-logits D2H, no CPU decode.
     bool gpu_decode_supported_{false};  // FP32 outputs
     bool gpu_decode_warned_{false};
-    GpuDecodeScratch gdec_;                    // raw device pointers into gdec_arena_
-    std::unique_ptr<DeviceArena> gdec_arena_;  // one block backing all 9 scratch slabs
-    int gdec_cap_batch_{0};                    // buffers sized for this many images
-    std::vector<DetectionGPU> gdec_host_out_;  // D2H compact results [cap*N]
-    std::vector<uint32_t> gdec_host_counts_;   // survivors per image [cap]
-    std::vector<float2> gdec_scale_host_;      // per-image (origW, origH) staging
+    GpuDecodeScratch gdec_;                     // raw device pointers into gdec_arena_
+    std::unique_ptr<DeviceArena> gdec_arena_;   // one block backing all 9 scratch slabs
+    int gdec_cap_batch_{0};                     // buffers sized for this many images
+    std::vector<DetectionGPU> gdec_host_out_;   // D2H compact results [cap*N]
+    std::vector<uint32_t> gdec_host_counts_;    // survivors per image [cap]
+    std::vector<DecodeMapGPU> gdec_maps_host_;  // per-image coordinate maps, H2D staging
+
+    // --- Preprocessing geometry (resolved once: options override > sidecar) --------
+    bool letterbox_{false};
+    bool lb_topleft_{false};
+    int lb_pad_{114};
+    bool lb_upscale_{true};
 
     // --- Frozen-memory contract (P2) ----------------------------------------------
     // (act_mem_ is declared at the top of Impl for destruction ordering.)
@@ -122,7 +128,7 @@ struct DFineDetector::Impl {
     DevPtr d_frames_;                  // device twin; the graph H2Ds slot-by-slot from h_frames_
     HostPtr h_survivors_;              // pinned [full_batch_ * N] DetectionGPU (graph D2H target)
     HostPtr h_counts_;                 // pinned [full_batch_] uint32_t (graph D2H target)
-    HostPtr h_scale_;                  // pinned [full_batch_] float2, constant (src_w, src_h)
+    HostPtr h_scale_;                  // pinned [full_batch_] DecodeMapGPU, constant per config
     HostPtr h_thr_;                    // mapped pinned float: live threshold (see decode_gpu.cuh)
     float* d_thr_{nullptr};            // device alias of h_thr_
 
@@ -190,6 +196,23 @@ struct DFineDetector::Impl {
         preprocessor = std::make_unique<ImagePreprocessor>(in_h_, in_w_);
         preprocessor->set_mean(meta.mean[0], meta.mean[1], meta.mean[2]);
         preprocessor->set_std(meta.std[0], meta.std[1], meta.std[2]);
+
+        // Preprocessing geometry: an explicit option wins, else the sidecar's
+        // "resize" field, else stretch (the training convention). The stretch
+        // path is untouched — its detections stay byte-identical.
+        using Resize = PreprocessSpec::Resize;
+        if (opts.preprocess.resize == Resize::kLetterbox) {
+            letterbox_ = true;
+            lb_topleft_ = opts.preprocess.anchor_topleft;
+            lb_pad_ = opts.preprocess.pad_value;
+            lb_upscale_ = opts.preprocess.allow_upscale;
+        } else if (opts.preprocess.resize == Resize::kAuto && meta.resize == "letterbox") {
+            letterbox_ = true;
+            lb_topleft_ = meta.letterbox_anchor == "topleft";
+            lb_pad_ = meta.letterbox_pad;
+            lb_upscale_ = meta.letterbox_upscale;
+        }
+        if (letterbox_) preprocessor->set_letterbox(lb_topleft_, lb_pad_, lb_upscale_);
 
         pp.num_queries = N;
         pp.num_classes = C;
@@ -278,6 +301,31 @@ struct DFineDetector::Impl {
             b_boxes = box_cand;
             b_logits = other;
         }
+    }
+
+    // Per-image normalized-canvas -> original-pixels map for the decode. Stretch
+    // yields the historical {W, 0, H, 0, no-clip} identity; letterbox un-maps
+    // through the same LetterboxMap the preprocessor used and clips to the frame.
+    DecodeMap make_map_(int src_w, int src_h) const noexcept {
+        DecodeMap m;
+        if (letterbox_) {
+            const LetterboxMap lb =
+                compute_letterbox_map(src_w, src_h, in_w_, in_h_, lb_topleft_, lb_upscale_);
+            m.sx = static_cast<float>(in_w_) / lb.s;
+            m.ox = static_cast<float>(lb.dx) / lb.s;
+            m.sy = static_cast<float>(in_h_) / lb.s;
+            m.oy = static_cast<float>(lb.dy) / lb.s;
+            m.clip_w = static_cast<float>(src_w);
+            m.clip_h = static_cast<float>(src_h);
+        } else {
+            m.sx = static_cast<float>(src_w);
+            m.sy = static_cast<float>(src_h);
+        }
+        return m;
+    }
+
+    static DecodeMapGPU to_gpu_(const DecodeMap& m) noexcept {
+        return DecodeMapGPU{m.sx, m.ox, m.sy, m.oy, m.clip_w, m.clip_h};
     }
 
     // Set the dynamic input shape for batch B (or validate a static engine).
@@ -467,7 +515,7 @@ struct DFineDetector::Impl {
         const auto o_seg = arena->sub(static_cast<std::size_t>(cap + 1) * sizeof(int));
         const auto o_out = arena->sub(static_cast<std::size_t>(cap) * N * sizeof(DetectionGPU));
         const auto o_cnt = arena->sub(static_cast<std::size_t>(cap) * sizeof(uint32_t));
-        const auto o_scale = arena->sub(static_cast<std::size_t>(cap) * sizeof(float2));
+        const auto o_scale = arena->sub(static_cast<std::size_t>(cap) * sizeof(DecodeMapGPU));
         const auto o_temp = arena->sub(cub_bytes);
         arena->commit();
 
@@ -486,14 +534,14 @@ struct DFineDetector::Impl {
         gdec_.seg_off = seg;
         gdec_.out = arena->at<DetectionGPU>(o_out);
         gdec_.counts = arena->at<uint32_t>(o_cnt);
-        gdec_.scale_wh = arena->at<float2>(o_scale);
+        gdec_.maps = arena->at<DecodeMapGPU>(o_scale);
         gdec_.cub_temp = arena->at(o_temp);
         gdec_.cub_temp_bytes = cub_bytes;
 
         gdec_arena_ = std::move(arena);  // frees the previous block (grow-only replacement)
         gdec_host_out_.resize(static_cast<std::size_t>(cap) * N);
         gdec_host_counts_.resize(static_cast<std::size_t>(cap));
-        gdec_scale_host_.resize(static_cast<std::size_t>(cap));
+        gdec_maps_host_.resize(static_cast<std::size_t>(cap));
         gdec_cap_batch_ = cap;
     }
 
@@ -526,14 +574,23 @@ struct DFineDetector::Impl {
                                 frame_slot_bytes_, cudaMemcpyHostToDevice, stream) != cudaSuccess) {
                 return false;
             }
-            launch_stretch_resize_normalize(stream, d_slab + i * frame_slot_bytes_, full_src_h_,
-                                            full_src_w_, full_src_w_ * 3, d_input + i * single,
-                                            in_h_, in_w_, full_is_bgr_, meta.mean.data(),
-                                            meta.std.data());
+            if (letterbox_) {
+                const LetterboxMap lb = compute_letterbox_map(full_src_w_, full_src_h_, in_w_,
+                                                              in_h_, lb_topleft_, lb_upscale_);
+                launch_letterbox_resize_normalize(stream, d_slab + i * frame_slot_bytes_,
+                                                  full_src_h_, full_src_w_, full_src_w_ * 3,
+                                                  d_input + i * single, in_h_, in_w_, lb, lb_pad_,
+                                                  full_is_bgr_, meta.mean.data(), meta.std.data());
+            } else {
+                launch_stretch_resize_normalize(stream, d_slab + i * frame_slot_bytes_, full_src_h_,
+                                                full_src_w_, full_src_w_ * 3, d_input + i * single,
+                                                in_h_, in_w_, full_is_bgr_, meta.mean.data(),
+                                                meta.std.data());
+            }
         }
-        if (cudaMemcpyAsync(gdec_.scale_wh, h_scale_.get(),
-                            static_cast<std::size_t>(B) * sizeof(float2), cudaMemcpyHostToDevice,
-                            stream) != cudaSuccess) {
+        if (cudaMemcpyAsync(gdec_.maps, h_scale_.get(),
+                            static_cast<std::size_t>(B) * sizeof(DecodeMapGPU),
+                            cudaMemcpyHostToDevice, stream) != cudaSuccess) {
             return false;
         }
         if (!session.context()->enqueueV3(stream)) return false;
@@ -589,7 +646,7 @@ struct DFineDetector::Impl {
             const std::size_t slab_bytes = static_cast<std::size_t>(B) * frame_slot_bytes_;
             const std::size_t out_bytes = static_cast<std::size_t>(B) * N * sizeof(DetectionGPU);
             const std::size_t cnt_bytes = static_cast<std::size_t>(B) * sizeof(uint32_t);
-            const std::size_t scale_bytes = static_cast<std::size_t>(B) * sizeof(float2);
+            const std::size_t scale_bytes = static_cast<std::size_t>(B) * sizeof(DecodeMapGPU);
 
             auto pin = [](HostPtr& h, std::size_t bytes) {
                 void* p = nullptr;
@@ -624,9 +681,9 @@ struct DFineDetector::Impl {
             d_thr_ = static_cast<float*>(dp);
 
             *static_cast<float*>(h_thr_.get()) = opts.threshold;
-            auto* sc = static_cast<float2*>(h_scale_.get());
+            auto* sc = static_cast<DecodeMapGPU*>(h_scale_.get());
             for (int i = 0; i < B; ++i) {
-                sc[i] = float2{static_cast<float>(full_src_w_), static_cast<float>(full_src_h_)};
+                sc[i] = to_gpu_(make_map_(full_src_w_, full_src_h_));
             }
             // Warmup/capture slab content: neutral gray. The graph records
             // operations, not data — any valid frame content works.
@@ -850,11 +907,11 @@ struct DFineDetector::Impl {
         graph_ctx_batch_ = B;  // context is now enqueued/flushed for this shape
 
         for (int i = 0; i < B; ++i) {
-            gdec_scale_host_[i].x = static_cast<float>(images[i].width);
-            gdec_scale_host_[i].y = static_cast<float>(images[i].height);
+            gdec_maps_host_[static_cast<std::size_t>(i)] =
+                to_gpu_(make_map_(images[i].width, images[i].height));
         }
-        DFINE_CUDA_CHECK(cudaMemcpyAsync(gdec_.scale_wh, gdec_scale_host_.data(),
-                                         static_cast<std::size_t>(B) * sizeof(float2),
+        DFINE_CUDA_CHECK(cudaMemcpyAsync(gdec_.maps, gdec_maps_host_.data(),
+                                         static_cast<std::size_t>(B) * sizeof(DecodeMapGPU),
                                          cudaMemcpyHostToDevice, stream));
 
         const auto* d_logits = static_cast<const float*>(session.device_buffer(b_logits->name));
@@ -996,7 +1053,8 @@ struct DFineDetector::Impl {
         for (int i = 0; i < B; ++i) {
             const float* l = h_logits.data() + static_cast<std::size_t>(i) * N * C;
             const float* b = h_boxes.data() + static_cast<std::size_t>(i) * N * 4;
-            results.push_back(decode_detections(l, b, images[i].width, images[i].height, pp));
+            results.push_back(
+                decode_detections(l, b, make_map_(images[i].width, images[i].height), pp));
         }
         const auto t2 = Clock::now();
 

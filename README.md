@@ -224,6 +224,13 @@ ImageU8 (HWC u8) ──► CUDA preprocess (stretch-resize + /255, BGR→RGB, �
 Preprocessing is **`/255` only — no ImageNet mean/std** (a D-FINE quirk; copying a normal detector's kernel
 collapses mAP). The FDR/Integral/LQE box math stays *inside* the engine and is never reimplemented in C++.
 
+Resize is stretch by default (the training convention). Pipelines that standardize on aspect-preserving
+inputs can opt into **letterbox** — `DetectorOptions.preprocess` or the sidecar `resize` field — with
+configurable anchor (center/top-left), padding value, and upscale on/off; box coordinates are un-mapped
+and clipped automatically, including under the GPU decode and the full-pipeline graph. Measured cost on
+the stretch-trained weights: **−1.7…−2.0 AP** (`trt-files/scripts/letterbox_eval.py`); the CUDA path
+reproduces the host reference to +0.0002 AP.
+
 ## Precision guide
 
 | mode | mAP | speed | how |

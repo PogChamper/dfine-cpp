@@ -35,6 +35,10 @@ int main(int argc, char** argv) {
     bool do_freeze = false;
     bool full_graph = false;
     int filter_w = 0, filter_h = 0;  // --filter-res: only eval images of exactly WxH
+    bool letterbox = false;          // validates the letterbox preprocessing path
+    bool lb_topleft = false;
+    int lb_pad = 114;
+    bool lb_upscale = true;
     try {
         auto parse_wh = [](std::string_view v, int& w, int& h, const char* flag) {
             const std::string s(v);
@@ -86,7 +90,18 @@ int main(int argc, char** argv) {
             else if (starts_with(a, "--filter-res"))
                 parse_wh(next_value(argc, argv, i, "--filter-res"), filter_w, filter_h,
                          "--filter-res");
-            else
+            else if (a == "--letterbox")
+                letterbox = true;
+            else if (a == "--letterbox-topleft") {
+                letterbox = true;
+                lb_topleft = true;
+            } else if (starts_with(a, "--letterbox-pad")) {
+                letterbox = true;
+                lb_pad = parse_int(next_value(argc, argv, i, "--letterbox-pad"), "--letterbox-pad");
+            } else if (a == "--no-upscale") {
+                letterbox = true;
+                lb_upscale = false;
+            } else
                 throw std::runtime_error("unknown arg: " + std::string(a));
         }
         if (engine.empty() || images_dir.empty() || filelist.empty() || out.empty()) {
@@ -101,6 +116,12 @@ int main(int argc, char** argv) {
         opts.gpu_decode = gpu_decode;           // validates the GPU-decode path == CPU-decode mAP
         opts.own_device_memory = own_dev_mem;   // validates the kUSER_MANAGED activation path
         opts.full_pipeline_graph = full_graph;  // validates the P3 single-launch path
+        if (letterbox) {
+            opts.preprocess.resize = dfine::PreprocessSpec::Resize::kLetterbox;
+            opts.preprocess.anchor_topleft = lb_topleft;
+            opts.preprocess.pad_value = lb_pad;
+            opts.preprocess.allow_upscale = lb_upscale;
+        }
         dfine::DFineDetector det = meta.empty() ? dfine::DFineDetector(engine, opts)
                                                 : dfine::DFineDetector(engine, meta, opts);
 

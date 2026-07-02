@@ -30,7 +30,7 @@ struct Candidate {
 
 }  // namespace
 
-Detections decode_detections(const float* logits, const float* boxes, int img_w, int img_h,
+Detections decode_detections(const float* logits, const float* boxes, const DecodeMap& map,
                              const PostprocessParams& p) {
     Detections out;
     if (!logits || !boxes || p.num_queries <= 0 || p.num_classes <= 0) {
@@ -64,8 +64,7 @@ Detections decode_detections(const float* logits, const float* boxes, int img_w,
         cand.begin(), cand.begin() + K, cand.end(),
         [](const Candidate& a, const Candidate& b) noexcept { return a.logit > b.logit; });
 
-    const float W = static_cast<float>(img_w);
-    const float H = static_cast<float>(img_h);
+    const bool clip = map.clip_w > 0.0f;
     out.reserve(static_cast<std::size_t>(K));
 
     for (int i = 0; i < K; ++i) {
@@ -77,15 +76,32 @@ Detections decode_detections(const float* logits, const float* boxes, int img_w,
         const float cx = db[0], cy = db[1], w = db[2], h = db[3];
 
         Detection d;
-        d.box.x1 = (cx - 0.5f * w) * W;
-        d.box.y1 = (cy - 0.5f * h) * H;
-        d.box.x2 = (cx + 0.5f * w) * W;
-        d.box.y2 = (cy + 0.5f * h) * H;
+        d.box.x1 = (cx - 0.5f * w) * map.sx - map.ox;
+        d.box.y1 = (cy - 0.5f * h) * map.sy - map.oy;
+        d.box.x2 = (cx + 0.5f * w) * map.sx - map.ox;
+        d.box.y2 = (cy + 0.5f * h) * map.sy - map.oy;
+        if (clip) {
+            d.box.x1 = std::min(std::max(d.box.x1, 0.0f), map.clip_w);
+            d.box.y1 = std::min(std::max(d.box.y1, 0.0f), map.clip_h);
+            d.box.x2 = std::min(std::max(d.box.x2, 0.0f), map.clip_w);
+            d.box.y2 = std::min(std::max(d.box.y2, 0.0f), map.clip_h);
+        }
         d.class_id = cn.cls;
         d.score = score;
         out.push_back(d);
     }
     return out;
+}
+
+Detections decode_detections(const float* logits, const float* boxes, int img_w, int img_h,
+                             const PostprocessParams& params) {
+    // Historical stretch entry point: identity map, no clamping. `* W - 0.0f`
+    // is bitwise equal to `* W` (also under FMA contraction), so results stay
+    // byte-identical to the pre-DecodeMap implementation.
+    DecodeMap m;
+    m.sx = static_cast<float>(img_w);
+    m.sy = static_cast<float>(img_h);
+    return decode_detections(logits, boxes, m, params);
 }
 
 }  // namespace dfine

@@ -51,10 +51,10 @@ __global__ void k_fill_segoff(int* __restrict__ seg, int n, int n_cand) {
 // counts[b] = #survivors. No clamp / no NMS — matches postprocess.cpp.
 __global__ void k_decode_topk(const float* __restrict__ keys_sorted,
                               const uint32_t* __restrict__ vals_sorted,
-                              const float* __restrict__ boxes, const float2* __restrict__ scale_wh,
-                              DetectionGPU* __restrict__ out, uint32_t* __restrict__ counts, int B,
-                              int Q, int C, int qc, int topk, float threshold,
-                              const float* __restrict__ threshold_dev) {
+                              const float* __restrict__ boxes,
+                              const DecodeMapGPU* __restrict__ maps, DetectionGPU* __restrict__ out,
+                              uint32_t* __restrict__ counts, int B, int Q, int C, int qc, int topk,
+                              float threshold, const float* __restrict__ threshold_dev) {
     const int b = blockIdx.x;
     if (b >= B) return;
 
@@ -70,7 +70,8 @@ __global__ void k_decode_topk(const float* __restrict__ keys_sorted,
     __syncthreads();
     threshold = s_thr;
 
-    const float2 sw = scale_wh[b];
+    const DecodeMapGPU m = maps[b];
+    const bool clip = m.clip_w > 0.0f;
     const int base = b * qc;
 
     for (int k = threadIdx.x; k < topk; k += blockDim.x) {
@@ -89,10 +90,19 @@ __global__ void k_decode_topk(const float* __restrict__ keys_sorted,
             const int c = static_cast<int>(idx) % C;
             const float* db = boxes + static_cast<std::size_t>(b * Q + q) * 4;
             const float cx = db[0], cy = db[1], w = db[2], h = db[3];
-            d.x1 = (cx - 0.5f * w) * sw.x;
-            d.y1 = (cy - 0.5f * h) * sw.y;
-            d.x2 = (cx + 0.5f * w) * sw.x;
-            d.y2 = (cy + 0.5f * h) * sw.y;
+            // Stretch fills {W,0,H,0,no-clip}: `* sx - 0.0f` is bitwise `* sx`
+            // (also under FMA) and the clamp branch is off — byte-identical to
+            // the historical path. Letterbox un-maps and clips to the frame.
+            d.x1 = (cx - 0.5f * w) * m.sx - m.ox;
+            d.y1 = (cy - 0.5f * h) * m.sy - m.oy;
+            d.x2 = (cx + 0.5f * w) * m.sx - m.ox;
+            d.y2 = (cy + 0.5f * h) * m.sy - m.oy;
+            if (clip) {
+                d.x1 = fminf(fmaxf(d.x1, 0.0f), m.clip_w);
+                d.y1 = fminf(fmaxf(d.y1, 0.0f), m.clip_h);
+                d.x2 = fminf(fmaxf(d.x2, 0.0f), m.clip_w);
+                d.y2 = fminf(fmaxf(d.y2, 0.0f), m.clip_h);
+            }
             d.score = score;
             d.class_id = c;
         } else {
@@ -141,8 +151,8 @@ void gpu_decode_enqueue(const float* logits, const float* boxes, int B, int Q, i
         s.cub_temp, temp_bytes, s.keys, s.keys_out, s.vals, s.vals_out, total, B, s.seg_off,
         s.seg_off + 1, 0, static_cast<int>(sizeof(float) * 8), stream));
 
-    k_decode_topk<<<B, 256, 0, stream>>>(s.keys_out, s.vals_out, boxes, s.scale_wh, s.out, s.counts,
-                                         B, Q, C, qc, topk, threshold, threshold_dev);
+    k_decode_topk<<<B, 256, 0, stream>>>(s.keys_out, s.vals_out, boxes, s.maps, s.out, s.counts, B,
+                                         Q, C, qc, topk, threshold, threshold_dev);
     DFINE_CUDA_CHECK(cudaGetLastError());
 }
 

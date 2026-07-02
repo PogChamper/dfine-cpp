@@ -28,6 +28,29 @@ void launch_stretch_resize_normalize(cudaStream_t stream, const std::uint8_t* d_
                                      int src_w, int src_pitch, float* d_dst, int dst_h, int dst_w,
                                      bool src_is_bgr, const float mean[3], const float std[3]);
 
+// Letterbox placement of a source frame inside the dst canvas: aspect-preserving
+// scale `s`, content at [dx, dx+nw) x [dy, dy+nh), the rest is padding. With
+// allow_upscale=false a frame that already fits is pasted 1:1 (production
+// smart_resize semantics); anchor_topleft=false centers the content.
+struct LetterboxMap {
+    float s{1.0f};
+    int dx{0}, dy{0};
+    int nw{0}, nh{0};
+};
+
+[[nodiscard]] LetterboxMap compute_letterbox_map(int src_w, int src_h, int dst_w, int dst_h,
+                                                 bool anchor_topleft, bool allow_upscale) noexcept;
+
+// Letterbox counterpart of launch_stretch_resize_normalize: same fused
+// normalize/BGR-swap/CHW write, but the source maps into the `map` region and
+// everything outside it gets `pad_value` (0..255, normalized like a pixel).
+// A separate kernel on purpose — the stretch kernel is on the byte-identical
+// default path and stays untouched.
+void launch_letterbox_resize_normalize(cudaStream_t stream, const std::uint8_t* d_src, int src_h,
+                                       int src_w, int src_pitch, float* d_dst, int dst_h, int dst_w,
+                                       const LetterboxMap& map, int pad_value, bool src_is_bgr,
+                                       const float mean[3], const float std[3]);
+
 // Convenience preprocessor: owns a pinned host staging buffer + a device source
 // buffer that grows on demand. Each `process()` call uploads the image to the
 // device asynchronously and runs the fused kernel, writing into `d_dst`.
@@ -42,6 +65,17 @@ class ImagePreprocessor {
 
     void set_mean(float r, float g, float b) noexcept;
     void set_std(float r, float g, float b) noexcept;
+
+    // Select letterbox preprocessing (default is stretch). Applies to every
+    // subsequent process() call; the detector derives the same LetterboxMap for
+    // its box un-mapping via compute_letterbox_map.
+    void set_letterbox(bool anchor_topleft, int pad_value, bool allow_upscale) noexcept {
+        letterbox_ = true;
+        lb_topleft_ = anchor_topleft;
+        lb_pad_ = pad_value;
+        lb_upscale_ = allow_upscale;
+    }
+    [[nodiscard]] bool letterbox() const noexcept { return letterbox_; }
 
     // image: HWC uint8 view (3 channels). d_dst: 3*dst_h*dst_w floats on device.
     void process(const ImageU8& image, float* d_dst, cudaStream_t stream);
@@ -60,6 +94,10 @@ class ImagePreprocessor {
     void ensure_capacity_(std::size_t bytes);
 
     bool frozen_{false};
+    bool letterbox_{false};
+    bool lb_topleft_{false};
+    int lb_pad_{114};
+    bool lb_upscale_{true};
     int dst_h_{0};
     int dst_w_{0};
     float mean_[3]{0.0f, 0.0f, 0.0f};

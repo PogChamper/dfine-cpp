@@ -30,7 +30,11 @@ struct EngineMeta {
     std::array<float, 3> mean{0.0f, 0.0f, 0.0f};
     std::array<float, 3> std{1.0f, 1.0f, 1.0f};
     std::string color_order{"RGB"};
-    std::string resize{"stretch"};  // direct resize to input_h×input_w (no letterbox)
+    std::string resize{"stretch"};  // "stretch" (training convention) or "letterbox"
+    // Letterbox geometry, consulted only when resize == "letterbox":
+    std::string letterbox_anchor{"center"};  // "center" | "topleft"
+    int letterbox_pad{114};                  // padding value 0..255
+    bool letterbox_upscale{true};            // false = paste 1:1 when the frame fits
 
     std::string precision{"fp32"};  // "fp32" / "fp16" / "int8"
     bool dynamic_batch{false};

@@ -10,6 +10,23 @@
 
 namespace dfine {
 
+// Preprocessing geometry. D-FINE is trained with stretch-resize, which is the
+// default and the accuracy-optimal choice for the published weights (measured:
+// letterbox costs ~1.7-2.0 AP on COCO val). Letterbox exists for pipelines that
+// standardize on aspect-preserving inputs; box coordinates are un-mapped (and
+// clipped to the frame) automatically.
+struct PreprocessSpec {
+    enum class Resize {
+        kAuto,      // follow the engine sidecar's "resize" field (default: stretch)
+        kStretch,   // force stretch (the training convention)
+        kLetterbox  // force letterbox with the fields below
+    };
+    Resize resize{Resize::kAuto};
+    bool anchor_topleft{false};  // letterbox: false = centered content
+    int pad_value{114};          // letterbox padding, 0..255
+    bool allow_upscale{true};    // letterbox: false = paste 1:1 when the frame fits
+};
+
 struct DetectorOptions {
     float threshold{0.5f};  // default score threshold; override per detect() call
 
@@ -44,6 +61,9 @@ struct DetectorOptions {
     // path. The score threshold stays a live per-call knob (read by the captured
     // decode kernel through mapped pinned memory, not baked into the graph).
     bool full_pipeline_graph{false};
+
+    // Preprocessing geometry (stretch by default; see PreprocessSpec).
+    PreprocessSpec preprocess;
 };
 
 // Steady-state configuration freeze() warms, captures, and locks for. Zeros mean

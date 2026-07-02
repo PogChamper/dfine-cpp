@@ -71,6 +71,14 @@ def main(args):
         cmd += ["--filter-res", args.filter_res]
     if args.batch > 1:
         cmd += ["--batch", str(args.batch)]
+    if args.letterbox:
+        cmd += ["--letterbox"]
+    if args.letterbox_topleft:
+        cmd += ["--letterbox-topleft"]
+    if args.letterbox_pad != 114:
+        cmd += ["--letterbox-pad", str(args.letterbox_pad)]
+    if args.no_upscale:
+        cmd += ["--no-upscale"]
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = args.ld_library_path + ":" + env.get("LD_LIBRARY_PATH", "")
     print("[cpp_coco] $", " ".join(cmd))
@@ -115,6 +123,11 @@ def parse_args():
     p.add_argument("--filter-res", default="",
                    help="WxH: eval only images of exactly this size (fixed-resolution regime)")
     p.add_argument("--batch", type=int, default=1, help="pass --batch to the binary")
+    p.add_argument("--letterbox", action="store_true",
+                   help="letterbox preprocessing (validated against letterbox_eval.py hosts)")
+    p.add_argument("--letterbox-topleft", action="store_true")
+    p.add_argument("--letterbox-pad", type=int, default=114)
+    p.add_argument("--no-upscale", action="store_true")
     return p.parse_args()
 
 

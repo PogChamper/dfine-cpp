@@ -28,6 +28,14 @@ struct DetectionGPU {
     int32_t class_id;  // 0..C-1 for a survivor; -1 for a padded (sub-threshold) slot
 };
 
+// Per-image normalized-canvas -> original-pixels mapping, device-side twin of
+// postprocess.hpp's DecodeMap: x_orig = x_norm * sx - ox; clip_w > 0 clamps to
+// [0, clip] (letterbox), clip_w <= 0 leaves coords unclamped (stretch — the
+// historical, byte-identical behavior: sx=W, ox=0).
+struct DecodeMapGPU {
+    float sx, ox, sy, oy, clip_w, clip_h;  // 24 B
+};
+
 // Device scratch for the decode. All pointers are device memory owned by the
 // caller and sized for the MAX batch. n_cand = num_queries * num_classes.
 //   keys/vals          [max_batch * n_cand]  logits (sort keys) / packed idx (q*C+c)
@@ -36,7 +44,7 @@ struct DetectionGPU {
 //   cub_temp           cub_temp_bytes        radix-sort temp storage
 //   out                [max_batch * topk]    survivors (descending score), padded
 //   counts             [max_batch]           #survivors per image (a prefix length)
-//   scale_wh           [max_batch]           (origW, origH) per image, filled per call
+//   maps               [max_batch]           per-image DecodeMapGPU, filled per call
 struct GpuDecodeScratch {
     float* keys = nullptr;
     uint32_t* vals = nullptr;
@@ -47,7 +55,7 @@ struct GpuDecodeScratch {
     std::size_t cub_temp_bytes = 0;
     DetectionGPU* out = nullptr;
     uint32_t* counts = nullptr;
-    float2* scale_wh = nullptr;
+    DecodeMapGPU* maps = nullptr;
 };
 
 // Bytes of cub temp storage needed for a segmented radix sort of
@@ -62,7 +70,7 @@ void gpu_decode_fill_segoff(int* seg_off, int max_batch, int n_cand, cudaStream_
 // Enqueue the decode on `stream` (no host sync): pack -> segmented radix sort
 // (descending logit) -> top-k + threshold + box transform. Fills s.out[B*topk]
 // (first s.counts[b] entries are the survivors for image b, descending score) and
-// s.counts[B]. `s.scale_wh` must already hold the per-image (origW, origH).
+// s.counts[B]. `s.maps` must already hold the per-image DecodeMapGPU.
 //   logits : [B, Q, C] device, raw logits
 //   boxes  : [B, Q, 4] device, cxcywh normalized to [0,1]
 //   threshold_dev : optional device-readable float overriding `threshold` at kernel

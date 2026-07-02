@@ -51,6 +51,9 @@ EngineMeta EngineMeta::from_json_file(const std::filesystem::path& path) {
 
     m.color_order = j.value("color_order", std::string{"RGB"});
     m.resize = j.value("resize", std::string{"stretch"});
+    m.letterbox_anchor = j.value("letterbox_anchor", std::string{"center"});
+    m.letterbox_pad = j.value("letterbox_pad", 114);
+    m.letterbox_upscale = j.value("letterbox_upscale", true);
     m.precision = j.value("precision", std::string{"fp32"});
     m.dynamic_batch = j.value("dynamic_batch", false);
     m.min_batch = j.value("min_batch", 1);
@@ -87,6 +90,11 @@ void EngineMeta::to_json_file(const std::filesystem::path& path) const {
         {"output_names", output_names},
     };
     if (!class_names.empty()) j["class_names"] = class_names;
+    if (resize == "letterbox") {
+        j["letterbox_anchor"] = letterbox_anchor;
+        j["letterbox_pad"] = letterbox_pad;
+        j["letterbox_upscale"] = letterbox_upscale;
+    }
     std::ofstream out(path);
     if (!out) {
         throw std::runtime_error("dfine: cannot write meta sidecar: " + path.string());

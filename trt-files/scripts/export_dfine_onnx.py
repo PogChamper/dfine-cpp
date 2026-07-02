@@ -180,7 +180,11 @@ def _collect_meta(model: nn.Module, args: argparse.Namespace) -> dict:
         "normalize": "div255",
         "mean": [0.0, 0.0, 0.0],
         "std": [1.0, 1.0, 1.0],
-        "resize": "stretch",
+        "resize": args.resize,
+        **({"letterbox_anchor": args.letterbox_anchor,
+            "letterbox_pad": args.letterbox_pad,
+            "letterbox_upscale": not args.no_letterbox_upscale}
+           if args.resize == "letterbox" else {}),
         "nms": "none",
         "has_masks": False,
         "dynamic_batch": True,
@@ -374,6 +378,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--class-names", default="",
                    help="display names for the sidecar: a file (one name per line) or a comma "
                         "list; must match --num-classes. Default: COCO-80 when num_classes==80")
+    p.add_argument("--resize", choices=["stretch", "letterbox"], default="stretch",
+                   help="preprocessing geometry declared in the sidecar; the C++ runtime follows "
+                        "it. D-FINE is trained with stretch (letterbox costs ~2 AP on the "
+                        "published weights — see letterbox_eval.py)")
+    p.add_argument("--letterbox-anchor", choices=["center", "topleft"], default="center")
+    p.add_argument("--letterbox-pad", type=int, default=114)
+    p.add_argument("--no-letterbox-upscale", action="store_true",
+                   help="paste 1:1 when the frame already fits (production smart_resize)")
     p.add_argument("--dfine-src",
                    default=os.environ.get("DFINE_SEG_SRC",
                                           "/home/dxdxxd/projects/custom-dfine/D-FINE-seg"),

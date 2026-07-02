@@ -455,17 +455,18 @@ int main(int argc, char** argv) {
                     da(g_out, static_cast<std::size_t>(B) * N * sizeof(dfine::DetectionGPU)));
                 gdec.counts = static_cast<uint32_t*>(
                     da(g_counts, static_cast<std::size_t>(B) * sizeof(uint32_t)));
-                gdec.scale_wh =
-                    static_cast<float2*>(da(g_scale, static_cast<std::size_t>(B) * sizeof(float2)));
+                gdec.maps = static_cast<dfine::DecodeMapGPU*>(
+                    da(g_scale, static_cast<std::size_t>(B) * sizeof(dfine::DecodeMapGPU)));
                 gdec.cub_temp_bytes = dfine::gpu_decode_temp_bytes(B, n_cand);
                 gdec.cub_temp = da(g_temp, gdec.cub_temp_bytes);
                 dfine::gpu_decode_fill_segoff(gdec.seg_off, B, n_cand, stream);
-                std::vector<float2> hs(
+                std::vector<dfine::DecodeMapGPU> hs(
                     static_cast<std::size_t>(B),
-                    float2{static_cast<float>(src_w), static_cast<float>(src_h)});
-                DFINE_CUDA_CHECK(cudaMemcpyAsync(gdec.scale_wh, hs.data(),
-                                                 static_cast<std::size_t>(B) * sizeof(float2),
-                                                 cudaMemcpyHostToDevice, stream));
+                    dfine::DecodeMapGPU{static_cast<float>(src_w), 0.0f, static_cast<float>(src_h),
+                                        0.0f, -1.0f, -1.0f});
+                DFINE_CUDA_CHECK(cudaMemcpyAsync(
+                    gdec.maps, hs.data(), static_cast<std::size_t>(B) * sizeof(dfine::DecodeMapGPU),
+                    cudaMemcpyHostToDevice, stream));
                 DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
                 gh_out.resize(static_cast<std::size_t>(B) * N);
                 gh_counts.resize(static_cast<std::size_t>(B));

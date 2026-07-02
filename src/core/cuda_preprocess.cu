@@ -69,7 +69,110 @@ __global__ void stretchResizeNormalizeKernel(const std::uint8_t* __restrict__ sr
     dst[2 * hw + idx] = nb;
 }
 
+// Letterbox counterpart: the source occupies [x0,x1)x[y0,y1) of the canvas
+// (mapped with its own scale); everything outside is the pre-normalized padding
+// color. Bilinear taps clamp to the SOURCE bounds, matching the stretch kernel.
+// Deliberately a separate kernel: stretchResizeNormalizeKernel is on the
+// byte-identical default path and must not change.
+__global__ void letterboxResizeNormalizeKernel(const std::uint8_t* __restrict__ src, int src_h,
+                                               int src_w, int src_pitch, float* __restrict__ dst,
+                                               int dst_h, int dst_w, bool src_is_bgr, float scale,
+                                               int x0, int y0, int x1, int y1, float3 pad,
+                                               float3 pre_mul, float3 pre_sub) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= dst_w || y >= dst_h) return;
+
+    const int hw = dst_h * dst_w;
+    const int idx = y * dst_w + x;
+
+    if (x < x0 || x >= x1 || y < y0 || y >= y1) {
+        dst[0 * hw + idx] = pad.x;
+        dst[1 * hw + idx] = pad.y;
+        dst[2 * hw + idx] = pad.z;
+        return;
+    }
+
+    // Map canvas -> source with the letterbox scale (same half-pixel convention
+    // as the stretch kernel, applied inside the content region).
+    const float sx_f = (static_cast<float>(x - x0) + 0.5f) * scale - 0.5f;
+    const float sy_f = (static_cast<float>(y - y0) + 0.5f) * scale - 0.5f;
+
+    const int sx0 = max(0, min(src_w - 1, static_cast<int>(floorf(sx_f))));
+    const int sy0 = max(0, min(src_h - 1, static_cast<int>(floorf(sy_f))));
+    const int sx1 = min(src_w - 1, sx0 + 1);
+    const int sy1 = min(src_h - 1, sy0 + 1);
+    const float fx = fmaxf(0.0f, fminf(1.0f, sx_f - sx0));
+    const float fy = fmaxf(0.0f, fminf(1.0f, sy_f - sy0));
+    const float w00 = (1.0f - fx) * (1.0f - fy);
+    const float w01 = fx * (1.0f - fy);
+    const float w10 = (1.0f - fx) * fy;
+    const float w11 = fx * fy;
+
+    const std::uint8_t* p00 = src + sy0 * src_pitch + sx0 * 3;
+    const std::uint8_t* p01 = src + sy0 * src_pitch + sx1 * 3;
+    const std::uint8_t* p10 = src + sy1 * src_pitch + sx0 * 3;
+    const std::uint8_t* p11 = src + sy1 * src_pitch + sx1 * 3;
+
+    const float c0 =
+        __ldg(p00 + 0) * w00 + __ldg(p01 + 0) * w01 + __ldg(p10 + 0) * w10 + __ldg(p11 + 0) * w11;
+    const float c1 =
+        __ldg(p00 + 1) * w00 + __ldg(p01 + 1) * w01 + __ldg(p10 + 1) * w10 + __ldg(p11 + 1) * w11;
+    const float c2 =
+        __ldg(p00 + 2) * w00 + __ldg(p01 + 2) * w01 + __ldg(p10 + 2) * w10 + __ldg(p11 + 2) * w11;
+
+    const float r = src_is_bgr ? c2 : c0;
+    const float g = c1;
+    const float b = src_is_bgr ? c0 : c2;
+
+    dst[0 * hw + idx] = r * pre_mul.x - pre_sub.x;
+    dst[1 * hw + idx] = g * pre_mul.y - pre_sub.y;
+    dst[2 * hw + idx] = b * pre_mul.z - pre_sub.z;
+}
+
 }  // namespace
+
+LetterboxMap compute_letterbox_map(int src_w, int src_h, int dst_w, int dst_h, bool anchor_topleft,
+                                   bool allow_upscale) noexcept {
+    LetterboxMap m;
+    float s = fminf(static_cast<float>(dst_w) / src_w, static_cast<float>(dst_h) / src_h);
+    if (!allow_upscale && s > 1.0f) s = 1.0f;  // a frame that fits is pasted 1:1
+    m.s = s;
+    m.nw = static_cast<int>(src_w * s + 0.5f);
+    m.nh = static_cast<int>(src_h * s + 0.5f);
+    if (m.nw < 1) m.nw = 1;
+    if (m.nh < 1) m.nh = 1;
+    if (m.nw > dst_w) m.nw = dst_w;
+    if (m.nh > dst_h) m.nh = dst_h;
+    m.dx = anchor_topleft ? 0 : (dst_w - m.nw) / 2;
+    m.dy = anchor_topleft ? 0 : (dst_h - m.nh) / 2;
+    return m;
+}
+
+void launch_letterbox_resize_normalize(cudaStream_t stream, const std::uint8_t* d_src, int src_h,
+                                       int src_w, int src_pitch, float* d_dst, int dst_h, int dst_w,
+                                       const LetterboxMap& map, int pad_value, bool src_is_bgr,
+                                       const float mean[3], const float std[3]) {
+    if (dst_h <= 0 || dst_w <= 0 || src_h <= 0 || src_w <= 0 || map.nw <= 0 || map.nh <= 0) {
+        throw std::runtime_error("dfine: launch_letterbox_resize_normalize bad dims");
+    }
+
+    constexpr float kInv255 = 1.0f / 255.0f;
+    const float3 pre_mul{kInv255 / std[0], kInv255 / std[1], kInv255 / std[2]};
+    const float3 pre_sub{mean[0] / std[0], mean[1] / std[1], mean[2] / std[2]};
+    const float pv = static_cast<float>(pad_value);
+    const float3 pad{pv * pre_mul.x - pre_sub.x, pv * pre_mul.y - pre_sub.y,
+                     pv * pre_mul.z - pre_sub.z};
+    // Canvas -> source scale inside the content region (inverse of the fit).
+    const float inv_s = 1.0f / map.s;
+
+    const dim3 block(16, 16);
+    const dim3 grid((dst_w + block.x - 1) / block.x, (dst_h + block.y - 1) / block.y);
+    letterboxResizeNormalizeKernel<<<grid, block, 0, stream>>>(
+        d_src, src_h, src_w, src_pitch, d_dst, dst_h, dst_w, src_is_bgr, inv_s, map.dx, map.dy,
+        map.dx + map.nw, map.dy + map.nh, pad, pre_mul, pre_sub);
+    DFINE_CUDA_CHECK(cudaGetLastError());
+}
 
 void launch_stretch_resize_normalize(cudaStream_t stream, const std::uint8_t* d_src, int src_h,
                                      int src_w, int src_pitch, float* d_dst, int dst_h, int dst_w,
@@ -168,6 +271,14 @@ void ImagePreprocessor::process(const ImageU8& image, float* d_dst, cudaStream_t
         cudaMemcpyAsync(d_src_raw, dst_pinned, total_bytes, cudaMemcpyHostToDevice, stream));
     DFINE_CUDA_CHECK(cudaEventRecord(upload_done_.get(), stream));
 
+    if (letterbox_) {
+        const LetterboxMap map =
+            compute_letterbox_map(cols, rows, dst_w_, dst_h_, lb_topleft_, lb_upscale_);
+        launch_letterbox_resize_normalize(stream, d_src_raw, rows, cols,
+                                          static_cast<int>(packed_row), d_dst, dst_h_, dst_w_, map,
+                                          lb_pad_, image.is_bgr, mean_, std_);
+        return;
+    }
     launch_stretch_resize_normalize(stream, d_src_raw, rows, cols, static_cast<int>(packed_row),
                                     d_dst, dst_h_, dst_w_, image.is_bgr, mean_, std_);
 }

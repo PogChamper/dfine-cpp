@@ -107,8 +107,8 @@ def main() -> int:
                     "bbox": [x1, y1, x2 - x1, y2 - y1], "score": det_obj.score})
 
     with Detector(args.engine, threshold=args.threshold) as det:
-        size = det.input_w
-        assert det.input_h == size, "square input assumed"
+        size = det.input_width
+        assert det.input_height == size, "square input assumed"
         for n, iid in enumerate(img_ids, 1):
             info = coco.loadImgs(iid)[0]
             img = np.asarray(

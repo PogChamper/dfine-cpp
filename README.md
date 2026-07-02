@@ -4,8 +4,21 @@
 A zero-Python, OpenCV-free runtime that runs the full pipeline — CUDA preprocessing → TensorRT engine →
 C++ decode — at up to **~460 FPS** on an RTX 4070 Ti SUPER, matching PyTorch mAP to **±0.001 AP**.
 
-<!-- badges: build/license/release — wire up once a remote + CI are set (see .github/workflows) -->
-`C++17` · `TensorRT 10.13` · `CUDA 12.8` · `Apache-2.0`
+<p align="center">
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#benchmarks">Benchmarks</a> ·
+  <a href="#using-the-library">C++ API</a> ·
+  <a href="#from-python">Python</a> ·
+  <a href="#precision-guide">Precision</a> ·
+  <a href="docs/ROADMAP.md">Roadmap</a>
+</p>
+
+[![CI](https://github.com/PogChamper/dfine-cpp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/PogChamper/dfine-cpp/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/PogChamper/dfine-cpp)](https://github.com/PogChamper/dfine-cpp/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg?logo=cplusplus&logoColor=white)
+![TensorRT](https://img.shields.io/badge/TensorRT-10.x-76B900?logo=nvidia&logoColor=white)
+![CUDA](https://img.shields.io/badge/CUDA-12.x-76B900?logo=nvidia&logoColor=white)
 
 ![PyTorch vs D-FINE-cpp throughput](assets/demo_video.gif)
 *Both panels race through the same clip at 10× slow motion; frame counters advance at each backend's
@@ -28,6 +41,67 @@ and ships a lean, dependency-light C++ runtime:
   typing** (precision baked into ONNX types): **1.6–2.2× faster at −0.2% mAP**, validated on all five sizes.
 - **Lean runtime.** `libdfine.so` takes a raw `ImageU8` (HWC uint8) — **no OpenCV** in the core — and hides
   all TensorRT/CUDA behind a PIMPL. RAII everywhere, sanitizer-clean, `-Werror` clean.
+
+## Quickstart
+
+Prebuilt ONNX for all five sizes — FP32 and strongly-typed FP16, each with the `.json` sidecar the engine
+build needs, plus `SHA256SUMS` — is attached to
+[GitHub Releases](https://github.com/PogChamper/dfine-cpp/releases). TensorRT engines are
+GPU-arch- and TRT-version-specific, so you compile the engine locally from the ONNX — that is why we ship
+ONNX, not engines.
+
+```sh
+# 1. Build the C++
+./build.sh                     # CUDA arch defaults to 'native' (probes the local GPU; CMake >= 3.24)
+CUDA_ARCH=86 ./build.sh        # explicit SM for headless/CI builds: RTX 30xx = 86, RTX 40xx = 89
+# — or plain CMake:
+cmake -B build -S . -DCMAKE_CUDA_ARCHITECTURES=native   # [-DTENSORRT_DIR=/path/to/tensorrt]
+cmake --build build -j
+
+# 2. Get the prebuilt ONNX + sidecar, build an engine on your GPU
+#    (fp16_st is the recommended production build — strongly-typed, decoder kept FP32)
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.1.0/dfine_m_fp16_st.onnx
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.1.0/dfine_m_fp16_st.json
+python trt-files/scripts/build_engine.py --strongly-typed --no-tf32 --max-batch 8 \
+    --onnx dfine_m_fp16_st.onnx --output trt-files/engines/dfine_m_fp16_st.engine
+
+# 3. Run — libnvinfer/libcudart must be on LD_LIBRARY_PATH; any TensorRT 10.x libs work,
+#    e.g. `python -m pip install "tensorrt==10.13.*"` then the venv's .../site-packages/tensorrt_libs
+export LD_LIBRARY_PATH=/path/to/tensorrt/lib:$LD_LIBRARY_PATH
+./build/dfine_detect --engine trt-files/engines/dfine_m_fp16_st.engine --image dog.jpg --threshold 0.5
+```
+
+For an FP32 engine, drop `--strongly-typed` and point `--onnx` at the fp32 file (`dfine_m.onnx`).
+
+### Docker
+
+```sh
+docker build --build-arg CUDA_ARCH=89 -t dfine-cpp .    # 86 = RTX 30xx, 89 = RTX 40xx
+docker run --rm --gpus all -v /path/to/engines:/engines dfine-cpp \
+    dfine_detect --engine /engines/dfine_m_fp16_st.engine --image dog.jpg
+```
+
+The image builds and runs the C++ consumer of an already-built `.engine`; ONNX export is not included
+(it needs the D-FINE-seg source — see the Dockerfile header for the exact limitations).
+
+### Export from a checkpoint
+
+To build the ONNX yourself (fine-tuned weights, non-COCO class counts), you need the training/export source
+repo [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) — for this step only; `build_engine` /
+`convert_fp16` / `profile` / `coco_eval` and the C++ runtime are self-contained.
+
+```sh
+git clone https://github.com/ArgoHA/D-FINE-seg                       # export-time dependency only
+python trt-files/scripts/export_dfine_onnx.py --model-name m \
+    --checkpoint dfine_m_obj2coco.pt --dfine-src ./D-FINE-seg        # -> trt-files/onnx/dfine_m.onnx + .json
+python trt-files/scripts/convert_fp16.py \
+    --output trt-files/onnx/dfine_m_fp16_st.onnx                     # FP32 -> strongly-typed FP16 ONNX
+```
+
+Standard checkpoints (`dfine_<size>_<dataset>.pt`) can be fetched from Hugging Face with D-FINE-seg's
+`ensure_pretrained` helper (`src/d_fine/utils.py` in that repo); nano has no obj2coco checkpoint — use
+`dfine_n_coco.pt`. Any other checkpoint: pass its path to `--checkpoint`. The `dfine export` CLI (below)
+wraps the same script.
 
 ## Benchmarks
 
@@ -98,52 +172,6 @@ python trt-files/scripts/profile.py --backends torch onnx trt cpp cpp-graph \
 [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) source on `PYTHONPATH`; the ONNX/TRT/C++ paths are
 self-contained.)
 
-## Quickstart
-
-Prebuilt ONNX for all five sizes — FP32 and strongly-typed FP16, each with the `.json` sidecar the engine
-build needs, plus `SHA256SUMS` — is attached to [GitHub Releases](../../releases). TensorRT engines are
-GPU-arch- and TRT-version-specific, so you compile the engine locally from the ONNX — that is why we ship
-ONNX, not engines.
-
-```sh
-# 1. Build the C++
-./build.sh
-# — or plain CMake:
-cmake -B build -S . -DCMAKE_CUDA_ARCHITECTURES=native   # [-DTENSORRT_DIR=/path/to/tensorrt]
-cmake --build build -j
-
-# 2. Download an ONNX (+ its .json sidecar) from Releases, build an engine on your GPU
-#    (fp16_st is the recommended production build — strongly-typed, decoder kept FP32)
-python trt-files/scripts/build_engine.py --strongly-typed --no-tf32 --max-batch 8 \
-    --onnx dfine_m_fp16_st.onnx --output trt-files/engines/dfine_m_fp16_st.engine
-
-# 3. Run — libnvinfer/libcudart must be on LD_LIBRARY_PATH; any TensorRT 10.x libs work,
-#    e.g. `python -m pip install "tensorrt==10.13.*"` then the venv's .../site-packages/tensorrt_libs
-export LD_LIBRARY_PATH=/path/to/tensorrt/lib:$LD_LIBRARY_PATH
-./build/dfine_detect --engine trt-files/engines/dfine_m_fp16_st.engine --image dog.jpg --threshold 0.5
-```
-
-For an FP32 engine, drop `--strongly-typed` and point `--onnx` at the fp32 file (`dfine_m.onnx`).
-
-### Export from a checkpoint
-
-To build the ONNX yourself (fine-tuned weights, non-COCO class counts), you need the training/export source
-repo [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) — for this step only; `build_engine` /
-`convert_fp16` / `profile` / `coco_eval` and the C++ runtime are self-contained.
-
-```sh
-git clone https://github.com/ArgoHA/D-FINE-seg                       # export-time dependency only
-python trt-files/scripts/export_dfine_onnx.py --model-name m \
-    --checkpoint dfine_m_obj2coco.pt --dfine-src ./D-FINE-seg        # -> trt-files/onnx/dfine_m.onnx + .json
-python trt-files/scripts/convert_fp16.py \
-    --output trt-files/onnx/dfine_m_fp16_st.onnx                     # FP32 -> strongly-typed FP16 ONNX
-```
-
-Standard checkpoints (`dfine_<size>_<dataset>.pt`) can be fetched from Hugging Face with D-FINE-seg's
-`ensure_pretrained` helper (`src/d_fine/utils.py` in that repo); nano has no obj2coco checkpoint — use
-`dfine_n_coco.pt`. Any other checkpoint: pass its path to `--checkpoint`. The `dfine export` CLI (below)
-wraps the same script.
-
 ## Using the library
 
 ```cpp
@@ -179,6 +207,13 @@ dfine_detector_destroy(det);
 
 A dependency-light [`dfine`](python/) package wraps the C ABI via `ctypes` (no compile step; loads the
 prebuilt `.so`). See [`python/README.md`](python/README.md).
+
+```sh
+pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.1.0/dfine-0.1.0-py3-none-linux_x86_64.whl"
+```
+
+The wheel bundles `libdfine.so` built for sm_89 / linux_x86_64; other GPUs and platforms build from
+source (`./build.sh`, then `pip install -e python/`).
 
 ```python
 import numpy as np
@@ -240,7 +275,7 @@ reproduces the host reference to +0.0002 AP.
 | BF16 | −27 AP | — | rejected: D-FINE's FDR needs mantissa precision |
 | INT8 | −44 AP | — | rejected: 8-bit too coarse for the FDR (`convert_int8.py` kept for reference) |
 
-The through-line: **D-FINE's FDR box-decode is exquisitely FP-precision-sensitive** — it amplifies tiny
+The through-line: **D-FINE's FDR box-decode is acutely FP-precision-sensitive** — it amplifies tiny
 upstream rounding into box error. That single fact explains the grid_sample trap, the kFP16-flag trap, and why
 BF16/INT8 fail. Full forensics in [docs/impl/M0_STATUS.md](docs/impl/M0_STATUS.md) and
 [docs/HANDOFF.md](docs/HANDOFF.md).
@@ -250,9 +285,10 @@ BF16/INT8 fail. Full forensics in [docs/impl/M0_STATUS.md](docs/impl/M0_STATUS.m
 **Done & validated:** M0 (export→engine→validate, all 5 sizes) · M1 (C++ detector, AP 0.5506 == reference) ·
 M2 (FP16 + CUDA-graph; INT8 investigated & rejected) · **M4 bindings** (stable C ABI + Python `ctypes`
 package + zero-setup `dfine` CLI — detections byte-identical to the C++ path) · **intensive-core P1–P3**
-(GPU decode, `freeze()`, full-pipeline graph; P4 pending). M3 instance segmentation is shelved. Next:
-pre-built wheels and a demo — see **[docs/ROADMAP.md](docs/ROADMAP.md)** and
-[docs/HANDOFF.md](docs/HANDOFF.md) for the single source of truth on the current state.
+(GPU decode, `freeze()`, full-pipeline graph; P4 pending) · optional letterbox preprocessing.
+M3 instance segmentation is shelved. Next: a WASM/WebGPU browser demo and real-time video apps — see
+**[docs/ROADMAP.md](docs/ROADMAP.md)** and [docs/HANDOFF.md](docs/HANDOFF.md) for the single source of
+truth on the current state.
 
 ## Requirements & environment
 
@@ -272,7 +308,21 @@ pre-built wheels and a demo — see **[docs/ROADMAP.md](docs/ROADMAP.md)** and
   is self-contained.
 
 Engines are machine-specific build outputs (gitignored) — compile them locally from the prebuilt ONNX on
-[Releases](../../releases) or from your own export.
+[Releases](https://github.com/PogChamper/dfine-cpp/releases) or from your own export.
+
+## Troubleshooting
+
+- **`libnvinfer.so.10: cannot open shared object file`** — TensorRT libs are not on `LD_LIBRARY_PATH`;
+  any TRT 10.x works, e.g. a `pip install "tensorrt==10.13.*"` venv's `tensorrt_libs` dir (Quickstart
+  step 3).
+- **Engine fails to deserialize** — `.engine` files are GPU-arch- and TRT-version-specific; rebuild from
+  the ONNX on the target machine (`build_engine.py`).
+- **mAP collapses after "fixing" preprocessing** — D-FINE is `/255` only, no ImageNet mean/std.
+- **CMake error on `CUDA_ARCHITECTURES=native`** — needs CMake ≥ 3.24; pass an explicit arch
+  (`CUDA_ARCH=89 ./build.sh`) on older CMake.
+
+Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md) — the validation bar (warning-clean,
+sanitizer-clean, mAP-neutral) is spelled out there.
 
 ## Credits & license
 

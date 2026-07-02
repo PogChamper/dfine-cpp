@@ -29,8 +29,15 @@ COCO-80 index — no background slot), `score`, `box` (xyxy pixel coords), and
 ## Requirements
 
 - A **TensorRT 10.x + CUDA 12** runtime matching the engine's build. Either
-  `pip install "dfine[tensorrt]"` (pulls the `tensorrt` wheel; the bindings
-  best-effort preload it) **or** put the TRT/CUDA lib dirs on `LD_LIBRARY_PATH`:
+  install the Releases wheel with the `[tensorrt]` extra —
+
+  ```sh
+  pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.1.0/dfine-0.1.0-py3-none-linux_x86_64.whl"
+  ```
+
+  (the extra pulls the `tensorrt` pip wheel; the bindings best-effort preload
+  it; the package is not on PyPI) **or** put the TRT/CUDA lib dirs on
+  `LD_LIBRARY_PATH`:
 
   ```sh
   export LD_LIBRARY_PATH="$(python -c 'import tensorrt_libs,os;print(os.path.dirname(tensorrt_libs.__file__))'):/path/to/cuda/lib64"
@@ -42,7 +49,7 @@ COCO-80 index — no background slot), `score`, `box` (xyxy pixel coords), and
 
 - A TensorRT `.engine` for a D-FINE model. Engines are GPU-arch- and
   TRT-version-specific, so compile one locally: download a prebuilt ONNX from the
-  repo's [Releases](../../../releases) and run
+  repo's [Releases](https://github.com/PogChamper/dfine-cpp/releases) and run
   [`trt-files/scripts/build_engine.py`](../trt-files/scripts/build_engine.py)
   (see the root [README Quickstart](../README.md#quickstart)), or let the
   `dfine` CLI build it for you.

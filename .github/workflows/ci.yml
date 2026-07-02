@@ -57,13 +57,9 @@ jobs:
           shellcheck --exclude=SC2086,SC2015 trt-files/scripts/overnight_bench.sh
 
       - name: clang-format --dry-run --Werror
-        # Gating. Known-red as of authoring, for two reasons that need source
-        # fixes outside this workflow: (1) .clang-format contains two YAML
-        # documents both "Language: Cpp", which clang-format rejects outright
-        # ("Error reading .clang-format") — merge the second document's
-        # `Standard: c++17` into the first; (2) the tree has never been
-        # bulk-reformatted (~970 diffs under the fixed config, all 32 files).
-        # Goes green after the config fix + a one-time `clang-format -i`.
+        # Gating. The whole tree is formatted with the repo .clang-format
+        # (single-document config, clang-format 18); run `clang-format -i`
+        # over changed files before pushing.
         run: |
           git ls-files src include apps examples \
             | grep -E '\.(c|h|cpp|hpp|cu|cuh)$' \

@@ -165,7 +165,8 @@ jobs:
         # must provide TensorRT 10.x + CUDA 12 (e.g. pip install tensorrt==10.13.*).
         run: |
           cp -L build/libdfine.so python/dfine/libdfine.so
-          python3 -m pip install build wheel
+          # wheel >= 0.40 for the `tags` subcommand (the container's wheel predates it)
+          python3 -m pip install build 'wheel>=0.40'
           python3 -m build --wheel --outdir dist python/
           python3 -m wheel tags --platform-tag linux_x86_64 --remove dist/dfine-*-py3-none-any.whl
       - name: Smoke-install (import only — no GPU, native lib not loaded)

@@ -13,7 +13,8 @@
 # needs a TensorRT 10.x + CUDA 12 runtime on the loader path, e.g.
 # `pip install tensorrt==10.13.*`.
 #
-# Requires the `build` and `wheel` modules: `pip install build wheel`.
+# Requires the `build` module and `wheel` >= 0.40 (the `tags` subcommand):
+# `pip install build 'wheel>=0.40'`.
 # `python -m build` runs in an isolated env by default (downloads setuptools
 # from PyPI), so network access is needed.
 set -euo pipefail

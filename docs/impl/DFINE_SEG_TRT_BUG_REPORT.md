@@ -71,3 +71,36 @@ This removes every `GridSample` node from the ONNX (replaced by `Gather` + arith
 ## Repro
 
 `trt-files/scripts/seg_export_repro.py` (uses D-FINE-seg's own `export_to_onnx`/`export_to_tensorrt` + `DFINEPostProcessor`/`ExportWrapper`), and `export_dfine_onnx.py --deform {gridsample,explicit}` for the clean isolation.
+
+## Re-verification on the author's own flow (2026-07-02, freshly pulled repo)
+
+Independent re-run through the UNMODIFIED upstream export path (`python -m src.dl.export`,
+dynamo/opset-19, onnxsim, static batch-1 engine, TRT 10.13.3) on `dfine_m_obj2coco.pt`,
+scored with pycocotools on the identical sorted-2000 COCO val2017 subset via the repo's own
+inference wrappers (conf 0.001, imgIds = the processed subset):
+
+| backend | AP@[.50:.95] | delta vs torch |
+|---|---|---|
+| torch FP32 (`Torch_model`) | 0.559 | — |
+| exported ONNX via onnxruntime-CUDA | 0.558 | −0.001 |
+| TRT FP16 engine (default `export.half=True`) | **0.435** | **−12.4 AP** |
+| TRT FP32 engine (`export.half=False`) | **0.379** | **−18.0 AP** |
+
+Three findings sharpen the original report:
+
+1. **The shape profile is not the variable.** The historical −10.5 AP was measured on a
+   dynamic-batch profile; the upstream static-b1 engine reproduces the same failure class
+   (−12.4 AP). The ONNX itself is faithful (ORT-CUDA == torch), so corruption enters at the
+   TensorRT build of the GridSample-bearing graph (12 `GridSample` ops in the export).
+2. **It is not FP16 rounding.** The FP32 build is *worse* than FP16 (−18.0 vs −12.4):
+   different tactic sets produce different degrees of the same in-context mis-compilation.
+3. **`run_parity` cannot catch this.** It compares the cosine of the sorted top-300 *scores
+   only*, on one image, threshold 0.99. The broken engines pass at 0.994–0.996 — and the
+   higher-precision (FP32) engine scores a *lower* cosine than FP16, so the metric does not
+   even rank engines. Concrete miss: on 000000000139.jpg the torch top detection
+   (tv, score 0.952) is entirely absent from the TRT engine's output while the sorted score
+   magnitudes stay similar. Score-cosine is blind to *which boxes* the scores belong to;
+   COCO mAP (or box-aware parity) is the signal that moves.
+
+Reproduction artifacts (engines, per-backend detection dumps, configs, eval scripts) were
+kept outside the repo; the upstream tree was not modified.

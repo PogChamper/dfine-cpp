@@ -26,13 +26,32 @@ COCO-80 index — no background slot), `score`, `box` (xyxy pixel coords), and
 `class_name`. The C result set is freed after every call; `__del__` /
 `__enter__`/`__exit__` release the engine even on exceptions.
 
+The frozen single-launch pipeline and letterbox preprocessing are reachable
+directly from Python (C ABI v2):
+
+```python
+det = Detector("dfine_m_fp16_st.engine",           # --max-aux-streams 0 build
+               gpu_decode=True, own_device_memory=True, full_pipeline_graph=True)
+det.freeze(1, src_w=1920, src_h=1080)              # warm + capture + lock
+det.full_pipeline_graph_active                     # True -> one cudaGraphLaunch/frame
+det.detect(frame)
+det.last_timings()                                 # {'dispatch_ms': 0.08, ...}
+
+Detector("...engine", letterbox=True)              # aspect-preserving preprocessing
+Detector("...engine", letterbox=True,              # production smart_resize semantics
+         letterbox_topleft=True, letterbox_pad=0, letterbox_upscale=False)
+```
+
+Stretch stays the default — it is D-FINE's training convention and measures
+1.7–2.0 AP better than letterbox on the published weights.
+
 ## Requirements
 
 - A **TensorRT 10.x + CUDA 12** runtime matching the engine's build. Either
   install the Releases wheel with the `[tensorrt]` extra —
 
   ```sh
-  pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.1.0/dfine-0.1.0-py3-none-linux_x86_64.whl"
+  pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.2.0/dfine-0.2.0-py3-none-linux_x86_64.whl"
   ```
 
   (the extra pulls the `tensorrt` pip wheel; the bindings best-effort preload

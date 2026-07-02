@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(dfine VERSION 0.1.0 LANGUAGES C CXX CUDA)
+project(dfine VERSION 0.2.0 LANGUAGES C CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -92,8 +92,12 @@ target_link_libraries(dfine
   PUBLIC  TensorRT::TensorRT CUDA::cudart
   PRIVATE nlohmann_json::nlohmann_json)
 target_compile_features(dfine PUBLIC cxx_std_17)
+# ABI version, decoupled from the project version: bumped 0 -> 1 with the C ABI
+# v2 break (dfine_options_t gained struct_size), so binaries linked against
+# libdfine.so.0 fail at LOAD instead of misreading the new struct layout.
+set(DFINE_ABI_VERSION 1)
 set_target_properties(dfine PROPERTIES
-  VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR}
+  VERSION ${PROJECT_VERSION} SOVERSION ${DFINE_ABI_VERSION}
   CUDA_SEPARABLE_COMPILATION OFF)
 
 # ---------------------------------------------------------------------------

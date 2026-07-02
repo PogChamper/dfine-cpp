@@ -842,6 +842,10 @@ struct DFineDetector::Impl {
                     "dfine: freeze() called again with a different configuration; the detector "
                     "is already frozen (create a new detector to reconfigure)");
             }
+            // Same resolved config, but this spec may EXPLICITLY bound the source
+            // size where the original freeze(batch) left it unbounded — honor the
+            // stricter request (staging was already warmed at exactly this size).
+            if (spec.src_w > 0 || spec.src_h > 0) preprocessor->freeze();
             return;
         }
         const std::size_t px = static_cast<std::size_t>(sh) * sw * 3;

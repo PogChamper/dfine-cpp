@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Sequence
 
 from . import _ffi
-from ._ffi import _Detections, _Image, _Options, get_lib, last_error
+from ._ffi import _Detections, _FreezeSpec, _Image, _Options, _Timings, get_lib, last_error
 
 __all__ = ["Box", "Detection", "Detector", "set_log_callback"]
 
@@ -80,11 +80,34 @@ class Detector:
     use_cuda_graph : bool
         Opt-in CUDA-graph replay (helps batch-1 latency on 0-aux-stream engines;
         a safe no-op otherwise).
+    gpu_decode : bool
+        Zero-D2H decode on the GPU: only surviving detections cross PCIe.
+        Requires FP32 engine outputs (falls back to the CPU decode otherwise).
+    own_device_memory : bool
+        Detector-owned TensorRT activation block (part of the frozen-memory
+        contract; see :meth:`freeze`).
+    full_pipeline_graph : bool
+        One ``cudaGraphLaunch`` per frame covering H2D -> preprocess -> infer ->
+        decode -> D2H. Implies ``gpu_decode``; the capture happens inside
+        :meth:`freeze` and needs a ``--max-aux-streams 0`` engine. Calls that do
+        not match the frozen batch/source size/channel order fall back to the
+        split path.
+    letterbox : bool
+        Aspect-preserving preprocessing instead of the default stretch (the
+        training convention — letterbox costs ~1.7-2.0 AP on the published
+        weights). Boxes are un-mapped and clipped automatically.
+    letterbox_topleft : bool
+        Anchor the content at the top-left instead of centering it.
+    letterbox_pad : int
+        Padding value 0..255 (default 114, gray).
+    letterbox_upscale : bool
+        False = paste 1:1 when the frame already fits (production smart_resize
+        semantics).
     is_bgr : bool
         Default channel order of images passed to :meth:`detect` (False = RGB).
     class_names : sequence of str, optional
-        Override the class-name lookup (for models fine-tuned off COCO). When
-        omitted, COCO-80 names are used.
+        Override the class-name lookup. When omitted, the engine sidecar's
+        ``class_names`` apply, then COCO-80 for 80-class engines.
     """
 
     def __init__(
@@ -95,6 +118,13 @@ class Detector:
         threshold: float = 0.5,
         use_cuda_graph: bool = False,
         graph_warmup_iters: int = 3,
+        gpu_decode: bool = False,
+        own_device_memory: bool = False,
+        full_pipeline_graph: bool = False,
+        letterbox: bool = False,
+        letterbox_topleft: bool = False,
+        letterbox_pad: int = 114,
+        letterbox_upscale: bool = True,
         is_bgr: bool = False,
         class_names: Optional[Sequence[str]] = None,
     ) -> None:
@@ -104,10 +134,33 @@ class Detector:
         self._threshold = float(threshold)  # per-call default (forwarded explicitly)
         self._class_names = list(class_names) if class_names is not None else None
 
+        # These bindings speak C ABI v2 (struct_size-versioned options). A
+        # pre-0.2.0 libdfine would misread the struct silently — refuse it.
+        if not hasattr(self._lib, "dfine_detector_freeze"):
+            raise RuntimeError(
+                "the loaded libdfine predates C ABI v2 (v0.2.0) and cannot be used with "
+                "these bindings — rebuild it (./build.sh) or install the matching wheel"
+            )
+        if not letterbox and (letterbox_topleft or letterbox_pad != 114 or not letterbox_upscale):
+            raise ValueError(
+                "letterbox_* modifiers require letterbox=True (sidecar-driven letterbox "
+                "uses the sidecar's own parameters)"
+            )
+        if letterbox and not 0 <= int(letterbox_pad) <= 255:
+            raise ValueError("letterbox_pad must be in 0..255")
+
         opts = _Options(
+            struct_size=ctypes.sizeof(_Options),
             threshold=float(threshold),
             use_cuda_graph=1 if use_cuda_graph else 0,
             graph_warmup_iters=int(graph_warmup_iters),
+            gpu_decode=1 if gpu_decode else 0,
+            own_device_memory=1 if own_device_memory else 0,
+            full_pipeline_graph=1 if full_pipeline_graph else 0,
+            resize=2 if letterbox else 0,
+            letterbox_topleft=1 if letterbox_topleft else 0,
+            letterbox_pad=int(letterbox_pad),
+            letterbox_no_upscale=0 if letterbox_upscale else 1,
         )
         handle = self._lib.dfine_detector_create_ex(
             str(engine_path).encode("utf-8"),
@@ -144,6 +197,60 @@ class Detector:
     @property
     def max_batch(self) -> int:
         return int(self._lib.dfine_detector_max_batch(self._require()))
+
+    # -- frozen pipeline ----------------------------------------------------- #
+
+    def freeze(
+        self,
+        batch: int = 0,
+        *,
+        src_w: int = 0,
+        src_h: int = 0,
+        src_is_bgr: bool = False,
+    ) -> None:
+        """Warm every grow-only buffer to peak and lock the memory footprint.
+
+        Zeros mean engine defaults. Explicit ``src_w``/``src_h`` bound the
+        largest steady-state frame (and are what ``full_pipeline_graph``
+        captures its graph for); with zero src the source size stays unbounded
+        and an oversized frame may still allocate on the hot path. Re-freezing
+        with the same configuration is a no-op; a different one raises.
+        """
+        if not hasattr(self._lib, "dfine_detector_freeze"):
+            raise RuntimeError("libdfine is older than the frozen-pipeline C ABI (v0.2.0)")
+        spec = _FreezeSpec(
+            struct_size=ctypes.sizeof(_FreezeSpec),
+            batch=int(batch),
+            src_w=int(src_w),
+            src_h=int(src_h),
+            src_is_bgr=1 if src_is_bgr else 0,
+        )
+        if self._lib.dfine_detector_freeze(self._require(), ctypes.byref(spec)) != 0:
+            raise RuntimeError(f"freeze failed: {last_error()}")
+
+    @property
+    def full_pipeline_graph_active(self) -> bool:
+        """True once :meth:`freeze` captured the full-pipeline CUDA graph."""
+        if not hasattr(self._lib, "dfine_detector_full_graph_active"):
+            return False
+        return bool(self._lib.dfine_detector_full_graph_active(self._require()))
+
+    def last_timings(self) -> dict:
+        """Per-stage wall/CPU times (ms) of the last detect call.
+
+        ``dispatch_ms`` is the host cost of issuing GPU work — the number the
+        full-pipeline graph collapses (hundreds of launches -> one).
+        """
+        if not hasattr(self._lib, "dfine_detector_last_timings"):
+            raise RuntimeError("libdfine is older than the timings C ABI (v0.2.0)")
+        t = _Timings(struct_size=ctypes.sizeof(_Timings))
+        if self._lib.dfine_detector_last_timings(self._require(), ctypes.byref(t)) != 0:
+            raise RuntimeError(f"last_timings failed: {last_error()}")
+        return {
+            name: getattr(t, name)
+            for name, _ in _Timings._fields_
+            if name != "struct_size"
+        }
 
     def class_name(self, class_id: int) -> str:
         # Explicit constructor override wins; then the model-aware C call (engine

@@ -13,8 +13,10 @@
 #include "dfine/tasks/detector.hpp"
 #include "dfine/version.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cstring>
 #include <exception>
 #include <new>
 #include <stdexcept>
@@ -172,11 +174,45 @@ dfine_detector_t* dfine_detector_create_ex(const char* engine_path, const char* 
         return nullptr;
     }
     try {
-        dfine::DetectorOptions dopts;  // threshold 0.5, graph off, warmup 3
+        dfine::DetectorOptions dopts;  // threshold 0.5, everything else off
         if (opts) {
-            if (opts->threshold > 0.0f) dopts.threshold = opts->threshold;
-            dopts.use_cuda_graph = (opts->use_cuda_graph != 0);
-            if (opts->graph_warmup_iters > 0) dopts.graph_warmup_iters = opts->graph_warmup_iters;
+            if (opts->struct_size == 0) {
+                set_error(
+                    "dfine_detector_create: options.struct_size is 0 — zero-initialize the "
+                    "struct AND set struct_size = sizeof(dfine_options_t); binaries built "
+                    "against the pre-0.2.0 header must be rebuilt");
+                return nullptr;
+            }
+            // Plausibility bound. A pre-0.2.0 binary (v1 layout: float threshold
+            // first) that dodged the SONAME bump presents its threshold bits here
+            // — e.g. 0.5f reads as 1,056,964,608 — and would otherwise cause an
+            // out-of-bounds read of the caller's 12-byte struct. Any real
+            // struct_size stays tiny; reject the absurd loudly.
+            if (opts->struct_size > 4096) {
+                set_error(
+                    "dfine_detector_create: options.struct_size is implausibly large — the "
+                    "calling binary was likely built against the pre-0.2.0 header; rebuild "
+                    "against the current dfine/c_api.h");
+                return nullptr;
+            }
+            // Versioned copy: read exactly the bytes the caller's binary knows
+            // about; fields appended after its build stay zero (= defaults).
+            dfine_options_t o{};
+            std::memcpy(&o, opts, std::min(opts->struct_size, sizeof(dfine_options_t)));
+            if (o.threshold > 0.0f) dopts.threshold = o.threshold;
+            dopts.use_cuda_graph = (o.use_cuda_graph != 0);
+            if (o.graph_warmup_iters > 0) dopts.graph_warmup_iters = o.graph_warmup_iters;
+            dopts.gpu_decode = (o.gpu_decode != 0);
+            dopts.own_device_memory = (o.own_device_memory != 0);
+            dopts.full_pipeline_graph = (o.full_pipeline_graph != 0);
+            if (o.resize == 1) dopts.preprocess.resize = dfine::PreprocessSpec::Resize::kStretch;
+            if (o.resize == 2) {
+                dopts.preprocess.resize = dfine::PreprocessSpec::Resize::kLetterbox;
+                dopts.preprocess.anchor_topleft = (o.letterbox_topleft != 0);
+                dopts.preprocess.pad_value =
+                    o.letterbox_pad < 0 ? 114 : std::min(o.letterbox_pad, 255);
+                dopts.preprocess.allow_upscale = (o.letterbox_no_upscale == 0);
+            }
         }
         dfine::DFineDetector det = (meta_path && meta_path[0] != '\0')
                                        ? dfine::DFineDetector(engine_path, meta_path, dopts)
@@ -218,6 +254,67 @@ int dfine_detector_num_classes(const dfine_detector_t* det) {
 }
 int dfine_detector_max_batch(const dfine_detector_t* det) {
     return det ? det->h.obj.max_batch() : 0;
+}
+
+// ----- frozen pipeline -----
+
+int dfine_detector_freeze(dfine_detector_t* det, const dfine_freeze_spec_t* spec) {
+    t_last_error.clear();
+    if (!det) {
+        set_error("dfine_detector_freeze: det is NULL");
+        return -1;
+    }
+    try {
+        dfine::FreezeSpec fs;
+        if (spec) {
+            if (spec->struct_size == 0) {
+                set_error(
+                    "dfine_detector_freeze: spec.struct_size is 0 — set it to "
+                    "sizeof(dfine_freeze_spec_t)");
+                return -1;
+            }
+            dfine_freeze_spec_t s{};
+            std::memcpy(&s, spec, std::min(spec->struct_size, sizeof(dfine_freeze_spec_t)));
+            fs.batch = s.batch;
+            fs.src_w = s.src_w;
+            fs.src_h = s.src_h;
+            fs.src_is_bgr = (s.src_is_bgr != 0);
+        }
+        det->h.obj.freeze(fs);
+        return 0;
+    } catch (const std::exception& e) {
+        set_error(e.what());
+        return -1;
+    } catch (...) {
+        set_error("dfine_detector_freeze: unknown error");
+        return -1;
+    }
+}
+
+int dfine_detector_full_graph_active(const dfine_detector_t* det) {
+    return det && det->h.obj.full_pipeline_graph_active() ? 1 : 0;
+}
+
+int dfine_detector_last_timings(const dfine_detector_t* det, dfine_timings_t* out) {
+    t_last_error.clear();
+    if (!det || !out || out->struct_size < sizeof(size_t)) {
+        set_error("dfine_detector_last_timings: NULL argument or struct_size not set");
+        return -1;
+    }
+    const auto& t = det->h.obj.last_timings();
+    dfine_timings_t full{};
+    const std::size_t n = std::min(out->struct_size, sizeof(dfine_timings_t));
+    full.struct_size = n;  // reports how many bytes were actually filled
+    full.preprocess_ms = t.preprocess_ms;
+    full.infer_ms = t.infer_ms;
+    full.postprocess_ms = t.postprocess_ms;
+    full.total_ms = t.total_ms;
+    full.preprocess_cpu_ms = t.preprocess_cpu_ms;
+    full.dispatch_ms = t.dispatch_ms;
+    full.wait_ms = t.wait_ms;
+    full.decode_host_ms = t.decode_host_ms;
+    std::memcpy(out, &full, n);
+    return 0;
 }
 
 // ----- inference -----

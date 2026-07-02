@@ -114,17 +114,79 @@ typedef struct dfine_image_s {
 } dfine_image_t;
 
 /*
- * Construction options (dfine_detector_create_ex). Zero-initialize and set only
- * what you need; a NULL pointer means "all defaults".
+ * Construction options (dfine_detector_create_ex), ABI v2.
+ *
+ * Versioning contract: set struct_size = sizeof(dfine_options_t) at your
+ * compile time. The library reads AT MOST struct_size bytes and treats the
+ * rest as defaults, so binaries built against an OLDER header keep working
+ * when the struct grows — new fields are only ever APPENDED. Zero-initialize
+ * ({0} / memset), set struct_size, then set what you need; a NULL pointer
+ * means "all defaults". struct_size == 0 is rejected (create returns NULL,
+ * catching a forgotten assignment). Binaries built against the pre-0.2.0
+ * struct (no size field) fail at load: the ABI break bumped the SONAME to
+ * libdfine.so.1 — rebuild against this header.
+ * The letterbox_* fields are consulted only when resize == 2; with resize == 0
+ * and a letterbox sidecar, the sidecar's own letterbox fields apply instead.
  */
 typedef struct dfine_options_s {
+    size_t struct_size;     /* = sizeof(dfine_options_t); versioning anchor  */
     float threshold;        /* default score threshold; <=0 keeps 0.5        */
     int use_cuda_graph;     /* 0/1: opt-in CUDA-graph replay of the engine.  */
                             /*   Cuts batch-1 launch overhead on single-     */
                             /*   stream (--max-aux-streams 0) engines; a safe */
                             /*   no-op (falls back to enqueueV3) otherwise.   */
     int graph_warmup_iters; /* enqueue cycles before capture (<=0 => 3)      */
+
+    /* --- intensive-core (see include/dfine/tasks/detector.hpp for detail) --- */
+    int gpu_decode;          /* 0/1: Zero-D2H decode on device (FP32 outputs) */
+    int own_device_memory;   /* 0/1: detector-owned TRT activation block      */
+    int full_pipeline_graph; /* 0/1: one cudaGraphLaunch per frame; implies   */
+                             /*   gpu_decode; capture happens inside          */
+                             /*   dfine_detector_freeze() (0-aux engine only) */
+
+    /* --- preprocessing geometry (stretch is the training convention) -------- */
+    int resize;               /* 0 = auto (engine sidecar), 1 = stretch,       */
+                              /*   2 = letterbox                               */
+    int letterbox_topleft;    /* 0 = centered content, 1 = top-left anchor     */
+    int letterbox_pad;        /* padding 0..255; negative => 114 (gray).       */
+                              /*   NOTE a zero-initialized struct gives 0 =    */
+                              /*   black; set -1 or 114 for the default gray.  */
+    int letterbox_no_upscale; /* 1 = paste 1:1 when the frame already fits    */
 } dfine_options_t;
+
+/*
+ * Steady-state configuration for dfine_detector_freeze(). Zeros mean engine
+ * defaults (batch = engine max, src = engine input size). NOTE: only an
+ * EXPLICIT src_w/src_h locks the preprocessor staging; with zero src the
+ * source size stays unbounded and an oversized frame may still allocate on
+ * the hot path (the one documented exception to the zero-allocation
+ * contract). Same struct_size contract as dfine_options_t.
+ */
+typedef struct dfine_freeze_spec_s {
+    size_t struct_size; /* = sizeof(dfine_freeze_spec_t)                     */
+    int batch;
+    int src_w;      /* largest steady-state source frame; explicit W/H   */
+    int src_h;      /*   also locks the preprocessor staging             */
+    int src_is_bgr; /* channel order the full-pipeline graph captures    */
+} dfine_freeze_spec_t;
+
+/*
+ * Per-stage wall time of the last detect call, milliseconds. The *_cpu/_ms
+ * split separates host issue cost from GPU wait — dispatch_ms is what the
+ * full-pipeline graph collapses. Same struct_size contract: the library fills
+ * min(struct_size, sizeof) bytes.
+ */
+typedef struct dfine_timings_s {
+    size_t struct_size;
+    double preprocess_ms;
+    double infer_ms;
+    double postprocess_ms;
+    double total_ms;
+    double preprocess_cpu_ms;
+    double dispatch_ms;
+    double wait_ms;
+    double decode_host_ms;
+} dfine_timings_t;
 
 /* -------------------------------------------------------------------------
  * Error reporting
@@ -195,6 +257,30 @@ DFINE_API int dfine_detector_num_classes(const dfine_detector_t* det);
 DFINE_API int dfine_detector_max_batch(const dfine_detector_t* det);
 
 /* -------------------------------------------------------------------------
+ * Frozen pipeline (intensive-core; see docs/impl/INTENSIVE_CORE_PLAN.md)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * Warm every grow-only buffer to peak and lock the memory footprint (zero
+ * steady-state device allocation). With options.full_pipeline_graph set, this
+ * is also where the full-pipeline CUDA graph is captured for the spec's batch/
+ * source size. spec may be NULL (engine defaults). Re-freezing with the same
+ * resolved configuration is a no-op; a different one fails. Returns 0 on
+ * success, -1 on failure (see dfine_last_error).
+ */
+DFINE_API int dfine_detector_freeze(dfine_detector_t* det, const dfine_freeze_spec_t* spec);
+
+/* 1 once freeze() captured the full-pipeline graph; 0 = split path in effect. */
+DFINE_API int dfine_detector_full_graph_active(const dfine_detector_t* det);
+
+/*
+ * Per-stage timings of the last detect call on this detector. Fills the
+ * caller's struct up to its struct_size. Returns 0 on success, -1 for a NULL
+ * detector/out pointer or a zero struct_size.
+ */
+DFINE_API int dfine_detector_last_timings(const dfine_detector_t* det, dfine_timings_t* out);
+
+/* -------------------------------------------------------------------------
  * Inference
  * ---------------------------------------------------------------------- */
 
@@ -256,7 +342,7 @@ DFINE_API const char* dfine_class_name(int class_id);
  */
 DFINE_API const char* dfine_detector_class_name(const dfine_detector_t* det, int class_id);
 
-/* Library version string, e.g. "0.1.0". */
+/* Library version string (matches the CMake project version). */
 DFINE_API const char* dfine_version(void);
 
 #ifdef __cplusplus

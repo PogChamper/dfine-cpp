@@ -78,8 +78,16 @@ static void run_selftests(void) {
 static void run_engine_path(const char* engine, const char* meta, float threshold, int use_graph) {
     printf("[engine]   %s\n", engine);
 
+    /* ABI v2 contract: a zero struct_size must be REJECTED, not guessed at. */
+    dfine_options_t bad;
+    memset(&bad, 0, sizeof bad);
+    check(dfine_detector_create_ex(engine, meta, &bad) == NULL,
+          "create_ex rejects options with struct_size == 0");
+    check(dfine_last_error()[0] != '\0', "struct_size rejection sets last_error");
+
     dfine_options_t opts;
     memset(&opts, 0, sizeof opts);
+    opts.struct_size = sizeof opts;
     opts.threshold = threshold;
     opts.use_cuda_graph = use_graph;
 
@@ -88,6 +96,18 @@ static void run_engine_path(const char* engine, const char* meta, float threshol
         printf("  [FAIL] create_ex: %s\n", dfine_last_error());
         ++g_failures;
         return;
+    }
+
+    /* Frozen-pipeline surface: freeze(NULL) = engine defaults; timings fill. */
+    check(dfine_detector_freeze(det, NULL) == 0, "freeze(NULL spec) succeeds");
+    check(dfine_detector_freeze(det, NULL) == 0, "re-freeze with same config is a no-op");
+    {
+        dfine_timings_t t;
+        memset(&t, 0, sizeof t);
+        check(dfine_detector_last_timings(det, &t) == -1, "last_timings rejects zero struct_size");
+        t.struct_size = sizeof t;
+        check(dfine_detector_last_timings(det, &t) == 0, "last_timings fills the struct");
+        check(dfine_detector_full_graph_active(det) == 0, "full graph inactive when not requested");
     }
 
     int w = dfine_detector_input_width(det);

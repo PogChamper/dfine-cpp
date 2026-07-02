@@ -2,7 +2,7 @@
 
 **Production C++/TensorRT inference for the [D-FINE](https://github.com/Peterande/D-FINE) object detector.**
 A zero-Python, OpenCV-free runtime that runs the full pipeline — CUDA preprocessing → TensorRT engine →
-C++ decode — at up to **~460 FPS** on an RTX 4070 Ti SUPER, matching PyTorch mAP to **±0.001 AP**.
+C++ decode — at up to **1200+ FPS** on an RTX 4070 Ti SUPER, matching PyTorch mAP to **±0.001 AP**.
 
 <p align="center">
   <a href="#quickstart">Quickstart</a> ·
@@ -24,6 +24,20 @@ C++ decode — at up to **~460 FPS** on an RTX 4070 Ti SUPER, matching PyTorch m
 *Both panels race through the same clip at 10× slow motion; frame counters advance at each backend's
 measured e2e throughput (D-FINE-M, RTX 4070 Ti SUPER). Detections are identical — the C++ runtime
 produced both. Reproduce: `trt-files/scripts/make_demo_gif.py` (clip: Mixkit free license).*
+
+All five model sizes, C++ FP16, end-to-end (preprocess + inference + decode), full COCO val2017,
+RTX 4070 Ti SUPER:
+
+| model | mAP (PyTorch ref) | e2e batch-1 | **FPS b1** | **FPS b8** | vs PyTorch b1 |
+|---|---|---|---|---|---|
+| D-FINE-N | 0.4280 (0.4279) | 2.2 ms | 453 | **1206** | 6.8× |
+| D-FINE-S | 0.5069 (0.5073) | 2.9 ms | 346 | 638 | 6.1× |
+| D-FINE-M | 0.5500 (0.5509) | 3.6 ms | 281 | 442 | 6.0× |
+| D-FINE-L | 0.5723 (0.5724) | 4.4 ms | 228 | 358 | 6.2× |
+| D-FINE-X | 0.5927 (0.5931) | 5.6 ms | 180 | 246 | 6.0× |
+
+Every number is reproducible with one command (`trt-files/scripts/overnight_bench.sh`); FP32 columns,
+per-batch scaling, and the Python-backend baselines are in [Benchmarks](#benchmarks).
 
 ---
 
@@ -60,8 +74,8 @@ cmake --build build -j
 
 # 2. Get the prebuilt ONNX + sidecar, build an engine on your GPU
 #    (fp16_st is the recommended production build — strongly-typed, decoder kept FP32)
-curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.1.0/dfine_m_fp16_st.onnx
-curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.1.0/dfine_m_fp16_st.json
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.2.0/dfine_m_fp16_st.onnx
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.2.0/dfine_m_fp16_st.json
 python trt-files/scripts/build_engine.py --strongly-typed --no-tf32 --max-batch 8 \
     --onnx dfine_m_fp16_st.onnx --output trt-files/engines/dfine_m_fp16_st.engine
 
@@ -118,28 +132,17 @@ RTX 4070 Ti SUPER · COCO val2017 (5000 imgs) · D-FINE-M · latency = e2e p50 m
 | **C++ FP32** | 5.7 | 176 | 227 | 642 | 0.5506 |
 | **C++ FP16** | **3.7** | **272** | **459** | **488** | 0.5500 |
 
-C++ FP16 is **~8.7× the PyTorch throughput** at batch 1. FP16 is essentially lossless **across every size**:
+FP16 (strongly typed) is lossless to ≤0.0006 AP on every size at 1.3–2.8× the FP32 throughput; per-size
+FP32 columns and batch scaling are in the [nightly report](trt-files/scripts/overnight_bench.sh) output.
 
-| size | FP32 AP | FP16 AP | ΔAP | infer speedup (b1 / b8) |
-|---|---|---|---|---|
-| nano | 0.4280 | 0.4280 | +0.0000 | 1.32× / 1.93× |
-| small | 0.5074 | 0.5069 | −0.0005 | 1.45× / 1.99× |
-| medium | 0.5506 | 0.5500 | −0.0006 | 1.66× / 2.19× |
-| large | 0.5725 | 0.5723 | −0.0002 | 1.67× / 2.19× |
-| xlarge | 0.5931 | 0.5927 | −0.0004 | 2.21× / 2.81× |
-
-**CUDA-graph (opt-in):** on a single-stream engine (`--max-aux-streams 0`) the graph cuts **batch-1 latency
-−34.5%** (3.90 → 2.55 ms) — D-FINE is *dispatch-bound* at small batch (the CPU spends ~3.9 ms in `enqueueV3`
-launching hundreds of kernels; `cudaGraphLaunch` is ~0.05 ms). See [docs/HANDOFF.md](docs/HANDOFF.md) §M2.2.
-
-**Frozen pipeline (opt-in):** three composable `DetectorOptions` knobs for steady-state streaming.
-`gpu_decode` runs sigmoid/top-k/box-decode as CUDA kernels so only the surviving detections cross PCIe
-(Zero-D2H). `freeze()` / `FreezeSpec` warms every grow-only buffer to peak and locks it — zero steady-state
-device allocation (VRAM Δ = +0 B over full runs). `full_pipeline_graph` captures H2D → preprocess → infer →
-decode → D2H into **one `cudaGraphLaunch` per frame**; it needs a `--max-aux-streams 0` engine and a fixed
-source resolution via `freeze(FreezeSpec{batch, src_w, src_h})`, and is byte-identical to the split path
-(validated on 1061 real 640×480 COCO images). Measured on m FP16: batch-1 e2e wall **−34.3%**, CPU per frame
-4.30 → 0.195 ms (dispatch 4.18 → 0.12 ms); batch-8 frees 19.2 ms CPU per call (wall stays GPU-bound, ±2%).
+**Frozen pipeline (opt-in), for steady-state streaming:** `gpu_decode` decodes on the GPU so only
+surviving detections cross PCIe; `freeze()` / `FreezeSpec` locks the memory footprint (zero steady-state
+allocation, VRAM Δ = +0 B over full runs); `full_pipeline_graph` captures H2D → preprocess → infer →
+decode → D2H into **one `cudaGraphLaunch` per frame** (needs a `--max-aux-streams 0` engine and a fixed
+source resolution; byte-identical to the split path, validated on 1061 real 640×480 COCO images).
+Measured on m FP16: batch-1 e2e wall **−34.3%**, CPU per frame **4.30 → 0.195 ms** (dispatch
+4.18 → 0.12 ms); batch-8 frees 19.2 ms of CPU per call. The score threshold stays a live per-call knob
+inside the captured graph.
 
 ```cpp
 dfine::DetectorOptions o;
@@ -149,27 +152,21 @@ det.freeze(dfine::FreezeSpec{1, 1920, 1080});     // batch, source WxH — captu
 det.detect(frame);                                // one cudaGraphLaunch per call
 ```
 
-Measure with `dfine_bench --pipeline-compare`. `last_timings()` reports per-stage CPU cost
-(`preprocess_cpu_ms` / `dispatch_ms` / `wait_ms` / `decode_host_ms`) — the dispatch column is what the graph
-collapses. See [include/dfine/tasks/detector.hpp](include/dfine/tasks/detector.hpp) for the exact contract.
+`last_timings()` reports per-stage CPU cost — the `dispatch_ms` column is what the graph collapses.
+Exact contract: [include/dfine/tasks/detector.hpp](include/dfine/tasks/detector.hpp).
 
-### Benchmark & compare backends yourself
-
-The repo ships a **cross-backend profiler** — measure **PyTorch, ONNXRuntime-GPU, and TensorRT (FP32/FP16)
-+ the C++ runtime** side by side on the same images, reporting latency, **FPS**, **GPU memory**, and **mAP**
-in one table:
+### Reproduce
 
 ```sh
-# PyTorch vs ONNXRuntime-GPU vs TensorRT vs C++ (+ CUDA-graph), full COCO val:
+# PyTorch vs ONNXRuntime-GPU vs TensorRT vs C++ side by side (latency, FPS, GPU mem, mAP):
 python trt-files/scripts/profile.py --backends torch onnx trt cpp cpp-graph \
        --engine trt-files/engines/dfine_m_fp16_st.engine --full --batches 1 8
+bash trt-files/scripts/overnight_bench.sh    # the full n→x sweep behind the tables above
+./build/dfine_bench --pipeline-compare ...   # per-stage CPU cost, split vs full graph
 ```
 
-`--backends` picks any subset of `torch · onnx · trt · trt-baseline · cpp · cpp-graph`. Per-stage C++ latency
-(preprocess / infer / D2H / decode, percentiles) is `build/dfine_bench`; the honest CUDA-graph delta is
-`dfine_bench --graph-compare` (on a `--max-aux-streams 0` engine); a full **n→x** sweep across all backends is
-`bash trt-files/scripts/overnight_bench.sh`. (The `torch` backend and `.pt`→ONNX export need the
-[D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) source on `PYTHONPATH`; the ONNX/TRT/C++ paths are
+(The `torch` backend and `.pt`→ONNX export need the
+[D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) source on `PYTHONPATH`; everything else is
 self-contained.)
 
 ## Using the library
@@ -209,7 +206,7 @@ A dependency-light [`dfine`](python/) package wraps the C ABI via `ctypes` (no c
 prebuilt `.so`). See [`python/README.md`](python/README.md).
 
 ```sh
-pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.1.0/dfine-0.1.0-py3-none-linux_x86_64.whl"
+pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.2.0/dfine-0.2.0-py3-none-linux_x86_64.whl"
 ```
 
 The wheel bundles `libdfine.so` built for sm_89 / linux_x86_64; other GPUs and platforms build from
@@ -292,20 +289,22 @@ truth on the current state.
 
 ## Requirements & environment
 
-- **Runtime:** NVIDIA GPU + driver, CUDA 12.x, TensorRT 10.x (validated on 10.13). `libnvinfer`/`libcudart`
-  must be on `LD_LIBRARY_PATH` — a system TensorRT install or a `pip install "tensorrt==10.13.*"` venv's
-  `tensorrt_libs` dir both work.
-- **C++ build:** CMake ≥ 3.24 (the default `CUDA_ARCHITECTURES=native` needs 3.24; the project floor in
-  `CMakeLists.txt` is 3.20 if you pass an explicit arch, e.g. `-DCMAKE_CUDA_ARCHITECTURES=89`), a CUDA 12.x
-  toolkit (`nvcc`), TensorRT headers + libs. A system TensorRT is found automatically
-  ([cmake/FindTensorRT.cmake](cmake/FindTensorRT.cmake) searches `$TENSORRT_DIR`, `/usr/local/TensorRT`,
-  `/opt/tensorrt`, `/usr`); alternatively populate `third_party/tensorrt` — see
-  [third_party/README.md](third_party/README.md). `./build.sh` auto-discovers `cmake`/`nvcc` from `PATH`
-  and applies a conda-`ld` workaround only for conda toolchains. No OpenCV.
-- **Python scripts** (engine-build / convert / eval / profile): see `pyproject.toml` (uv). The **ONNX
-  export** alone additionally needs the [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) source on
-  `PYTHONPATH` for model construction; everything else (build_engine / convert_fp16 / profile / coco_eval)
-  is self-contained.
+| Dependency | Version | Notes |
+|:---|:---|:---|
+| OS | Linux x86_64 | validated; other platforms untested |
+| NVIDIA GPU + driver | CUDA-12-capable | validated on RTX 4070 Ti SUPER (sm_89) |
+| CUDA toolkit | 12.x | `nvcc` needed for the C++ build only |
+| TensorRT | 10.x | validated on 10.13; `pip install "tensorrt==10.13.*"` works as a lib source |
+| CMake | ≥ 3.24 (`native` arch) / ≥ 3.20 (explicit arch) | `build.sh` auto-discovers the toolchain |
+| Compiler | C++17 | |
+| OpenCV | — | not required |
+| Python | engine build / export scripts only | never at inference time |
+
+A system TensorRT is found automatically ([cmake/FindTensorRT.cmake](cmake/FindTensorRT.cmake) searches
+`$TENSORRT_DIR`, `/usr/local/TensorRT`, `/opt/tensorrt`, `/usr`); alternatively populate
+`third_party/tensorrt` ([third_party/README.md](third_party/README.md)). The ONNX **export** alone needs
+the [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) source on `PYTHONPATH`; every other script is
+self-contained (`pyproject.toml`, uv).
 
 Engines are machine-specific build outputs (gitignored) — compile them locally from the prebuilt ONNX on
 [Releases](https://github.com/PogChamper/dfine-cpp/releases) or from your own export.

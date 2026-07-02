@@ -15,8 +15,10 @@ from ctypes import (
     POINTER,
     Structure,
     c_char_p,
+    c_double,
     c_float,
     c_int,
+    c_size_t,
     c_uint8,
     c_void_p,
 )
@@ -51,10 +53,44 @@ class _Image(Structure):
 
 
 class _Options(Structure):
+    # ABI v2: struct_size-versioned (set to sizeof by the caller; the library
+    # reads exactly that many bytes, so appended fields degrade gracefully).
     _fields_ = [
+        ("struct_size", c_size_t),
         ("threshold", c_float),
         ("use_cuda_graph", c_int),
         ("graph_warmup_iters", c_int),
+        ("gpu_decode", c_int),
+        ("own_device_memory", c_int),
+        ("full_pipeline_graph", c_int),
+        ("resize", c_int),  # 0 auto (sidecar) / 1 stretch / 2 letterbox
+        ("letterbox_topleft", c_int),
+        ("letterbox_pad", c_int),
+        ("letterbox_no_upscale", c_int),
+    ]
+
+
+class _FreezeSpec(Structure):
+    _fields_ = [
+        ("struct_size", c_size_t),
+        ("batch", c_int),
+        ("src_w", c_int),
+        ("src_h", c_int),
+        ("src_is_bgr", c_int),
+    ]
+
+
+class _Timings(Structure):
+    _fields_ = [
+        ("struct_size", c_size_t),
+        ("preprocess_ms", c_double),
+        ("infer_ms", c_double),
+        ("postprocess_ms", c_double),
+        ("total_ms", c_double),
+        ("preprocess_cpu_ms", c_double),
+        ("dispatch_ms", c_double),
+        ("wait_ms", c_double),
+        ("decode_host_ms", c_double),
     ]
 
 
@@ -165,6 +201,15 @@ def _configure(lib: ctypes.CDLL) -> ctypes.CDLL:
     if hasattr(lib, "dfine_detector_class_name"):
         lib.dfine_detector_class_name.restype = c_char_p
         lib.dfine_detector_class_name.argtypes = [c_void_p, c_int]
+
+    # Frozen pipeline (ABI v2; absent from pre-0.2.0 libraries).
+    if hasattr(lib, "dfine_detector_freeze"):
+        lib.dfine_detector_freeze.restype = c_int
+        lib.dfine_detector_freeze.argtypes = [c_void_p, POINTER(_FreezeSpec)]
+        lib.dfine_detector_full_graph_active.restype = c_int
+        lib.dfine_detector_full_graph_active.argtypes = [c_void_p]
+        lib.dfine_detector_last_timings.restype = c_int
+        lib.dfine_detector_last_timings.argtypes = [c_void_p, POINTER(_Timings)]
 
     lib.dfine_set_log_callback.restype = None
     lib.dfine_set_log_callback.argtypes = [LOG_FN]

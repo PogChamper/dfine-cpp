@@ -42,7 +42,7 @@ fi
 [[ -f "$REPO/build/libdfine.so" ]] \
     || { echo "error: $REPO/build/libdfine.so not found (run ../build.sh)" >&2; exit 1; }
 
-# Dereference (cp -L): build/libdfine.so -> .so.0 -> .so.0.1.0 is a symlink
+# Dereference (cp -L): build/libdfine.so -> .so.<abi> -> .so.<version> is a symlink
 # chain, wheels (zip) cannot hold symlinks, and _ffi.py loads the literal name
 # libdfine.so. One real file avoids shipping three copies.
 cp -L "$REPO/build/libdfine.so" "$BUNDLED"

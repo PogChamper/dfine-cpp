@@ -403,3 +403,14 @@ bundles `libdfine.so` (via `package-data`, already declared) and depends on the 
 `apps/dfine_capi_parity.cpp`; `python/{pyproject.toml,README.md}`, `python/dfine/{__init__,_ffi,detector,cli}.py`,
 `python/tests/{conftest,test_detector}.py`. CMake gained `DFINE_BUILD_C_API` + the two harness targets;
 `build.sh` now also sets `CMAKE_C_FLAGS=-B/usr/bin` (system binutils for the C target).
+
+## v0.2.0 addendum (2026-07-02)
+
+Published: github.com/PogChamper/dfine-cpp (v0.1.0 + v0.2.0, CI green, 24 release assets each).
+v0.2.0 shipped C ABI v2 — struct_size-versioned `dfine_options_t` (the last planned ABI break;
+SONAME bumped to libdfine.so.1), `dfine_detector_freeze/full_graph_active/last_timings`, and full
+Python parity (gpu_decode / own_device_memory / full_pipeline_graph / letterbox kwargs, freeze(),
+last_timings()). Optional letterbox preprocessing (options or sidecar `resize` field) is validated
+against host references to +0.0002 AP; stretch remains the default (training convention, ~2 AP
+better). Commit identity: PogChamper + noreply (repo-local config; no AI co-author trailers).
+Current state and next actions: docs/NEXT_TASK.md. Release notes: docs/releases/.

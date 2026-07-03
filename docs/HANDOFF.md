@@ -407,3 +407,13 @@ last_timings()). Optional letterbox preprocessing (options or sidecar `resize` f
 against host references to +0.0002 AP; stretch remains the default (training convention, ~2 AP
 better). Commit identity: PogChamper + noreply (repo-local config; no AI co-author trailers).
 Release notes: docs/releases/.
+
+## v0.3-dev addendum (2026-07-03, research branch)
+
+`trt-files/scripts/convert_fp16_surgical.py` — surgical fp16 decoder (opset-19
+only: opset-16 decomposed LayerNorm miscompiles under fine-grained mixed
+precision in TRT 10.13). Validated lossless full-val on all five sizes
+(n .4276 / s .5065 / m .5502 / l .5724 / x .5929 vs fp16_st refs); m: b8
+528 img/s vs 469 prod, b1 3.60 ms, VRAM -64 MiB; +opt-batch 8 = 561. Export
+sliders (num_queries / eval_idx / cascade top-K) measured in
+dfine-notes research report; productization pending the night-matrix full-vals.

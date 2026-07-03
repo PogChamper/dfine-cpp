@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Surgical FP16: whole net FP16 INCLUDING decoder modules; FP32 only for the
-FDR-critical subset (research scratch, sibling of convert_fp16.py).
+FDR-critical subset (sibling of convert_fp16.py; needs an opset >= 19 export).
 
 FP32 island (from the E2 torch ablation that measured ~-0.001 AP for this split):
   1. FDR tail scopes: integral, lqe_layers, dec_bbox_head.*, pre_bbox_head,
@@ -8,6 +8,8 @@ FP32 island (from the E2 torch ablation that measured ~-0.001 AP for this split)
   2. Decoder functional glue: leaf ops directly under /model/decoder/ and
      /model/decoder/decoder/ (anchor math, inverse_sigmoid, pred_corners
      accumulation Adds, distance2bbox chain, ref-point sigmoids, dense-head topk).
+     ``--slim`` drops this tier to FP16 too — measured lossless on COCO full-val
+     for all five sizes, +2-3% b8 throughput — and is the release default.
   3. Deform coordinate chain: ancestors of every cross_attn gather INDEX input,
      walked through pointwise/shape ops, stopping at MatMul/Gemm/Softmax module
      compute — keeps unnormalize/floor/clip/flatten-index math FP32 (F-1: index
@@ -15,6 +17,11 @@ FP32 island (from the E2 torch ablation that measured ~-0.001 AP for this split)
      bilinear/attention weight multiplies) goes FP16.
 Everything else — backbone, encoder, self_attn, cross_attn projections, FFN,
 gateway, norms, query_pos/score heads — becomes FP16.
+
+Opset >= 19 is REQUIRED: opset-16 exports decompose LayerNorm into primitive ops,
+and TensorRT miscompiles that decomposition in FP16 (mAP collapses to ~0.005;
+ONNXRuntime stays healthy — a TRT-side bug, repro archived). Opset 19 exports a
+native LayerNormalization node, which compiles correctly.
 """
 
 from __future__ import annotations
@@ -77,7 +84,7 @@ def coord_slice(g, by_output) -> set[str]:
     return out
 
 
-def build_blocklist(model: onnx.ModelProto) -> list[str]:
+def build_blocklist(model: onnx.ModelProto, slim: bool = False) -> list[str]:
     g = model.graph
     by_output: dict[str, onnx.NodeProto] = {}
     for n in g.node:
@@ -108,7 +115,7 @@ def build_blocklist(model: onnx.ModelProto) -> list[str]:
         if any(s in n.name for s in FDR_SCOPES):
             block.add(n.name)
             n_scope += 1
-        elif is_glue_leaf(n.name):
+        elif not slim and is_glue_leaf(n.name):
             block.add(n.name)
             n_glue += 1
 
@@ -117,7 +124,8 @@ def build_blocklist(model: onnx.ModelProto) -> list[str]:
     n_coord = len(cs - block)
     block |= cs
 
-    print(f"[surgical] blocklist: {n_scope} FDR-scope + {n_glue} glue-leaf + "
+    print(f"[surgical] blocklist{' (slim: glue leaves stay FP16)' if slim else ''}: "
+          f"{n_scope} FDR-scope + {n_glue} glue-leaf + "
           f"{n_coord} deform-coordinate nodes = {len(block)} total "
           f"(of {len(g.node)} graph nodes)")
     return sorted(block)
@@ -243,10 +251,23 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--onnx", required=True)
     p.add_argument("--output", required=True)
+    p.add_argument("--slim", action="store_true",
+                   help="leave the decoder glue leaves FP16 too (FP32 island = FDR scopes "
+                        "+ deform coordinate slice only) — measured lossless on COCO "
+                        "full-val for all five sizes, +2-3%% b8; the release default")
     args = p.parse_args()
+    env_slim = os.environ.get("SURGICAL_NO_GLUE", "").strip().lower()
+    slim = args.slim or env_slim not in ("", "0", "false", "no", "off")
 
     model = onnx.load(args.onnx)
-    block = build_blocklist(model)
+    opset = max((imp.version for imp in model.opset_import
+                 if imp.domain in ("", "ai.onnx")), default=0)
+    if opset < 19 and not os.environ.get("SURGICAL_FP16_ONLY"):
+        raise SystemExit(
+            f"[surgical] input opset is {opset}, need >= 19: opset-16 exports decompose "
+            "LayerNorm and TensorRT miscompiles the decomposition in FP16 (mAP ~0.005). "
+            "Re-export with export_dfine_onnx.py --opset 19.")
+    block = build_blocklist(model, slim=slim)
     model16 = float16.convert_float_to_float16(
         model, node_block_list=block, keep_io_types=True, disable_shape_infer=False)
     retype_outputs_fp32(model16)
@@ -265,7 +286,8 @@ def main() -> None:
     if sidecar.exists():
         meta = json.loads(sidecar.read_text())
         meta["precision"] = "fp16"
-        meta["precision_mode"] = "strongly_typed_onnx_fp16_surgical_decoder"
+        meta["precision_mode"] = ("strongly_typed_onnx_fp16_surgical_slim" if slim
+                                  else "strongly_typed_onnx_fp16_surgical_decoder")
         Path(args.output).with_suffix(".json").write_text(json.dumps(meta, indent=2) + "\n")
     print(f"[surgical] wrote {args.output}")
 

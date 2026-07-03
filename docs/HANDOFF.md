@@ -52,7 +52,7 @@ Scripts (canonical, `trt-files/scripts/`): `export_dfine_onnx.py` (raw export + 
 (smoke), `coco_eval.py` (mAP, multi-backend), `parity_check.py` (per-image torch/ORT/TRT),
 `cuda_env.py` (onnxruntime-gpu bootstrap), `seg_export_repro.py` (the D-FINE-seg bug-report repro).
 `experiments/` holds superseded one-offs. (`compare_export_backends.py`
-are the user's RRS food-detector validation — leave them.)
+is a production fine-tune fidelity-validation harness — leave it.)
 
 ## Decisions & gotchas (the canonical truths — full detail in `impl/M0_STATUS.md`)
 
@@ -415,5 +415,31 @@ only: opset-16 decomposed LayerNorm miscompiles under fine-grained mixed
 precision in TRT 10.13). Validated lossless full-val on all five sizes
 (n .4276 / s .5065 / m .5502 / l .5724 / x .5929 vs fp16_st refs); m: b8
 528 img/s vs 469 prod, b1 3.60 ms, VRAM -64 MiB; +opt-batch 8 = 561. Export
-sliders (num_queries / eval_idx / cascade top-K) measured in
-dfine-notes research report; productization pending the night-matrix full-vals.
+sliders (num_queries / eval_idx / cascade top-K) measured in the internal
+research report; productization pending the night-matrix full-vals.
+
+## v0.3.0 addendum (2026-07-03)
+
+Shipped the productization the v0.3-dev entry left pending. The sliders are now
+`export_dfine_onnx.py` flags (`--num-queries` / `--eval-idx` / `--cascade K:KEEP`;
+cascade stashes the layer-K deep-supervision score head pre-deploy and prunes
+per-query state in-graph via TopK+Gather — the sidecar's `num_queries` follows the
+*output* count, with `cascade`/`cascade_initial_queries` recording the recipe);
+`convert_fp16_surgical.py` gained `--slim` (glue leaves FP16; env
+`SURGICAL_NO_GLUE` still honored) and an opset<19 hard error. Verified: default
+export byte-identical A/B with flags unset; flag exports reproduce the gated
+research artifacts bit-exactly (graph hashes: fast-preset m + all five slim
+release assets). Night-matrix gates: slim lossless full-val all five sizes
+(n .4272 / s .5060 / m .5500 / l .5723 / x .5926), cascade 1:150 fv 0.5482
+(−0.18, best single slider), fast preset fv across the lineup (−0.44…−0.77 at
++10…21%), max preset 686 img/s m b8. Release surface: hero ladder + 60-second
+Python quickstart in README, docs/RESEARCH_MATRIX.md (the complete measured
+record incl. FP8/INT8/plugin negatives), examples/python_quickstart.ipynb,
+wheel bundles build_engine.py so `dfine build` works checkout-free (verified in
+a fresh venv), `dfine build --opt-batch` + `_slim`/`_op19` name resolution.
+Assets renamed to `dfine_<size>_{op19,slim}.onnx` with regenerated sidecars +
+SHA256SUMS. Gates before tag: WERROR build, capi parity ×2, 14/14 pytest.
+Do-not-revisit (measured negative): FP8, standalone/combo INT8, deform plugin,
+FDR kernel, opt-level 5, L2 persist, b16/32. Parked: 2-context ping-pong
+(+5.2%), P4a fp16-input branch (VRAM-only), NVIDIA LN bug report (repro
+archived in research artifacts).

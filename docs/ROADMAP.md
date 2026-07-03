@@ -25,7 +25,7 @@ gap and are the direct prerequisites for almost everything else in this document
 | M3 instance segmentation | SHELVED (no ckpts/use-case) | M-L | High | Medium |
 | `extern "C"` ABI wrapper (`c_api.h`/`.cpp`) | ✅ DONE (M4) | S-M | High | Low |
 | Python bindings over the C ABI | ✅ DONE (M4) | M | Very high | Medium |
-| pip **wheel** (bundle `.so`, extra `tensorrt`) | DO-NEXT | S-M | High | Medium |
+| pip **wheel** (bundle `.so`, extra `tensorrt`) | ✅ DONE (v0.1.0; v0.3.0 bundles `build_engine.py` too) | S-M | High | Medium |
 
 - **M3 instance segmentation.** D-FINE-seg already has the mask head, so this is additive rather than
   exploratory: add a `masks` output to the ONNX export, write a GPU bilinear-upsample + threshold-0.5
@@ -104,29 +104,27 @@ engineering.
 
 | Item | Verdict | Effort | Impact | Risk |
 |---|---|---|---|---|
-| FP8 (E4M3) precision path | RESEARCH-WORTH-A-SHOT | M | High if it works | High |
-| Custom fused FDR TensorRT plugin | HARDCORE-niche | XL | High if it works | High |
-| INT8 QAT / partial quantization via layer profiling | RESEARCH | L | Uncertain | Medium-high |
+| FP8 (E4M3) precision path | ❌ CLOSED-NEGATIVE (v0.3.0: −17.6 AP *and* 7-9% slower on GeForce Ada — [RESEARCH_MATRIX](RESEARCH_MATRIX.md)) | M | — | — |
+| Custom fused FDR TensorRT plugin | ❌ CLOSED (v0.3.0: Myelin already fuses deform to 16 kernels; ≤8% e2e ceiling) | XL | — | — |
+| INT8 QAT / partial quantization via layer profiling | ❌ CLOSED-NEGATIVE for PTQ (v0.3.0: best real engine 519 img/s < surgical 528/561 at −3.2 AP); QAT would need training, out of scope | L | — | — |
 | Object tracking (ByteTrack/BoT-SORT) + zone counting | WORTH-IT for video-analytics | M | High | Low |
 | DLA offload (Jetson) | NICHE (edge/robotics) | M | Medium | Medium (needs HW) |
 | DLPack zero-copy FFI | WORTH-IT-later | M | Medium | Low |
 | Encrypted-engine/TEE, declarative pipeline API, ORT/OpenVINO/CoreML fallback | SKIP / later | — | — | — |
 
-- **FP8 (E4M3).** INT8 failed because 8-bit *integer* quantization is too coarse for the FDR box-decode,
-  but FP8 E4M3 is a *floating*-point format (4 exponent / 3 mantissa bits) with native hardware support on
-  Ada. Its 3 mantissa bits are still below FP16's 10, so it will plausibly fail the same way BF16 did — but
-  it is a cheap, strongly-typed experiment (same recipe as the FP16 win) that could deliver up to a 2×
-  speedup over FP16 if the FDR turns out to tolerate it.
-- **Custom fused FDR TensorRT plugin.** Fuse Integral + distance2bbox + LQE into a single FP32 kernel so
-  the rest of the network can run INT8/FP16 while the FDR stays numerically exact — potentially *rescuing*
-  INT8 entirely. This deliberately reintroduces a custom plugin, the exact thing the explicit-gather export
-  was built to avoid, so it's a large, high-risk undertaking reserved for when the precision ceiling
-  actually blocks a use case.
-- **INT8 QAT / partial quantization.** Use polygraphy layer-profiling to separate INT8-tolerant backbone
-  layers from FDR-feeding, precision-sensitive ones, then build a mixed INT8/FP16/FP32 engine. This needs
-  retraining (QAT), which is beyond the scope of a pure inference library, and may not beat plain FP16 in
-  the end — but a reproducible script + writeup would be valuable to the wider quantization community even
-  if it doesn't ship as a default path.
+- **FP8 (E4M3) — measured and closed (v0.3.0).** Real TRT engines (modelopt QDQ, decoder excluded):
+  subset mAP 0.3909 (−17.6) *and* 7-9% slower than FP16-ST — GeForce Ada runs FP8 tensor cores at FP16
+  rate (FP8 mandates FP32 accumulation, halved on GeForce) so Q/DQ overhead buys nothing. A torch
+  ablation proved the accuracy loss is E4M3-mantissa-limited and calibration-invariant: only QAT could
+  help, out of scope. Numbers: [RESEARCH_MATRIX.md](RESEARCH_MATRIX.md).
+- **Custom fused FDR / deform plugin — measured and closed (v0.3.0).** Engine profiling shows Myelin
+  already fuses the explicit deform core into 16 kernels (~8-17.5% of GPU time); a perfect plugin caps
+  below that, and the FDR tail is only ~5.6%. The surgical-FP16 converter captured the actual win
+  (decoder FP16 with an FP32 FDR island) with zero plugins.
+- **INT8 — PTQ measured and closed (v0.3.0).** Best real engine (torch-side percentile calibration,
+  scale injection) reached 0.5190 full-val at 519 img/s — slower than surgical FP16 (528/561) with real
+  accuracy cost; the int8+surgical combo was slower still (486). The int8 conv gain is ~1.23× real on
+  Ada once Q/DQ overhead is paid. QAT needs training and is out of scope for an inference library.
 - **Object tracking.** ByteTrack or BoT-SORT plus zone counting / line-crossing turns the detector into a
   video-analytics building block, which is a natural, low-risk extension once the demo apps and streaming
   input exist.

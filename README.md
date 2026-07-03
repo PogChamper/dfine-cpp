@@ -2,7 +2,8 @@
 
 **Production C++/TensorRT inference for the [D-FINE](https://github.com/Peterande/D-FINE) object detector.**
 A zero-Python, OpenCV-free runtime that runs the full pipeline — CUDA preprocessing → TensorRT engine →
-C++ decode — at up to **1200+ FPS** on an RTX 4070 Ti SUPER, matching PyTorch mAP to **±0.001 AP**.
+C++ decode — at up to **1550+ FPS** (D-FINE-N) and **2.47 ms** end-to-end batch-1 latency on an
+RTX 4070 Ti SUPER, matching PyTorch mAP to within **0.002 AP** in the default configuration.
 
 <p align="center">
   <a href="#quickstart">Quickstart</a> ·
@@ -10,6 +11,7 @@ C++ decode — at up to **1200+ FPS** on an RTX 4070 Ti SUPER, matching PyTorch 
   <a href="#using-the-library">C++ API</a> ·
   <a href="#from-python">Python</a> ·
   <a href="#precision-guide">Precision</a> ·
+  <a href="docs/RESEARCH_MATRIX.md">Research matrix</a> ·
   <a href="docs/ROADMAP.md">Roadmap</a>
 </p>
 
@@ -21,23 +23,60 @@ C++ decode — at up to **1200+ FPS** on an RTX 4070 Ti SUPER, matching PyTorch 
 ![CUDA](https://img.shields.io/badge/CUDA-12.x-76B900?logo=nvidia&logoColor=white)
 
 ![PyTorch vs D-FINE-cpp throughput](assets/demo_video.gif)
-*Both panels race through the same clip at 10× slow motion; frame counters advance at each backend's
-measured e2e throughput (D-FINE-M, RTX 4070 Ti SUPER). Detections are identical — the C++ runtime
-produced both. Reproduce: `trt-files/scripts/make_demo_gif.py` (clip: Mixkit free license).*
+*All three panels race through the same clip at 12× slow motion; frame counters advance at each
+backend's measured batch-8 throughput (D-FINE-M, RTX 4070 Ti SUPER). Detections are identical —
+the C++ surgical-FP16 runtime produced every panel. Reproduce:
+`trt-files/scripts/make_demo_gif.py` (clip: Mixkit free license).*
 
-All five model sizes, C++ FP16, end-to-end (preprocess + inference + decode), full COCO val2017,
-RTX 4070 Ti SUPER:
+All five model sizes, three precision/speed tiers, end-to-end (preprocess + inference + decode),
+mAP on full COCO val2017, throughput = batch-8 img/s (medians of 3×500-iter rounds), RTX 4070 Ti SUPER.
+**surgical** = FP16 including the decoder (`convert_fp16_surgical.py`); **fast** = slim + export
+sliders (`--num-queries 200 --cascade 1:100`):
 
-| model | mAP (PyTorch ref) | e2e batch-1 | **FPS b1** | **FPS b8** | vs PyTorch b1 |
-|---|---|---|---|---|---|
-| D-FINE-N | 0.4280 (0.4279) | 2.2 ms | 453 | **1206** | 6.8× |
-| D-FINE-S | 0.5069 (0.5073) | 2.9 ms | 346 | 638 | 6.1× |
-| D-FINE-M | 0.5500 (0.5509) | 3.6 ms | 281 | 442 | 6.0× |
-| D-FINE-L | 0.5723 (0.5724) | 4.4 ms | 228 | 358 | 6.2× |
-| D-FINE-X | 0.5927 (0.5931) | 5.6 ms | 180 | 246 | 6.0× |
+| model | PyTorch mAP | prod fp16 b8 · mAP | **surgical b8 · mAP** | fast b8 · mAP |
+|---|---|---|---|---|
+| D-FINE-N | 0.4279 | 1234 · 0.4280 | **1309** · 0.4276 | **1556** · 0.4231 |
+| D-FINE-S | 0.5073 | 637 · 0.5069 | **758** · 0.5065 | **880** · 0.5021 |
+| D-FINE-M | 0.5509 | 469 · 0.5500 | **526** · 0.5502 | **598** · 0.5448 |
+| D-FINE-L | 0.5724 | 357 · 0.5723 | **390** · 0.5724 | **453** · 0.5647 |
+| D-FINE-X | 0.5931 | 244 · 0.5927 | **264** · 0.5929 | **292** · 0.5855 |
 
-Every number is reproducible with one command (`trt-files/scripts/overnight_bench.sh`); FP32 columns,
-per-batch scaling, and the Python-backend baselines are in [Benchmarks](#benchmarks).
+The release ships the **`--slim`** surgical variant (an even smaller FP32 island): separately
+gated lossless on all five sizes (full-val n 0.4272 / s 0.5060 / m 0.5500 / l 0.5723 / x 0.5926)
+and +2-3% faster at batch 8 where benched — the surgical column above is the conservative
+non-slim measurement.
+
+The full m ladder: **PyTorch 66 → 686 img/s (10.4×)** — fp32 230 → fp16 469 → surgical 526/561 →
+fast 598 → max preset 686 (fast + `--eval-idx 2` + `--opt-batch 8`, −0.89 AP). At the other end,
+the full-pipeline CUDA graph holds **2.47 ms** end-to-end batch-1 (byte-identical detections).
+Every cell — including b1/b2/b4, VRAM, and the failed experiments (FP8, INT8, plugins) — is in
+**[docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md)** with one-command reproduce paths.
+
+## Three commands to first detection (Python)
+
+No compiler, no OpenCV, no repo checkout — the wheel bundles the C++ runtime, the release ships the
+ONNX, and the engine compiles on your GPU in one command (a one-time 1-3 minutes):
+
+```sh
+pip install "dfine[tensorrt,cli] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine-0.3.0-py3-none-linux_x86_64.whl"
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.onnx \
+     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.json
+dfine build --model m --onnx dfine_m_slim.onnx --output dfine_m_slim.engine
+```
+
+```python
+from dfine import Detector
+
+det = Detector("dfine_m_slim.engine", threshold=0.5)
+detections = det.detect(frame)            # numpy HWC uint8 → [Detection(box, class_name, score)]
+```
+
+That engine is the lossless-FP16 production build (`--slim` surgical; full-val 0.5500, exactly the
+FP16 reference). Its tier measures 288 img/s at batch 1 and 526 at batch 8 on a 4070 Ti SUPER
+(PyTorch: 31 / 66; the slim build itself benched +2% over that b8 figure). The wheel's `libdfine.so` targets
+sm_89/linux_x86_64 — other GPUs/platforms build from source (`./build.sh`, then
+`pip install -e python/`), everything else stays identical. Notebook version:
+[examples/python_quickstart.ipynb](examples/python_quickstart.ipynb).
 
 ---
 
@@ -58,7 +97,8 @@ and ships a lean, dependency-light C++ runtime:
 
 ## Quickstart
 
-Prebuilt ONNX for all five sizes — FP32 and strongly-typed FP16, each with the `.json` sidecar the engine
+Prebuilt ONNX for all five sizes — the FP32 opset-19 base (`dfine_<size>_op19`) and the
+surgical-FP16 production build (`dfine_<size>_slim`), each with the `.json` sidecar the engine
 build needs, plus `SHA256SUMS` — is attached to
 [GitHub Releases](https://github.com/PogChamper/dfine-cpp/releases). TensorRT engines are
 GPU-arch- and TRT-version-specific, so you compile the engine locally from the ONNX — that is why we ship
@@ -73,19 +113,23 @@ cmake -B build -S . -DCMAKE_CUDA_ARCHITECTURES=native   # [-DTENSORRT_DIR=/path/
 cmake --build build -j
 
 # 2. Get the prebuilt ONNX + sidecar, build an engine on your GPU
-#    (fp16_st is the recommended production build — strongly-typed, decoder kept FP32)
-curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.2.0/dfine_m_fp16_st.onnx
-curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.2.0/dfine_m_fp16_st.json
+#    (slim is the recommended production build — surgical FP16, lossless full-val on all 5 sizes)
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.onnx
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.json
 python trt-files/scripts/build_engine.py --strongly-typed --no-tf32 --max-batch 8 \
-    --onnx dfine_m_fp16_st.onnx --output trt-files/engines/dfine_m_fp16_st.engine
+    --onnx dfine_m_slim.onnx --output trt-files/engines/dfine_m_slim.engine
+#   (add --opt-batch 8 for batch serving: +6-10% b8 throughput, costs some b1 latency)
 
 # 3. Run — libnvinfer/libcudart must be on LD_LIBRARY_PATH; any TensorRT 10.x libs work,
 #    e.g. `python -m pip install "tensorrt==10.13.*"` then the venv's .../site-packages/tensorrt_libs
 export LD_LIBRARY_PATH=/path/to/tensorrt/lib:$LD_LIBRARY_PATH
-./build/dfine_detect --engine trt-files/engines/dfine_m_fp16_st.engine --image dog.jpg --threshold 0.5
+./build/dfine_detect --engine trt-files/engines/dfine_m_slim.engine --image dog.jpg --threshold 0.5
 ```
 
-For an FP32 engine, drop `--strongly-typed` and point `--onnx` at the fp32 file (`dfine_m.onnx`).
+For an FP32 engine, drop `--strongly-typed` and point `--onnx` at the base file
+(`dfine_m_op19.onnx`). The v0.2.0 `fp16_st` assets (decoder kept FP32) remain on the
+[v0.2.0 release](https://github.com/PogChamper/dfine-cpp/releases/tag/v0.2.0) and are still a
+valid, slightly slower build.
 
 ### Docker
 
@@ -106,11 +150,20 @@ repo [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) — for this step only; 
 
 ```sh
 git clone https://github.com/ArgoHA/D-FINE-seg                       # export-time dependency only
-python trt-files/scripts/export_dfine_onnx.py --model-name m \
-    --checkpoint dfine_m_obj2coco.pt --dfine-src ./D-FINE-seg        # -> trt-files/onnx/dfine_m.onnx + .json
-python trt-files/scripts/convert_fp16.py \
-    --output trt-files/onnx/dfine_m_fp16_st.onnx                     # FP32 -> strongly-typed FP16 ONNX
+python trt-files/scripts/export_dfine_onnx.py --model-name m --opset 19 \
+    --checkpoint dfine_m_obj2coco.pt --dfine-src ./D-FINE-seg \
+    --output trt-files/onnx/dfine_m_op19.onnx                        # FP32 base + .json sidecar
+python trt-files/scripts/convert_fp16_surgical.py --slim \
+    --onnx trt-files/onnx/dfine_m_op19.onnx \
+    --output trt-files/onnx/dfine_m_slim.onnx                        # production surgical FP16
 ```
+
+`--opset 19` matters: the surgical converter refuses opset-16 exports (their decomposed LayerNorm
+is miscompiled by TensorRT in FP16 — see the [Precision guide](#precision-guide)). The export also
+takes accuracy/speed sliders (`--num-queries`, `--eval-idx`, `--cascade K:KEEP`) that shrink the
+graph itself — the `fast` column in the hero table is `--num-queries 200 --cascade 1:100`; the
+cost/gain of every slider is tabulated in [docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md).
+The older `convert_fp16.py` (decoder kept FP32) remains the fallback for opset-16 exports.
 
 Standard checkpoints (`dfine_<size>_<dataset>.pt`) can be fetched from Hugging Face with D-FINE-seg's
 `ensure_pretrained` helper (`src/d_fine/utils.py` in that repo); nano has no obj2coco checkpoint — use
@@ -120,9 +173,13 @@ wraps the same script.
 ## Benchmarks
 
 ![Throughput over COCO stills](assets/demo.gif)
-*The same comparison over COCO val2017 stills — one wall-clock window, per-backend frame counters.*
+*D-FINE-N over COCO val2017 stills at 30× slow motion: the `fast`-preset engine (1556 img/s b8)
+against PyTorch FP32 (191 img/s b8, measured with `profile.py --backends torch --model-name n`);
+identical detections both panels.*
 
-RTX 4070 Ti SUPER · COCO val2017 (5000 imgs) · D-FINE-M · latency = e2e p50 ms (preprocess+infer+decode).
+RTX 4070 Ti SUPER · COCO val2017 (5000 imgs) · D-FINE-M · latency = e2e p50 ms
+(preprocess+infer+decode). Measured with `profile.py` in the v0.2.0 session — a couple of percent
+below the hero table's newer 3-round `dfine_bench` medians for the same engines.
 
 | backend | e2e (b1) | **FPS b1** | **FPS b8** | GPU MiB | mAP |
 |---|---|---|---|---|---|
@@ -206,11 +263,12 @@ A dependency-light [`dfine`](python/) package wraps the C ABI via `ctypes` (no c
 prebuilt `.so`). See [`python/README.md`](python/README.md).
 
 ```sh
-pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.2.0/dfine-0.2.0-py3-none-linux_x86_64.whl"
+pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine-0.3.0-py3-none-linux_x86_64.whl"
 ```
 
-The wheel bundles `libdfine.so` built for sm_89 / linux_x86_64; other GPUs and platforms build from
-source (`./build.sh`, then `pip install -e python/`).
+The wheel bundles `libdfine.so` built for sm_89 / linux_x86_64 plus a snapshot of
+`build_engine.py`, so `dfine build` works without a repo checkout; other GPUs and platforms build
+from source (`./build.sh`, then `pip install -e python/`).
 
 ```python
 import numpy as np
@@ -265,24 +323,46 @@ reproduces the host reference to +0.0002 AP.
 
 ## Precision guide
 
-| mode | mAP | speed | how |
+| mode | mAP (full-val, m) | b8 vs FP32 | how |
 |---|---|---|---|
-| **FP32** | reference | 1× | `build_engine.py --no-tf32` |
-| **FP16** ✅ | −0.2% | 1.6–2.2× | `convert_fp16.py` → `build_engine.py --strongly-typed` (**not** the `kFP16` flag) |
-| BF16 | −27 AP | — | rejected: D-FINE's FDR needs mantissa precision |
-| INT8 | −44 AP | — | rejected: 8-bit too coarse for the FDR (`convert_int8.py` kept for reference) |
+| **FP32** | 0.5506 | 1× | `build_engine.py --no-tf32` |
+| FP16 (decoder FP32) | 0.5500 | 2.0× | `convert_fp16.py` → `build_engine.py --strongly-typed` (**not** the `kFP16` flag) |
+| **surgical FP16** ✅ | lossless, all 5 sizes (m: 0.5502 surgical / 0.5500 `--slim`) | 2.3× (2.4× opt8) | opset-19 export → `convert_fp16_surgical.py` (release ships `--slim`) |
+| FP8 | −17.6 AP (subset) | 1.8× (7-9% *slower* than FP16) | rejected: E4M3 mantissa + GeForce Ada runs FP8 at FP16 rate |
+| INT8 | −3.2 AP | 2.26× | rejected: slower than surgical FP16 with real accuracy cost (`convert_int8.py` kept for reference) |
+| BF16 | −0.0012 (sim) | — | no win over FP16 paths; the old "−27 AP" was a weak-typing artifact |
+
+**Opset 19 is mandatory for surgical FP16**: opset-16 exports decompose LayerNorm into primitive
+ops, and TensorRT 10.13 miscompiles that decomposition in FP16 (mAP collapses to ~0.005 while
+ONNXRuntime stays healthy — a TRT-side bug; minimal repro archived, NVIDIA report in preparation).
+The converter hard-errors on opset < 19.
+
+**Export sliders** — accuracy you can trade back for speed at export time (numbers: m, full-val,
+b8; gains relative to the surgical b8 median of 526 img/s; all five sizes and every
+hyperparameter point in [docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md)):
+
+| slider | cost | gain | note |
+|---|---|---|---|
+| `--cascade 1:150` | −0.18 AP | +8% | top-150 queries after layer 1, ranked by the trained aux head — the best single slider |
+| `--num-queries 200` | −0.13 AP | +7% | decode cost halves; near-free on few-class fine-tunes |
+| `--eval-idx 2` | −0.57 AP | +4% | drops a decoder layer; best b1 latency without a CUDA graph |
+| `fast` = Q200+cascade 1:100 | −0.44…−0.77 AP | +10…21% | the hero-table column |
+| `max` = fast + E2 + `--opt-batch 8` | −0.89 AP | +46% vs prod (686 img/s) | m ladder top, 10.4× PyTorch |
 
 The through-line: **D-FINE's FDR box-decode is acutely FP-precision-sensitive** — it amplifies tiny
-upstream rounding into box error. That single fact explains the grid_sample trap, the kFP16-flag trap, and why
-BF16/INT8 fail. Full forensics in [docs/impl/M0_STATUS.md](docs/impl/M0_STATUS.md) and
-[docs/HANDOFF.md](docs/HANDOFF.md).
+upstream rounding into box error. That single fact explains the grid_sample trap, the kFP16-flag
+trap, the surgical converter's FP32 island (FDR scopes + deform *index* math), and why FP8/INT8
+fail here. Full forensics in [docs/impl/M0_STATUS.md](docs/impl/M0_STATUS.md),
+[docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md), and [docs/HANDOFF.md](docs/HANDOFF.md).
 
 ## Status & roadmap
 
 **Done & validated:** M0 (export→engine→validate, all 5 sizes) · M1 (C++ detector, AP 0.5506 == reference) ·
-M2 (FP16 + CUDA-graph; INT8 investigated & rejected) · **M4 bindings** (stable C ABI + Python `ctypes`
-package + zero-setup `dfine` CLI — detections byte-identical to the C++ path) · **intensive-core P1–P3**
-(GPU decode, `freeze()`, full-pipeline graph; P4 pending) · optional letterbox preprocessing.
+M2 (FP16 + CUDA-graph) · **M4 bindings** (stable C ABI + Python `ctypes` package + zero-setup `dfine`
+CLI — detections byte-identical to the C++ path) · **intensive-core P1–P3** (GPU decode, `freeze()`,
+full-pipeline graph) · optional letterbox preprocessing · **v0.3.0 precision campaign** (surgical FP16
+lossless on all five sizes, export sliders, cascade pruning; FP8/INT8/deform-plugin closed with
+measurements — [docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md)).
 M3 instance segmentation is shelved. Next: a WASM/WebGPU browser demo and real-time video apps — see
 **[docs/ROADMAP.md](docs/ROADMAP.md)** and [docs/HANDOFF.md](docs/HANDOFF.md) for the single source of
 truth on the current state.

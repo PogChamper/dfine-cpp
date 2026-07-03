@@ -6,13 +6,28 @@ TensorRT inference, and decode run in native code — Python only marshals image
 bytes in and detections out. No compile step: it loads the prebuilt shared
 library at import.
 
+## From zero to detections (no repo checkout)
+
+```sh
+pip install "dfine[tensorrt,cli] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine-0.3.0-py3-none-linux_x86_64.whl"
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.onnx \
+     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.json
+dfine build --model m --onnx dfine_m_slim.onnx --output dfine_m_slim.engine
+```
+
+The wheel bundles `libdfine.so` (sm_89 / linux_x86_64) and a snapshot of
+`build_engine.py`, so `dfine build` compiles the engine on your GPU without the
+repo. `dfine_m_slim` is the surgical-FP16 production ONNX — lossless full-val
+mAP (0.5500, exactly the FP16 reference); its tier measures 526 img/s batch-8
+on a 4070 Ti SUPER. Then:
+
 ```python
 import numpy as np
 from dfine import Detector
 
 img = np.asarray(...)            # HWC uint8, RGB (or is_bgr=True for BGR)
 
-with Detector("dfine_m_fp16_st.engine", threshold=0.4) as det:
+with Detector("dfine_m_slim.engine", threshold=0.4) as det:
     print(det.variant, det.input_width, det.num_classes)     # 'm' 640 80
     for d in det.detect(img):
         print(d.class_name, round(d.score, 3), d.box.as_tuple())
@@ -20,6 +35,8 @@ with Detector("dfine_m_fp16_st.engine", threshold=0.4) as det:
     # Batch (engine must be built with max_batch >= len(images)):
     results = det.detect_batch([img, img])   # list[list[Detection]]
 ```
+
+Notebook walkthrough: [../examples/python_quickstart.ipynb](../examples/python_quickstart.ipynb).
 
 `Detector.detect()` returns a `list[Detection]`, each with `class_id` (dense
 COCO-80 index — no background slot), `score`, `box` (xyxy pixel coords), and
@@ -30,7 +47,7 @@ The frozen single-launch pipeline and letterbox preprocessing are reachable
 directly from Python (C ABI v2):
 
 ```python
-det = Detector("dfine_m_fp16_st.engine",           # --max-aux-streams 0 build
+det = Detector("dfine_m_slim.engine",              # --max-aux-streams 0 build
                gpu_decode=True, own_device_memory=True, full_pipeline_graph=True)
 det.freeze(1, src_w=1920, src_h=1080)              # warm + capture + lock
 det.full_pipeline_graph_active                     # True -> one cudaGraphLaunch/frame
@@ -51,7 +68,7 @@ Stretch stays the default — it is D-FINE's training convention and measures
   install the Releases wheel with the `[tensorrt]` extra —
 
   ```sh
-  pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.2.0/dfine-0.2.0-py3-none-linux_x86_64.whl"
+  pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine-0.3.0-py3-none-linux_x86_64.whl"
   ```
 
   (the extra pulls the `tensorrt` pip wheel; the bindings best-effort preload

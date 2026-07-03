@@ -10,6 +10,10 @@ The FDR/Integral/LQE box decode and the deformable attention stay inside the gra
 regardless of this choice; ``model.deploy()`` folds the weighting vector and truncates
 the decoder to its evaluation layers.
 
+Optional accuracy/speed sliders (``--num-queries``, ``--eval-idx``, ``--cascade``)
+reshape the decoder before deploy/tracing; the measured cost/gain of each (and of the
+composed ``fast``/``max`` presets) is tabulated in docs/RESEARCH_MATRIX.md.
+
 A JSON sidecar with the same stem describes the engine contract (input geometry,
 normalization, per-variant constants) so the C++ runtime stays model-generic.
 
@@ -119,6 +123,113 @@ def _scalar(value) -> float:
     return float(t[0])
 
 
+# --- Export-time accuracy/speed sliders ----------------------------------------------
+# Three optional decoder reshapes, applied to the torch model AFTER the checkpoint is
+# loaded and BEFORE model.deploy(), so the exported graph itself is smaller — nothing is
+# masked at runtime. Measured trade-offs (COCO full-val, RTX 4070 Ti SUPER, batch 8):
+# docs/RESEARCH_MATRIX.md. All three compose (the `fast`/`max` presets in the README).
+
+
+def _parse_cascade(spec: str) -> tuple[int, int]:
+    try:
+        k, keep = (int(v) for v in spec.split(":"))
+    except ValueError:
+        raise SystemExit(f"--cascade wants K:KEEP (e.g. 1:150), got {spec!r}") from None
+    return k, keep
+
+
+def patch_cascade(model: nn.Module, k: int, keep: int) -> None:
+    """Prune to the top-``keep`` queries after decoder layer ``k``.
+
+    Queries are ranked by layer ``k``'s trained deep-supervision score head — a
+    ranking head the standard deploy path folds away, which is why the head is
+    deep-copied here, before ``model.deploy()`` truncates the aux heads. The decoder
+    forward is replaced by a deploy-mode equivalent that TopK+Gathers every per-query
+    tensor after layer ``k``, so layers ``k+1..eval_idx`` (self-attention is O(Q²))
+    and the output decode run on ``keep`` queries instead of ``num_queries``.
+    """
+    import copy
+    import types
+
+    import torch.nn.functional as F
+
+    chead = copy.deepcopy(model.decoder.dec_score_head[k]).eval().requires_grad_(False)
+
+    def _cascade_forward(self, target, ref_points_unact, memory, spatial_shapes,
+                         bbox_head, score_head, query_pos_head, pre_bbox_head,
+                         integral, up, reg_scale, attn_mask=None, memory_mask=None,
+                         return_queries=False):
+        from src.d_fine.arch.utils import distance2bbox, inverse_sigmoid
+        output = target
+        output_detach = pred_corners_undetach = 0
+        value = self.value_op(memory, None, None, memory_mask, spatial_shapes)
+        project = self.project
+        ref_points_detach = F.sigmoid(ref_points_unact)
+        for i, layer in enumerate(self.layers):
+            ref_points_input = ref_points_detach.unsqueeze(2)
+            query_pos_embed = query_pos_head(ref_points_detach).clamp(min=-10, max=10)
+            output = layer(output, ref_points_input, value, spatial_shapes, attn_mask, query_pos_embed)
+            if i == 0:
+                pre_bboxes = F.sigmoid(pre_bbox_head(output) + inverse_sigmoid(ref_points_detach))
+                ref_points_initial = pre_bboxes.detach()
+            pred_corners = bbox_head[i](output + output_detach) + pred_corners_undetach
+            inter_ref_bbox = distance2bbox(ref_points_initial, integral(pred_corners, project),
+                                           reg_scale, deploy=True)
+            if i == self.eval_idx:
+                scores = score_head[i](output)
+                scores = self.lqe_layers[i](scores, pred_corners)
+                return (inter_ref_bbox.unsqueeze(0), scores.unsqueeze(0),
+                        pred_corners.unsqueeze(0), ref_points_initial.unsqueeze(0),
+                        pre_bboxes, None, None)
+            pred_corners_undetach = pred_corners
+            ref_points_detach = inter_ref_bbox.detach()
+            output_detach = output.detach()
+            if i == k:
+                rank = F.sigmoid(chead(output)).amax(-1)                # [B, Q]
+                keep_idx = rank.topk(keep, dim=1).indices               # [B, keep]
+
+                def _g(t):
+                    return t.gather(1, keep_idx.unsqueeze(-1).expand(-1, -1, t.shape[-1]))
+
+                output = _g(output)
+                output_detach = _g(output_detach)
+                pred_corners_undetach = _g(pred_corners_undetach)
+                ref_points_detach = _g(ref_points_detach)
+                ref_points_initial = _g(ref_points_initial)
+        raise RuntimeError("cascade forward: eval_idx not reached")
+
+    model.decoder.decoder.forward = types.MethodType(_cascade_forward, model.decoder.decoder)
+
+
+def apply_sliders(model: nn.Module, args: argparse.Namespace) -> None:
+    n_layers = len(model.decoder.decoder.layers)
+    if args.eval_idx is not None:
+        if not 0 <= args.eval_idx < n_layers:
+            raise SystemExit(f"--eval-idx {args.eval_idx} out of range [0, {n_layers})")
+        # deploy() truncates the layer stack to eval_idx+1, so this shrinks the graph
+        model.decoder.eval_idx = args.eval_idx
+        model.decoder.decoder.eval_idx = args.eval_idx
+        print(f"[sliders] eval_idx -> {args.eval_idx} (deploy keeps {args.eval_idx + 1} decoder layers)")
+    if args.num_queries is not None:
+        if args.num_queries <= 0:
+            raise SystemExit(f"--num-queries must be positive, got {args.num_queries}")
+        model.decoder.num_queries = args.num_queries
+        print(f"[sliders] num_queries -> {args.num_queries}")
+    if args.cascade:
+        k, keep = _parse_cascade(args.cascade)
+        eval_idx = int(model.decoder.eval_idx)
+        if eval_idx < 0:
+            eval_idx += n_layers
+        nq = int(model.decoder.num_queries)
+        if not 0 <= k < eval_idx:
+            raise SystemExit(f"--cascade layer K={k} must satisfy 0 <= K < eval_idx ({eval_idx}); "
+                             "pruning at or after the scoring layer is a no-op")
+        if not 0 < keep < nq:
+            raise SystemExit(f"--cascade KEEP={keep} must be in (0, num_queries={nq})")
+        patch_cascade(model, k, keep)
+        print(f"[sliders] cascade: prune to top-{keep} queries after decoder layer {k}")
+
+
 # COCO-80 display names in contiguous-id order (matches include/dfine/core/coco_classes.hpp).
 COCO80_NAMES = [
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
@@ -154,6 +265,10 @@ def _collect_meta(model: nn.Module, args: argparse.Namespace) -> dict:
     enc = model.encoder
     eval_idx = int(getattr(dec, "eval_idx"))
     class_names = _resolve_class_names(args)
+    cascade = _parse_cascade(args.cascade) if args.cascade else None
+    # With a cascade the graph outputs KEEP queries, not the decoder's initial count —
+    # the sidecar must describe the engine contract, so num_queries follows the output.
+    num_queries_out = cascade[1] if cascade else int(dec.num_queries)
     return {
         "model": "d-fine",
         "variant": args.model_name,
@@ -161,7 +276,9 @@ def _collect_meta(model: nn.Module, args: argparse.Namespace) -> dict:
         "input_h": args.img_size,
         "input_w": args.img_size,
         "num_classes": args.num_classes,
-        "num_queries": int(dec.num_queries),
+        "num_queries": num_queries_out,
+        **({"cascade": args.cascade,
+            "cascade_initial_queries": int(dec.num_queries)} if cascade else {}),
         "reg_max": int(dec.reg_max),
         "reg_scale": round(_scalar(dec.reg_scale), 6),
         "num_decoder_layers": len(dec.decoder.layers),
@@ -171,8 +288,8 @@ def _collect_meta(model: nn.Module, args: argparse.Namespace) -> dict:
         "feat_strides": list(getattr(enc, "feat_strides", [])),
         "input_names": ["images"],
         "output_names": ["logits", "boxes"],
-        "logits_shape": ["N", int(dec.num_queries), args.num_classes],
-        "boxes_shape": ["N", int(dec.num_queries), 4],
+        "logits_shape": ["N", num_queries_out, args.num_classes],
+        "boxes_shape": ["N", num_queries_out, 4],
         "box_format": "cxcywh_normalized",
         "score_activation": "sigmoid",
         "color_order": "RGB",
@@ -214,6 +331,7 @@ def build_detection_model(args: argparse.Namespace, device: torch.device) -> nn.
     if not ckpt.exists():
         raise FileNotFoundError(f"checkpoint not found: {ckpt}")
     model = load_tuning_state(model, str(ckpt))
+    apply_sliders(model, args)
     return model.to(device)
 
 
@@ -396,6 +514,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-simplify", action="store_true")
     p.add_argument("--deform", default="explicit", choices=["explicit", "gridsample"],
                    help="explicit gather-bilinear (TRT-accurate, default) vs native GridSample (~10 AP loss on TRT)")
+    sliders = p.add_argument_group(
+        "accuracy/speed sliders",
+        "optional decoder reshapes baked into the export; measured cost/gain tables in "
+        "docs/RESEARCH_MATRIX.md (m/COCO full-val/b8: --num-queries 200 = -0.13 AP, "
+        "--cascade 1:150 = -0.18 AP +8%, --eval-idx 2 = -0.57 AP; composed presets "
+        "reach +21..46% throughput)")
+    sliders.add_argument("--num-queries", type=int, default=None,
+                         help="initial decoder queries (default: the checkpoint's 300); "
+                              "200 halves the decode cost at -0.13 AP")
+    sliders.add_argument("--eval-idx", type=int, default=None,
+                         help="decoder layer that produces the output; deploy() drops "
+                              "the layers after it (m: 2 keeps 3 of 4 layers, -0.57 AP)")
+    sliders.add_argument("--cascade", default=None, metavar="K:KEEP",
+                         help="after decoder layer K, keep only the top-KEEP queries "
+                              "ranked by layer K's trained score head (1:150 = -0.18 AP, "
+                              "+8%% b8 on m)")
     return p.parse_args()
 
 

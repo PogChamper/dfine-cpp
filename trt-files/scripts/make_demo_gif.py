@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Render the README side-by-side throughput demo (gif + mp4), headless.
 
-Two panels play back the same image stream over the same (slowed-down) wall
-clock; each panel advances at ITS backend's measured throughput (--left-fps /
---right-fps, taken from the benchmark table — this script does not measure).
-The timeline runs at --slowmo x slow motion: at real speed both backends
-exceed the display frame rate and the panels would look identical; slowed
-10x, the left panel visibly lingers on each frame while the right one streams.
-Boxes come from a single detection pass with the C++ runtime via the Python
-bindings, so both panels show identical, real detections; only the playback
-rate differs. The footer states exactly that.
+Each panel plays back the same image stream over the same (slowed-down) wall
+clock and advances at ITS backend's measured throughput (--left-fps /
+--right-fps, or N repeatable --panel LABEL:FPS specs — taken from the
+benchmark table; this script does not measure). The timeline runs at
+--slowmo x slow motion: at real speed the backends exceed the display frame
+rate and the panels would look identical; slowed 10x, the left panel visibly
+lingers on each frame while the right one streams. Boxes come from a single
+detection pass with the C++ runtime via the Python bindings, so every panel
+shows identical, real detections; only the playback rate differs. The footer
+states exactly that.
 
 usage:
   LD_LIBRARY_PATH=<tensorrt_libs> python make_demo_gif.py \
@@ -18,6 +19,7 @@ usage:
       --left-fps 31 --right-fps 272 \
       --left-label "PyTorch FP32" --right-label "D-FINE-cpp FP16" \
       --seconds 8 --out-dir /tmp/demo
+  # 3+ panels: --panel "PyTorch FP32:66" --panel "surgical+slim:533" --panel "fast:598"
 
 Requires: pillow, numpy, ffmpeg on PATH, the dfine Python package importable
 (PYTHONPATH=python) and libdfine.so discoverable (DFINE_LIBRARY or build/).
@@ -107,16 +109,40 @@ def main() -> int:
     ap.add_argument("--credit", default="", help="source credit appended to the caption")
     ap.add_argument("--limit", type=int, default=400)
     ap.add_argument("--threshold", type=float, default=0.5)
-    ap.add_argument("--left-fps", type=float, required=True)
-    ap.add_argument("--right-fps", type=float, required=True)
+    ap.add_argument("--left-fps", type=float)
+    ap.add_argument("--right-fps", type=float)
     ap.add_argument("--left-label", default="PyTorch FP32")
     ap.add_argument("--right-label", default="D-FINE-cpp FP16")
+    ap.add_argument("--panel", action="append", metavar="LABEL:FPS",
+                    help="repeatable panel spec, left to right; overrides --left-*/--right-*")
     ap.add_argument("--seconds", type=float, default=8.0, help="output clip duration")
     ap.add_argument("--slowmo", type=float, default=10.0,
                     help="slow-motion factor (simulated wall time = seconds / slowmo)")
     ap.add_argument("--gpu-name", default="RTX 4070 Ti SUPER")
+    ap.add_argument("--model-name", default="D-FINE-M", help="model name shown in the caption")
     ap.add_argument("--out-dir", default="demo_out")
     args = ap.parse_args()
+
+    if args.panel:
+        panels = []
+        for spec in args.panel:
+            label, sep, fps_str = spec.rpartition(":")
+            try:
+                fps = float(fps_str)
+            except ValueError:
+                sep = ""
+            if not sep or not label:
+                print(f"bad --panel spec {spec!r} (want LABEL:FPS)", file=sys.stderr)
+                return 1
+            panels.append((label, fps))
+        if len(panels) < 2:
+            print("need at least two --panel LABEL:FPS specs", file=sys.stderr)
+            return 1
+    elif args.left_fps is not None and args.right_fps is not None:
+        panels = [(args.left_label, args.left_fps), (args.right_label, args.right_fps)]
+    else:
+        print("need --left-fps and --right-fps, or 2+ --panel specs", file=sys.stderr)
+        return 1
 
     out = Path(args.out_dir)
     (out / "frames").mkdir(parents=True, exist_ok=True)
@@ -137,11 +163,11 @@ def main() -> int:
     font = load_font(16)
     font_small = load_font(11)
     n_frames = int(args.seconds * DISPLAY_FPS)
-    W = PANEL_W * 2 + 12
+    W = PANEL_W * len(panels) + 12 * (len(panels) - 1)
     H = PANEL_H + HEADER_H + FOOTER_H
     src = "video" if args.video else "COCO val2017"
-    caption = (f"{args.slowmo:g}x slow motion · {src} · D-FINE-M · {args.gpu_name} · "
-               f"identical detections both panels (C++ runtime); frame counters advance at each "
+    caption = (f"{args.slowmo:g}x slow motion · {src} · {args.model_name} · {args.gpu_name} · "
+               f"identical detections all panels (C++ runtime); frame counters advance at each "
                f"backend's measured e2e throughput"
                + (f" · {args.credit}" if args.credit else ""))
 
@@ -149,8 +175,7 @@ def main() -> int:
     for f in range(n_frames):
         t = f / DISPLAY_FPS / args.slowmo  # simulated wall-clock seconds
         canvas = Image.new("RGB", (W, H), (10, 10, 10))
-        for side, (label, fps) in enumerate(
-            [(args.left_label, args.left_fps), (args.right_label, args.right_fps)]):
+        for side, (label, fps) in enumerate(panels):
             processed = int(t * fps)
             img, dets = data[processed % len(data)]
             panel = draw_panel(img, dets, label, fps, processed, font, font_small)
@@ -170,12 +195,13 @@ def main() -> int:
     def ff(args_):
         subprocess.run(["ffmpeg", "-y", "-loglevel", "warning", *args_], check=True, env=env)
 
+    gif_w = 420 * len(panels)  # 420 px per panel keeps the 2-panel gif at its historical 840
     seq = ["-framerate", fr, "-i", str(out / "frames" / "f%05d.png")]
     ff([*seq, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "24", str(mp4)])
-    ff([*seq, "-vf", "fps=12,scale=840:-1:flags=lanczos,palettegen",
+    ff([*seq, "-vf", f"fps=12,scale={gif_w}:-1:flags=lanczos,palettegen",
         "-frames:v", "1", "-update", "1", str(palette)])
     ff([*seq, "-i", str(palette),
-        "-lavfi", "fps=12,scale=840:-1:flags=lanczos[x];[x][1:v]paletteuse", str(gif)])
+        "-lavfi", f"fps=12,scale={gif_w}:-1:flags=lanczos[x];[x][1:v]paletteuse", str(gif)])
     for p in (mp4, gif):
         print(f"[demo] {p}  {p.stat().st_size / 1e6:.1f} MB")
     return 0

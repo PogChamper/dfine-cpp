@@ -23,12 +23,13 @@ cd "$(dirname "$0")"  # python/
 REPO=$(cd .. && pwd)
 PYTHON=${PYTHON:-python3}
 BUNDLED=dfine/libdfine.so
+BUNDLED_SCRIPTS=dfine/_scripts
 
 # The .so lives in dfine/ only for the duration of the build; remove it on any
 # exit so the dev tree stays clean and stale copies can't leak into later wheels.
 # Also drop setuptools' staging dirs (python/build, dfine.egg-info) — only
 # dist/ is the product. NB: "build" here is python/build, not the C++ ../build.
-cleanup() { rm -rf "$BUNDLED" build dfine.egg-info; }
+cleanup() { rm -rf "$BUNDLED" "$BUNDLED_SCRIPTS" build dfine.egg-info; }
 trap cleanup EXIT
 
 "$PYTHON" -c "import build" 2>/dev/null \
@@ -46,6 +47,12 @@ fi
 # chain, wheels (zip) cannot hold symlinks, and _ffi.py loads the literal name
 # libdfine.so. One real file avoids shipping three copies.
 cp -L "$REPO/build/libdfine.so" "$BUNDLED"
+
+# Snapshot the self-contained engine-build script so a wheel-only install can go
+# release-ONNX -> .engine (`dfine build --onnx ...`) without a repo checkout.
+# cli.py prefers the dev tree when present, so the snapshot never shadows it.
+mkdir -p "$BUNDLED_SCRIPTS"
+cp "$REPO/trt-files/scripts/build_engine.py" "$BUNDLED_SCRIPTS/"
 
 "$PYTHON" -m build --wheel --outdir dist .
 

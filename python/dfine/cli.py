@@ -24,7 +24,12 @@ from typing import Optional
 
 MODELS = ("n", "s", "m", "l", "x")
 _ENGINE_SUFFIX = {"fp32": "fp32", "fp16": "fp16_st"}
-_ONNX_SUFFIX = {"fp32": "", "fp16": "_fp16_st"}
+# ONNX stem suffixes tried per precision, in preference order. `_fp16_st` stays first:
+# it is the name `dfine export --precision fp16` writes, and a user's own export must
+# keep beating a downloaded stock asset. `_slim` (the v0.3.0 release surgical FP16) and
+# `_op19` (the release FP32 base) are found when they are the only candidates;
+# _find_onnx warns whenever several names match.
+_ONNX_SUFFIXES = {"fp32": ("", "_op19"), "fp16": ("_fp16_st", "_slim")}
 # Known D-FINE-seg checkpoints (relative to the seg source dir).
 _CHECKPOINTS = {
     "n": "dfine_n_coco.pt",
@@ -108,12 +113,21 @@ def _cache_engine_path(model: str, precision: str) -> Path:
 def _find_onnx(model: str, precision: str, onnx_arg: Optional[str]) -> Optional[Path]:
     if onnx_arg:
         p = Path(onnx_arg)
-        return p if p.exists() else None
-    name = f"dfine_{model}{_ONNX_SUFFIX[precision]}.onnx"
+        if not p.exists():
+            raise SystemExit(f"ONNX not found: {p}")
+        return p
+    # Location-major (the cache holds user-produced exports and must keep shadowing the
+    # dev tree, as in v0.2); within a location, prefer the newer release naming.
+    candidates = []
     for base in (_cache_dir(), (_repo_root() / "trt-files" / "onnx") if _repo_root() else None):
-        if base and (base / name).exists():
-            return base / name
-    return None
+        for suffix in _ONNX_SUFFIXES[precision]:
+            name = f"dfine_{model}{suffix}.onnx"
+            if base and (base / name).exists():
+                candidates.append(base / name)
+    if len(candidates) > 1:
+        others = ", ".join(str(c) for c in candidates[1:])
+        print(f"[dfine] using {candidates[0]} (also found: {others} — pass --onnx to override)")
+    return candidates[0] if candidates else None
 
 
 def _resolve_engine(
@@ -168,20 +182,61 @@ def _scripts_dir() -> Path:
     return repo / "trt-files" / "scripts"
 
 
-def _build_engine(onnx: Path, output: Path, precision: str, max_batch: int) -> Path:
+def _build_engine_script() -> Path:
+    """build_engine.py from the dev tree, or the copy the wheel bundles.
+
+    The script is self-contained (tensorrt + stdlib only), so bundling a snapshot
+    lets a wheel-only install go release-ONNX -> engine without a repo checkout.
+    """
+    if _repo_root():
+        return _scripts_dir() / "build_engine.py"
+    bundled = Path(__file__).resolve().parent / "_scripts" / "build_engine.py"
+    if bundled.exists():
+        return bundled
+    raise SystemExit(
+        "build_engine.py not found — this install has neither the dev tree "
+        "(trt-files/scripts) nor the wheel-bundled copy (dfine/_scripts)"
+    )
+
+
+def _check_onnx_precision(onnx: Path, precision: str) -> None:
+    """Refuse a silent precision mismatch: a strongly-typed build follows the ONNX
+    tensor types, so requesting fp16 on an FP32-typed export (or vice versa) would
+    quietly produce an engine of the other precision. The sidecar records what the
+    converter produced; without one we cannot tell, so no check."""
+    sidecar = onnx.with_suffix(".json")
+    if not sidecar.exists():
+        return
+    try:
+        actual = json.loads(sidecar.read_text()).get("precision", "fp32")
+    except (OSError, ValueError):
+        return
+    if actual != precision:
+        raise SystemExit(
+            f"{onnx.name} is an {actual} export (per its sidecar) but --precision is "
+            f"{precision}; pass --precision {actual} or pick the matching release ONNX "
+            f"({'dfine_<size>_slim' if precision == 'fp16' else 'dfine_<size>_op19'})"
+        )
+
+
+def _build_engine(onnx: Path, output: Path, precision: str, max_batch: int,
+                  opt_batch: int = 1) -> Path:
     if not _have_tensorrt():
         raise SystemExit("building an engine needs TensorRT — `pip install tensorrt==10.13.*`")
+    _check_onnx_precision(onnx, precision)
     output.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable,
-        str(_scripts_dir() / "build_engine.py"),
+        str(_build_engine_script()),
         "--onnx", str(onnx),
         "--output", str(output),
         "--max-batch", str(max_batch),
+        "--opt-batch", str(opt_batch),
         "--no-tf32",
     ]
     if precision == "fp16":
-        cmd += ["--strongly-typed"]  # ONNX is already FP16-typed (convert_fp16.py output)
+        # ONNX is already FP16-typed (convert_fp16.py / convert_fp16_surgical.py output)
+        cmd += ["--strongly-typed"]
     print("[dfine] $", " ".join(cmd))
     subprocess.run(cmd, check=True)
     if not output.exists():
@@ -203,7 +258,8 @@ def _convert_fp16(fp32_onnx: Path, output: Path) -> Path:
     return output
 
 
-def _export_onnx(model: str, checkpoint: Optional[str], output: Path) -> Path:
+def _export_onnx(model: str, checkpoint: Optional[str], output: Path,
+                 opset: Optional[int] = None) -> Path:
     seg = _seg_dir()
     if seg is None:
         raise SystemExit(
@@ -221,6 +277,8 @@ def _export_onnx(model: str, checkpoint: Optional[str], output: Path) -> Path:
         "--dfine-src", str(seg),
         "--output", str(output),
     ]
+    if opset is not None:
+        cmd += ["--opset", str(opset)]
     print("[dfine] $", " ".join(cmd))
     subprocess.run(cmd, check=True)
     return output
@@ -299,13 +357,22 @@ def cmd_info(args) -> int:
 
 
 def cmd_build(args) -> int:
+    if not args.model and not args.onnx:
+        raise SystemExit("specify --model {n,s,m,l,x} or --onnx PATH")
+    if not args.model and not args.output:
+        # Without a model there is no cache key the other subcommands would ever
+        # resolve, so a cache-named engine would be a dead end.
+        raise SystemExit("with --onnx alone, pass --output PATH "
+                         "(or add --model to cache under a preset name)")
+    if args.opt_batch > args.max_batch:
+        raise SystemExit(f"--opt-batch {args.opt_batch} exceeds --max-batch {args.max_batch}")
     onnx = _find_onnx(args.model, args.precision, args.onnx)
     if onnx is None:
         raise SystemExit(
             f"no ONNX for model '{args.model}' ({args.precision}); pass --onnx or run `dfine export`"
         )
     out = Path(args.output) if args.output else _cache_engine_path(args.model, args.precision)
-    _build_engine(onnx, out, args.precision, args.max_batch)
+    _build_engine(onnx, out, args.precision, args.max_batch, args.opt_batch)
     print(f"built {out}")
     return 0
 
@@ -314,13 +381,13 @@ def cmd_export(args) -> int:
     model = args.model
     # Always produce the FP32 ONNX first (its name has no precision suffix, matching
     # _find_onnx for fp32). For fp16, convert it to the strongly-typed FP16 ONNX under
-    # the exact name `dfine build --precision fp16` / `predict` look up.
+    # the first-preference name `dfine build --precision fp16` / `predict` look up.
     fp32_out = (
         Path(args.output)
         if (args.output and args.precision == "fp32")
         else _cache_dir() / f"dfine_{model}.onnx"
     )
-    _export_onnx(model, args.checkpoint, fp32_out)
+    _export_onnx(model, args.checkpoint, fp32_out, args.opset)
     if args.precision == "fp32":
         print(f"exported {fp32_out}")
         return 0
@@ -378,6 +445,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(pb, engine=False)
     pb.add_argument("--output", help="engine output path (default: cache)")
     pb.add_argument("--max-batch", type=int, default=8)
+    pb.add_argument("--opt-batch", type=int, default=1,
+                    help="batch size TRT optimizes tactics for (8 for batch serving; "
+                         "1, the default, for lowest single-image latency)")
     pb.set_defaults(func=cmd_build)
 
     pe = sub.add_parser("export", help="export a checkpoint to ONNX (needs D-FINE-seg)")
@@ -386,6 +456,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="fp16 additionally runs convert_fp16 (strongly-typed FP16 ONNX)")
     pe.add_argument("--checkpoint", help="path to a D-FINE .pt (defaults to the known seg ckpt)")
     pe.add_argument("--output", help="ONNX output path (default: cache)")
+    pe.add_argument("--opset", type=int, default=None,
+                    help="ONNX opset (export script default: 16; the surgical FP16 "
+                         "converter needs >= 19)")
     pe.set_defaults(func=cmd_export)
 
     pbe = sub.add_parser("bench", help="benchmark latency/throughput (C++ dfine_bench)")

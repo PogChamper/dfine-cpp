@@ -14,6 +14,11 @@ third_party/*
 # Python
 __pycache__/
 *.pyc
+# Wheel-build transients (build_wheel.sh stages these into the package and trap-cleans)
+python/dfine/libdfine.so
+python/dfine/_scripts/
+python/build/
+python/dfine.egg-info/
 # Weights
 *.pt
 *.pth

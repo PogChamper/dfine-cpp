@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dfine"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python bindings for D-FINE-cpp — C++/TensorRT D-FINE object detection"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -35,7 +35,7 @@ packages = ["dfine"]
 [tool.setuptools.package-data]
 # Present only when a build step copies the compiled library into the package
 # before `pip wheel` (see docs; the .so is CUDA/arch/TRT-specific).
-dfine = ["*.so", "*.so.*", "lib/*.so", "lib/*.so.*"]
+dfine = ["*.so", "*.so.*", "lib/*.so", "lib/*.so.*", "_scripts/*.py"]
 
 [tool.ruff]
 line-length = 100

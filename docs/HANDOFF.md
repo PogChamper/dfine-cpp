@@ -432,7 +432,7 @@ research artifacts bit-exactly (graph hashes: fast-preset m + all five slim
 release assets). Night-matrix gates: slim lossless full-val all five sizes
 (n .4272 / s .5060 / m .5500 / l .5723 / x .5926), cascade 1:150 fv 0.5482
 (−0.18, best single slider), fast preset fv across the lineup (−0.44…−0.77 at
-+10…21%), max preset 686 img/s m b8. Release surface: hero ladder + 60-second
++11…19% over surgical), max preset 686 img/s m b8. Release surface: hero ladder + 60-second
 Python quickstart in README, docs/RESEARCH_MATRIX.md (the complete measured
 record incl. FP8/INT8/plugin negatives), examples/python_quickstart.ipynb,
 wheel bundles build_engine.py so `dfine build` works checkout-free (verified in

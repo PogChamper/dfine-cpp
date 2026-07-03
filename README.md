@@ -6,6 +6,7 @@ C++ decode — at up to **1550+ FPS** (D-FINE-N) and **2.47 ms** end-to-end batc
 RTX 4070 Ti SUPER, matching PyTorch mAP to within **0.002 AP** in the default configuration.
 
 <p align="center">
+  <a href="#supported-hardware--prerequisites">Supported hardware</a> ·
   <a href="#quickstart">Quickstart</a> ·
   <a href="#benchmarks">Benchmarks</a> ·
   <a href="#using-the-library">C++ API</a> ·
@@ -30,8 +31,9 @@ the C++ surgical-FP16 runtime produced every panel. Reproduce:
 
 All five model sizes, three precision/speed tiers, end-to-end (preprocess + inference + decode),
 mAP on full COCO val2017, throughput = batch-8 img/s (medians of 3×500-iter rounds), RTX 4070 Ti SUPER.
-**surgical** = FP16 including the decoder (`convert_fp16_surgical.py`); **fast** = slim + export
-sliders (`--num-queries 200 --cascade 1:100`):
+**prod fp16** = the v0.2.0 production tier (decoder kept FP32); **surgical** = FP16 including the
+decoder (`convert_fp16_surgical.py`; the shipped `--slim` variant trims the FP32 island further);
+**fast** = slim + export sliders (`--num-queries 200 --cascade 1:100`):
 
 | model | PyTorch mAP | prod fp16 b8 · mAP | **surgical b8 · mAP** | fast b8 · mAP |
 |---|---|---|---|---|
@@ -41,42 +43,13 @@ sliders (`--num-queries 200 --cascade 1:100`):
 | D-FINE-L | 0.5724 | 357 · 0.5723 | **390** · 0.5724 | **453** · 0.5647 |
 | D-FINE-X | 0.5931 | 244 · 0.5927 | **264** · 0.5929 | **292** · 0.5855 |
 
-The release ships the **`--slim`** surgical variant (an even smaller FP32 island): separately
-gated lossless on all five sizes (full-val n 0.4272 / s 0.5060 / m 0.5500 / l 0.5723 / x 0.5926)
-and +2-3% faster at batch 8 where benched — the surgical column above is the conservative
-non-slim measurement.
-
-The full m ladder: **PyTorch 66 → 686 img/s (10.4×)** — fp32 230 → fp16 469 → surgical 526/561 →
-fast 598 → max preset 686 (fast + `--eval-idx 2` + `--opt-batch 8`, −0.89 AP). At the other end,
-the full-pipeline CUDA graph holds **2.47 ms** end-to-end batch-1 (byte-identical detections).
-Every cell — including b1/b2/b4, VRAM, and the failed experiments (FP8, INT8, plugins) — is in
+The release ONNX is the **`--slim`** surgical variant — separately gated lossless on all five
+sizes (full-val n 0.4272 / s 0.5060 / m 0.5500 / l 0.5723 / x 0.5926), +2-3% faster at batch 8;
+the surgical column above is the conservative non-slim measurement. The m ladder tops out at
+**686 img/s — 10.4× PyTorch** (the `max` preset: fast + `--eval-idx 2` + `--opt-batch 8`, −0.89 AP);
+every cell (b1-b8, VRAM, and the closed negatives: FP8, INT8, plugins) is in
 **[docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md)** with one-command reproduce paths.
-
-## Three commands to first detection (Python)
-
-No compiler, no OpenCV, no repo checkout — the wheel bundles the C++ runtime, the release ships the
-ONNX, and the engine compiles on your GPU in one command (a one-time 1-3 minutes):
-
-```sh
-pip install "dfine[tensorrt,cli] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine-0.3.0-py3-none-linux_x86_64.whl"
-curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.onnx \
-     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.json
-dfine build --model m --onnx dfine_m_slim.onnx --output dfine_m_slim.engine
-```
-
-```python
-from dfine import Detector
-
-det = Detector("dfine_m_slim.engine", threshold=0.5)
-detections = det.detect(frame)            # numpy HWC uint8 → [Detection(box, class_name, score)]
-```
-
-That engine is the lossless-FP16 production build (`--slim` surgical; full-val 0.5500, exactly the
-FP16 reference). Its tier measures 288 img/s at batch 1 and 526 at batch 8 on a 4070 Ti SUPER
-(PyTorch: 31 / 66; the slim build itself benched +2% over that b8 figure). The wheel's `libdfine.so` targets
-sm_89/linux_x86_64 — other GPUs/platforms build from source (`./build.sh`, then
-`pip install -e python/`), everything else stays identical. Notebook version:
-[examples/python_quickstart.ipynb](examples/python_quickstart.ipynb).
+Python users: [three commands to first detection](#python--three-commands-no-checkout).
 
 ---
 
@@ -95,25 +68,109 @@ and ships a lean, dependency-light C++ runtime:
 - **Lean runtime.** `libdfine.so` takes a raw `ImageU8` (HWC uint8) — **no OpenCV** in the core — and hides
   all TensorRT/CUDA behind a PIMPL. RAII everywhere, sanitizer-clean, `-Werror` clean.
 
+## Supported hardware & prerequisites
+
+**Platforms** (three statuses: *validated* = benchmarked/CI here; *expected* = no known blocker,
+not benchmarked here; *not supported* = known blocker):
+
+| Platform | Status |
+|---|---|
+| Linux x86_64 (Ubuntu 22.04+) | ✅ **validated** — every number in this README (measured in a WSL2 Ubuntu guest, same stack as bare metal) + CI builds on ubuntu-latest |
+| **WSL2** (Windows 11, Ubuntu guest) | ✅ **validated** — the development & benchmark environment itself |
+| Other Linux x86_64 distros | expected (plain CMake + CUDA 12 + TRT 10 stack) |
+| Jetson Orin (aarch64, JetPack ≥ 6.1) | expected, **not validated** — JetPack 6.1+ ships TensorRT 10.3 + CUDA 12.6; the runtime is plain CUDA + TRT with no x86-specific code. Note: the `tensorrt` pip wheel does not exist for Jetson — use JetPack's TensorRT for both build and run |
+| Windows native | ❌ not supported (Linux-only build scripts and `.so` packaging) — use WSL2 |
+| macOS | ❌ n/a (no NVIDIA/CUDA) |
+
+**GPU** — any GPU TensorRT 10.x supports (compute capability **7.5 / Turing or newer**, per
+NVIDIA's TRT support matrix); this project is validated on **8.9 (Ada)**:
+
+| GPU family | `CUDA_ARCH` | Status / notes |
+|---|:---:|---|
+| RTX 40xx (Ada) | `89` | ✅ validated (RTX 4070 Ti SUPER) |
+| RTX 30xx (Ampere) | `86` | expected |
+| RTX 20xx / T4 (Turing) | `75` | expected (TRT 10 floor; FP16 tensor cores present) |
+| RTX 50xx (Blackwell) | `120` | expected — needs CUDA ≥ 12.8 **and** TensorRT ≥ 10.8 |
+| Jetson Orin | `87` | expected, not validated (see platform row) |
+
+`./build.sh` targets your local GPU by default (`CUDA_ARCH=native`); pass one value
+(`CUDA_ARCH=86 ./build.sh`) for headless/CI builds or a semicolon list (`CUDA_ARCH="86;89"`) for a
+fat binary.
+
+**Dependencies** — what you need and *when* you need it:
+
+| Dependency | Version | Needed for |
+|---|---|---|
+| NVIDIA driver | CUDA-12-capable (R525+; RTX 50xx needs R570+/CUDA 12.8 stack) | build + run |
+| CUDA toolkit (`nvcc`) | 12.x (sm_120 needs ≥ 12.8) | build only |
+| TensorRT | **10.x** — validated on 10.13; any 10.x ≥ your GPU's floor works, e.g. `pip install "tensorrt==10.13.*"` as a lib source. **TensorRT 11 (2026) is not yet validated** — it makes strongly-typed networks the default (exactly this repo's approach), but nothing here has been re-gated on it | build + run |
+| CMake | ≥ 3.24 for `native` arch / ≥ 3.20 with explicit arch | build only |
+| C++ compiler | C++17 — any GCC/Clang your CUDA 12.x `nvcc` accepts (CUDA 12.9: GCC ≤ 14, Clang ≤ 19) | build only |
+| Python | 3.9+ — engine build & ONNX export scripts only, **never at inference** | tooling only |
+| OpenCV | — | **not required, ever** |
+
+**Prebuilt binaries:** the release wheel bundles `libdfine.so` for **sm_89 / linux_x86_64 only**;
+every other GPU/platform builds from source (one `./build.sh`) — the Python package, CLI, and every
+command below then work identically. A system TensorRT is found automatically
+([cmake/FindTensorRT.cmake](cmake/FindTensorRT.cmake) searches `$TENSORRT_DIR`,
+`/usr/local/TensorRT`, `/opt/tensorrt`, `/usr`); alternatively populate `third_party/tensorrt`
+([third_party/README.md](third_party/README.md)). Engines are machine-specific build outputs —
+always compiled locally from the release ONNX (that is why we ship ONNX, not engines).
+
 ## Quickstart
 
-Prebuilt ONNX for all five sizes — the FP32 opset-19 base (`dfine_<size>_op19`) and the
-surgical-FP16 production build (`dfine_<size>_slim`), each with the `.json` sidecar the engine
-build needs, plus `SHA256SUMS` — is attached to
-[GitHub Releases](https://github.com/PogChamper/dfine-cpp/releases). TensorRT engines are
-GPU-arch- and TRT-version-specific, so you compile the engine locally from the ONNX — that is why we ship
-ONNX, not engines.
+Two paths to the same runtime. Both start from the release assets: prebuilt ONNX for all five
+sizes — the FP32 opset-19 base (`dfine_<size>_op19`) and the surgical-FP16 production build
+(`dfine_<size>_slim`), each with its `.json` sidecar, plus `SHA256SUMS` — attached to
+[GitHub Releases](https://github.com/PogChamper/dfine-cpp/releases).
+
+### Python — three commands, no checkout
+
+No compiler, no OpenCV, no repo clone — the wheel bundles the C++ runtime and an engine-build
+script; the engine compiles on your GPU in one command (one-time, 1-3 min). Wheel = sm_89 /
+linux_x86_64 (see [Supported hardware](#supported-hardware--prerequisites)); other GPUs build from
+source first, then everything below is identical.
 
 ```sh
-# 1. Build the C++
-./build.sh                     # CUDA arch defaults to 'native' (probes the local GPU; CMake >= 3.24)
-CUDA_ARCH=86 ./build.sh        # explicit SM for headless/CI builds: RTX 30xx = 86, RTX 40xx = 89
+pip install "dfine[tensorrt,cli] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine-0.3.0-py3-none-linux_x86_64.whl"
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.onnx \
+     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.json
+dfine build --model m --onnx dfine_m_slim.onnx --output dfine_m_slim.engine
+```
+
+```python
+from dfine import Detector
+
+det = Detector("dfine_m_slim.engine", threshold=0.5)
+for d in det.detect(frame):                  # frame: numpy HWC uint8 (RGB)
+    print(d.class_name, round(d.score, 3), d.box.as_tuple())
+```
+
+Expected output (COCO `000000039769.jpg` — the two-cats picture):
+
+```
+cat 0.961 (11.9, 53.6, 316.9, 472.9)
+couch 0.955 (0.6, 2.1, 639.4, 474.1)
+cat 0.949 (346.4, 24.1, 639.8, 371.7)
+remote 0.928 (40.1, 73.1, 175.8, 117.7)
+remote 0.883 (333.1, 76.6, 370.6, 187.8)
+```
+
+That engine is the lossless production build (full-val 0.5500, exactly the FP16 reference; its
+tier measures 288 img/s b1 / 526 img/s b8 on a 4070 Ti SUPER — PyTorch does 31 / 66). Notebook
+version: [examples/python_quickstart.ipynb](examples/python_quickstart.ipynb); one-shot CLI:
+`dfine predict --engine dfine_m_slim.engine --image dog.jpg --out annotated.jpg`.
+
+### C++ — build, engine, run
+
+```sh
+# 1. Build (see Supported hardware for CUDA_ARCH values; 'native' probes the local GPU)
+./build.sh                                              # or: CUDA_ARCH=86 ./build.sh
 # — or plain CMake:
 cmake -B build -S . -DCMAKE_CUDA_ARCHITECTURES=native   # [-DTENSORRT_DIR=/path/to/tensorrt]
 cmake --build build -j
 
-# 2. Get the prebuilt ONNX + sidecar, build an engine on your GPU
-#    (slim is the recommended production build — surgical FP16, lossless full-val on all 5 sizes)
+# 2. Get the prebuilt ONNX + sidecar, compile the engine on your GPU
 curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.onnx
 curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.json
 python trt-files/scripts/build_engine.py --strongly-typed --no-tf32 --max-batch 8 \
@@ -123,7 +180,21 @@ python trt-files/scripts/build_engine.py --strongly-typed --no-tf32 --max-batch 
 # 3. Run — libnvinfer/libcudart must be on LD_LIBRARY_PATH; any TensorRT 10.x libs work,
 #    e.g. `python -m pip install "tensorrt==10.13.*"` then the venv's .../site-packages/tensorrt_libs
 export LD_LIBRARY_PATH=/path/to/tensorrt/lib:$LD_LIBRARY_PATH
-./build/dfine_detect --engine trt-files/engines/dfine_m_slim.engine --image dog.jpg --threshold 0.5
+./build/dfine_detect --engine trt-files/engines/dfine_m_slim.engine \
+    --image 000000039769.jpg --threshold 0.5
+```
+
+Expected output (excerpt — the timing line of this one-shot tool includes engine warm-up;
+steady-state numbers come from `dfine_bench`):
+
+```
+engine: trt-files/engines/dfine_m_slim.engine  variant=m  input=640x640  queries=300  classes=80
+5 detections (thr=0.50)
+  cat              0.961  [11.9, 53.6, 316.9, 472.9]
+  couch            0.955  [0.6, 2.1, 639.4, 474.1]
+  cat              0.949  [346.4, 24.1, 639.8, 371.7]
+  remote           0.928  [40.1, 73.1, 175.8, 117.7]
+  remote           0.883  [333.1, 76.6, 370.6, 187.8]
 ```
 
 For an FP32 engine, drop `--strongly-typed` and point `--onnx` at the base file
@@ -136,7 +207,7 @@ valid, slightly slower build.
 ```sh
 docker build --build-arg CUDA_ARCH=89 -t dfine-cpp .    # 86 = RTX 30xx, 89 = RTX 40xx
 docker run --rm --gpus all -v /path/to/engines:/engines dfine-cpp \
-    dfine_detect --engine /engines/dfine_m_fp16_st.engine --image dog.jpg
+    dfine_detect --engine /engines/dfine_m_slim.engine --image dog.jpg
 ```
 
 The image builds and runs the C++ consumer of an already-built `.engine`; ONNX export is not included
@@ -177,6 +248,11 @@ wraps the same script.
 against PyTorch FP32 (191 img/s b8, measured with `profile.py --backends torch --model-name n`);
 identical detections both panels.*
 
+The full m ladder, batch-8: **PyTorch 66 → C++ fp32 230 → fp16 469 → surgical 526 (561 with
+`--opt-batch 8`) → fast 598 → max 686 img/s (10.4×)**; at the latency end, the full-pipeline CUDA
+graph holds **2.47 ms** end-to-end batch-1 with byte-identical detections. Per-batch curves, VRAM,
+and every intermediate point: [docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md).
+
 RTX 4070 Ti SUPER · COCO val2017 (5000 imgs) · D-FINE-M · latency = e2e p50 ms
 (preprocess+infer+decode). Measured with `profile.py` in the v0.2.0 session — a couple of percent
 below the hero table's newer 3-round `dfine_bench` medians for the same engines.
@@ -204,7 +280,7 @@ inside the captured graph.
 ```cpp
 dfine::DetectorOptions o;
 o.full_pipeline_graph = true;                     // implies gpu_decode
-dfine::DFineDetector det("dfine_m_fp16_st.engine", o);
+dfine::DFineDetector det("dfine_m_slim.engine", o);
 det.freeze(dfine::FreezeSpec{1, 1920, 1080});     // batch, source WxH — captures + locks
 det.detect(frame);                                // one cudaGraphLaunch per call
 ```
@@ -231,7 +307,7 @@ self-contained.)
 ```cpp
 #include "dfine/tasks/detector.hpp"
 
-dfine::DFineDetector det("dfine_m_fp16_st.engine");          // loads engine + .json sidecar
+dfine::DFineDetector det("dfine_m_slim.engine");             // loads engine + .json sidecar
 dfine::ImageU8 img{data, height, width, 3, width * 3, /*bgr=*/false};   // your HWC uint8 buffer
 for (const dfine::Detection& d : det.detect(img, /*threshold=*/0.5f)) {
     // d.box (xyxy pixel space), d.class_id (0..79 COCO), d.score
@@ -249,7 +325,7 @@ CUDA-graph replay (needs a `--max-aux-streams 0` engine). Link `dfine::dfine`; n
 any language:
 
 ```c
-dfine_detector_t* det = dfine_detector_create("dfine_m_fp16_st.engine", NULL);
+dfine_detector_t* det = dfine_detector_create("dfine_m_slim.engine", NULL);
 dfine_detections_t* r = dfine_detector_detect(det, rgb, w, h, w*3, 3, /*is_bgr=*/0, 0.5f);
 for (int i = 0; i < r->count; ++i)
     printf("%s %.2f\n", dfine_class_name(r->detections[i].class_id), r->detections[i].score);
@@ -274,7 +350,7 @@ from source (`./build.sh`, then `pip install -e python/`).
 import numpy as np
 from dfine import Detector
 
-with Detector("dfine_m_fp16_st.engine", threshold=0.4) as det:
+with Detector("dfine_m_slim.engine", threshold=0.4) as det:
     for d in det.detect(rgb_hwc_uint8):        # numpy HWC uint8 (is_bgr=True for BGR)
         print(d.class_name, d.score, d.box.as_tuple())
 ```
@@ -346,8 +422,8 @@ hyperparameter point in [docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md)):
 | `--cascade 1:150` | −0.18 AP | +8% | top-150 queries after layer 1, ranked by the trained aux head — the best single slider |
 | `--num-queries 200` | −0.13 AP | +7% | decode cost halves; near-free on few-class fine-tunes |
 | `--eval-idx 2` | −0.57 AP | +4% | drops a decoder layer; best b1 latency without a CUDA graph |
-| `fast` = Q200+cascade 1:100 | −0.44…−0.77 AP | +10…21% | the hero-table column |
-| `max` = fast + E2 + `--opt-batch 8` | −0.89 AP | +46% vs prod (686 img/s) | m ladder top, 10.4× PyTorch |
+| `fast` = Q200+cascade 1:100 | −0.44…−0.77 AP | +11…19% across the lineup | the hero-table column |
+| `max` = fast + E2 + `--opt-batch 8` | −0.89 AP | +30% (686 img/s; +46% over v0.2.0 prod fp16) | m ladder top, 10.4× PyTorch |
 
 The through-line: **D-FINE's FDR box-decode is acutely FP-precision-sensitive** — it amplifies tiny
 upstream rounding into box error. That single fact explains the grid_sample trap, the kFP16-flag
@@ -366,28 +442,6 @@ measurements — [docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md)).
 M3 instance segmentation is shelved. Next: a WASM/WebGPU browser demo and real-time video apps — see
 **[docs/ROADMAP.md](docs/ROADMAP.md)** and [docs/HANDOFF.md](docs/HANDOFF.md) for the single source of
 truth on the current state.
-
-## Requirements & environment
-
-| Dependency | Version | Notes |
-|:---|:---|:---|
-| OS | Linux x86_64 | validated; other platforms untested |
-| NVIDIA GPU + driver | CUDA-12-capable | validated on RTX 4070 Ti SUPER (sm_89) |
-| CUDA toolkit | 12.x | `nvcc` needed for the C++ build only |
-| TensorRT | 10.x | validated on 10.13; `pip install "tensorrt==10.13.*"` works as a lib source |
-| CMake | ≥ 3.24 (`native` arch) / ≥ 3.20 (explicit arch) | `build.sh` auto-discovers the toolchain |
-| Compiler | C++17 | |
-| OpenCV | — | not required |
-| Python | engine build / export scripts only | never at inference time |
-
-A system TensorRT is found automatically ([cmake/FindTensorRT.cmake](cmake/FindTensorRT.cmake) searches
-`$TENSORRT_DIR`, `/usr/local/TensorRT`, `/opt/tensorrt`, `/usr`); alternatively populate
-`third_party/tensorrt` ([third_party/README.md](third_party/README.md)). The ONNX **export** alone needs
-the [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) source on `PYTHONPATH`; every other script is
-self-contained (`pyproject.toml`, uv).
-
-Engines are machine-specific build outputs (gitignored) — compile them locally from the prebuilt ONNX on
-[Releases](https://github.com/PogChamper/dfine-cpp/releases) or from your own export.
 
 ## Troubleshooting
 

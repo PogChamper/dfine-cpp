@@ -16,3 +16,12 @@ target_include_directories(dfine_test_shape_transitions
 target_link_libraries(dfine_test_shape_transitions PRIVATE dfine::dfine dfine_warnings)
 add_test(NAME shape_transitions COMMAND dfine_test_shape_transitions)
 set_tests_properties(shape_transitions PROPERTIES SKIP_RETURN_CODE 77)
+
+# GPU: public-API recovery — frozen rejects, failpoint faults, stride parity,
+# full-graph replay gating (needs DFINE_TEST_ENGINE_G0 for the graph section).
+add_executable(dfine_test_detector_recovery test_detector_recovery.cpp)
+target_include_directories(dfine_test_detector_recovery
+  PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(dfine_test_detector_recovery PRIVATE dfine::dfine dfine_warnings)
+add_test(NAME detector_recovery COMMAND dfine_test_detector_recovery)
+set_tests_properties(detector_recovery PROPERTIES SKIP_RETURN_CODE 77)

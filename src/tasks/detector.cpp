@@ -331,6 +331,15 @@ struct DFineDetector::Impl {
 
     // Set the dynamic input shape for batch B (or validate a static engine).
     void set_batch_(int B) {
+        // Detector-level frozen guard, before the session is touched: the caller
+        // gets an actionable message and a detector that is untouched — catching
+        // this error and continuing at the frozen batch is fully supported.
+        if (frozen_ && B > frozen_batch_) {
+            throw std::runtime_error("dfine: detector is frozen for batch <= " +
+                                     std::to_string(frozen_batch_) + " but got " +
+                                     std::to_string(B) +
+                                     "; freeze() with the larger batch or create a new detector");
+        }
         if (input_dynamic_) {
             if (max_batch_ > 0 && B > max_batch_) {
                 throw std::runtime_error("dfine: batch size " + std::to_string(B) +
@@ -990,6 +999,12 @@ struct DFineDetector::Impl {
             return run_full_graph_(images, B, thr, t0);
         }
 
+        // A batch change is about to reconfigure the context. Invalidate the
+        // flushed-batch marker BEFORE the attempt: if the transition fails
+        // mid-way, neither replay gate (full graph above, try_graph_infer_) may
+        // trust the context until a successful enqueue re-flushes it. One split
+        // call at the old batch then restores the marker — the gates self-heal.
+        if (B != graph_ctx_batch_) graph_ctx_batch_ = -1;
         set_batch_(B);
 
         const std::size_t single = static_cast<std::size_t>(3) * in_h_ * in_w_;

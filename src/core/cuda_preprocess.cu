@@ -2,6 +2,7 @@
 
 #include "internal/cuda_check.hpp"
 #include "internal/cuda_raii.hpp"
+#include "internal/image_check.hpp"
 
 #include <cstring>
 #include <stdexcept>
@@ -237,12 +238,7 @@ void ImagePreprocessor::ensure_capacity_(std::size_t bytes) {
 }
 
 void ImagePreprocessor::process(const ImageU8& image, float* d_dst, cudaStream_t stream) {
-    if (!image.data || image.height <= 0 || image.width <= 0) {
-        throw std::runtime_error("dfine: ImagePreprocessor::process given empty image");
-    }
-    if (image.channels != 3) {
-        throw std::runtime_error("dfine: ImagePreprocessor expects a 3-channel HWC image");
-    }
+    validate_image_layout(image);
 
     const int rows = image.height;
     const int cols = image.width;

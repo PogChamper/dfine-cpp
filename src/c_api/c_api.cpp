@@ -13,6 +13,8 @@
 #include "dfine/tasks/detector.hpp"
 #include "dfine/version.hpp"
 
+#include "internal/image_check.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -87,29 +89,15 @@ dfine_detections_t* pack_detections(const dfine::Detections& dets) {
 
 dfine::ImageU8 make_view(const uint8_t* data, int width, int height, int step, int channels,
                          int is_bgr) {
-    if (!data) throw std::invalid_argument("dfine: image data is NULL");
-    if (width <= 0 || height <= 0) {
-        throw std::invalid_argument("dfine: invalid image size (width=" + std::to_string(width) +
-                                    " height=" + std::to_string(height) + ")");
-    }
-    if (channels != 3) {
-        throw std::invalid_argument("dfine: channels must be 3 (got " + std::to_string(channels) +
-                                    ")");
-    }
-    // 64-bit to avoid signed-int overflow (UB) for pathological widths.
-    const long long min_step = static_cast<long long>(width) * channels;
-    if (step > 0 && step < min_step) {
-        throw std::invalid_argument("dfine: step (" + std::to_string(step) +
-                                    ") is smaller than width*channels (" +
-                                    std::to_string(min_step) + ")");
-    }
     dfine::ImageU8 view;
     view.data = data;
     view.height = height;
     view.width = width;
     view.channels = channels;
-    view.stride = step > 0 ? step : 0;  // 0 => tightly packed (width*channels)
+    view.stride = step > 0 ? step : 0;  // documented C contract: <=0 => tightly packed
     view.is_bgr = (is_bgr != 0);
+    // Same validator as the C++ entry points, so C and C++ cannot drift.
+    dfine::validate_image_layout(view);
     return view;
 }
 

@@ -32,6 +32,7 @@ endif()
 
 option(DFINE_BUILD_APPS "Build CLI apps" ON)
 option(DFINE_BUILD_C_API "Build the stable C ABI (c_api.h/.cpp) into libdfine" ON)
+option(DFINE_BUILD_TESTS "Build test binaries (ctest)" ON)
 option(DFINE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 # Warning flags carried as an INTERFACE target so they apply to our C++ sources
@@ -162,6 +163,14 @@ endif()
 foreach(_t IN LISTS _dfine_warned)
   target_link_libraries(${_t} PRIVATE dfine_warnings)
 endforeach()
+
+# ---------------------------------------------------------------------------
+# Tests.
+# ---------------------------------------------------------------------------
+if(DFINE_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()
 
 message(STATUS "dfine ${PROJECT_VERSION}: TensorRT ${TensorRT_VERSION} (${TENSORRT_INCLUDE_DIR}), "
                "CUDA arch ${CMAKE_CUDA_ARCHITECTURES}")

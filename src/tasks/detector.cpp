@@ -8,6 +8,7 @@
 #include "internal/cuda_preprocess.cuh"
 #include "internal/decode_gpu.cuh"
 #include "internal/device_arena.hpp"
+#include "internal/image_check.hpp"
 #include "internal/trt_session.hpp"
 
 #include "internal/cuda_raii.hpp"
@@ -1095,7 +1096,9 @@ DFineDetector& DFineDetector::operator=(DFineDetector&&) noexcept = default;
 
 Detections DFineDetector::detect(const ImageU8& image, float threshold) {
     if (!impl_) throw std::runtime_error("dfine: DFineDetector: moved-from object");
-    if (!image.data) throw std::runtime_error("dfine: DFineDetector::detect: empty image");
+    // Validate at the public boundary so every downstream path (preprocessor
+    // staging AND the frozen full-graph pack loop) sees a well-formed view.
+    validate_image_layout(image);
     std::vector<ImageU8> one{image};
     return std::move(impl_->run_batch(one, threshold).front());
 }
@@ -1105,7 +1108,7 @@ std::vector<Detections> DFineDetector::detect_batch(const std::vector<ImageU8>& 
     if (!impl_) throw std::runtime_error("dfine: DFineDetector: moved-from object");
     if (images.empty()) return {};
     for (const auto& img : images) {
-        if (!img.data) throw std::runtime_error("dfine: detect_batch: image in batch is empty");
+        validate_image_layout(img);
     }
     return impl_->run_batch(images, threshold);
 }

@@ -259,7 +259,8 @@ def _convert_fp16(fp32_onnx: Path, output: Path) -> Path:
 
 
 def _export_onnx(model: str, checkpoint: Optional[str], output: Path,
-                 opset: Optional[int] = None) -> Path:
+                 opset: Optional[int] = None, num_classes: Optional[int] = None,
+                 class_names: Optional[str] = None, allow_partial: bool = False) -> Path:
     seg = _seg_dir()
     if seg is None:
         raise SystemExit(
@@ -279,6 +280,12 @@ def _export_onnx(model: str, checkpoint: Optional[str], output: Path,
     ]
     if opset is not None:
         cmd += ["--opset", str(opset)]
+    if num_classes is not None:
+        cmd += ["--num-classes", str(num_classes)]
+    if class_names:
+        cmd += ["--class-names", class_names]
+    if allow_partial:
+        cmd += ["--allow-partial-checkpoint"]
     print("[dfine] $", " ".join(cmd))
     subprocess.run(cmd, check=True)
     return output
@@ -387,7 +394,9 @@ def cmd_export(args) -> int:
         if (args.output and args.precision == "fp32")
         else _cache_dir() / f"dfine_{model}.onnx"
     )
-    _export_onnx(model, args.checkpoint, fp32_out, args.opset)
+    _export_onnx(model, args.checkpoint, fp32_out, args.opset,
+                 num_classes=args.num_classes, class_names=args.class_names,
+                 allow_partial=args.allow_partial_checkpoint)
     if args.precision == "fp32":
         print(f"exported {fp32_out}")
         return 0
@@ -455,6 +464,14 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--precision", choices=("fp32", "fp16"), default="fp32",
                     help="fp16 additionally runs convert_fp16 (strongly-typed FP16 ONNX)")
     pe.add_argument("--checkpoint", help="path to a D-FINE .pt (defaults to the known seg ckpt)")
+    pe.add_argument("--num-classes", type=int, default=None,
+                    help="class count of the checkpoint (default 80); a mismatch aborts "
+                         "the export instead of silently dropping the classifier head")
+    pe.add_argument("--class-names", default=None,
+                    help="display names for the sidecar: a file (one per line) or a comma list")
+    pe.add_argument("--allow-partial-checkpoint", action="store_true",
+                    help="research only: keep exporting when checkpoint tensors are "
+                         "missing/mismatched (the sidecar records the partial load)")
     pe.add_argument("--output", help="ONNX output path (default: cache)")
     pe.add_argument("--opset", type=int, default=None,
                     help="ONNX opset (export script default: 16; the surgical FP16 "

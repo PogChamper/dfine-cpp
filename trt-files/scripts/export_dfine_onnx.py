@@ -25,6 +25,7 @@ the resulting graph is representative of either repo.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -306,6 +307,7 @@ def _collect_meta(model: nn.Module, args: argparse.Namespace) -> dict:
         "has_masks": False,
         "dynamic_batch": True,
         "max_batch": args.max_batch,
+        "trace_batch": args.trace_batch,
         "opset": args.opset,
         "deform_core": args.deform,
         "trt_min_version": "8.5",
@@ -313,9 +315,116 @@ def _collect_meta(model: nn.Module, args: argparse.Namespace) -> dict:
     }
 
 
-def build_detection_model(args: argparse.Namespace, device: torch.device) -> nn.Module:
+# --- Checkpoint loading ---------------------------------------------------------------
+# Strict by default: every model parameter/buffer must be filled from the checkpoint
+# with an exactly matching shape, or the export stops before tracing. The upstream
+# fine-tuning loader (load_tuning_state) silently drops every missing/mismatched key —
+# a wrong --model-name or a forgotten --num-classes then exports a checker-clean ONNX
+# whose unfilled weights are random initialization.
+
+
+def _select_state(raw: dict) -> tuple[dict, str]:
+    """Pick the model weights out of a training checkpoint: the EMA weights first
+    (what upstream evaluates and deploys), then the plain model, then the mapping
+    itself (a bare state dict)."""
+    ema = raw.get("ema")
+    if isinstance(ema, dict) and isinstance(ema.get("module"), dict):
+        return ema["module"], "ema.module"
+    if isinstance(raw.get("model"), dict):
+        return raw["model"], "model"
+    return raw, "checkpoint root"
+
+
+def _diff_state(model_sd: dict, state: dict) -> dict:
+    """Compare a candidate state dict against the model's: which model tensors are
+    missing, which have the wrong shape, and which checkpoint tensors are unused.
+    Non-tensor entries (schedulers, counters) are ignored, not errors."""
+    tensors = {k: v for k, v in state.items() if hasattr(v, "shape")}
+    missing = [k for k in model_sd if k not in tensors]
+    mismatched = [
+        (k, tuple(tensors[k].shape), tuple(model_sd[k].shape))
+        for k in model_sd
+        if k in tensors and tuple(tensors[k].shape) != tuple(model_sd[k].shape)
+    ]
+    extra = [k for k in tensors if k not in model_sd]
+    return {"missing": missing, "shape_mismatch": mismatched, "extra": extra}
+
+
+def _mismatch_hints(diff: dict, model_sd_len: int) -> list[str]:
+    """Actionable guesses about WHY the checkpoint does not fit."""
+    hints = []
+    for k, got, want in diff["shape_mismatch"]:
+        if "score_head" in k and k.endswith(".weight") and got and want and got[0] != want[0]:
+            hints.append(f"  hint: the checkpoint's score head has {got[0]} classes; "
+                         f"export with --num-classes {got[0]} and matching --class-names")
+            break
+    bad = len(diff["missing"]) + len(diff["shape_mismatch"])
+    if bad > model_sd_len // 4:
+        hints.append("  hint: most tensors do not fit — the checkpoint likely belongs to a "
+                     "different variant; pass the --model-name it was trained as")
+    return hints
+
+
+def load_checkpoint_state(model: nn.Module, ckpt: Path, allow_partial: bool) -> dict:
+    """Load `ckpt` into `model` and return a load report for the sidecar.
+
+    Strict mode (default): any missing or shape-mismatched model tensor aborts the
+    export with the offending keys and a hint. --allow-partial-checkpoint downgrades
+    that to a printed report (research escape hatch); the sidecar then records the
+    partial load so the artifact cannot silently pass as a full export. Extra
+    checkpoint tensors (e.g. a seg head on a detection export) are reported but
+    tolerated — they cannot corrupt the loaded model.
+    """
+    try:
+        raw = torch.load(str(ckpt), map_location="cpu", weights_only=True)
+    except Exception:  # noqa: BLE001  (older checkpoints carry pickled objects)
+        raw = torch.load(str(ckpt), map_location="cpu")
+    if not isinstance(raw, dict):
+        raise SystemExit(f"checkpoint {ckpt} does not contain a state dict "
+                         f"(got {type(raw).__name__})")
+    state, selected = _select_state(raw)
+    model_sd = model.state_dict()
+    diff = _diff_state(model_sd, state)
+
+    bad = diff["missing"] or diff["shape_mismatch"]
+    if bad:
+        lines = [f"[export] checkpoint does not match the model: {len(diff['missing'])} missing, "
+                 f"{len(diff['shape_mismatch'])} shape-mismatched of {len(model_sd)} model "
+                 f"tensors (weights read from: {selected})"]
+        lines += [f"  missing: {k}" for k in diff["missing"][:8]]
+        lines += [f"  shape: {k} checkpoint{got} vs model{want}"
+                  for k, got, want in diff["shape_mismatch"][:8]]
+        hidden = len(diff["missing"]) + len(diff["shape_mismatch"]) - 16
+        if hidden > 0:
+            lines.append(f"  ... and {hidden} more")
+        lines += _mismatch_hints(diff, len(model_sd))
+        if not allow_partial:
+            lines.append("  (--allow-partial-checkpoint loads what fits — research only; "
+                         "the unfilled weights stay randomly initialized)")
+            raise SystemExit("\n".join(lines))
+        print("\n".join(lines))
+        print("[export] --allow-partial-checkpoint: continuing with a PARTIAL load")
+
+    loadable = {k: v for k, v in state.items()
+                if k in model_sd and hasattr(v, "shape")
+                and tuple(v.shape) == tuple(model_sd[k].shape)}
+    model.load_state_dict(loadable, strict=False)
+    if diff["extra"]:
+        print(f"[export] note: {len(diff['extra'])} checkpoint tensors unused by this model "
+              f"(e.g. {diff['extra'][0]})")
+    return {
+        "mode": "partial" if bad else "strict",
+        "selected_state": selected,
+        "loaded": len(loadable),
+        "missing": len(diff["missing"]),
+        "shape_mismatch": len(diff["shape_mismatch"]),
+        "sha256": hashlib.sha256(ckpt.read_bytes()).hexdigest(),
+    }
+
+
+def build_detection_model(args: argparse.Namespace,
+                          device: torch.device) -> tuple[nn.Module, dict]:
     from src.d_fine.dfine import build_model  # noqa: E402  (path set at runtime)
-    from src.d_fine.utils import load_tuning_state  # noqa: E402
 
     model = build_model(
         model_name=args.model_name,
@@ -330,17 +439,25 @@ def build_detection_model(args: argparse.Namespace, device: torch.device) -> nn.
     ckpt = Path(args.checkpoint).resolve()
     if not ckpt.exists():
         raise FileNotFoundError(f"checkpoint not found: {ckpt}")
-    model = load_tuning_state(model, str(ckpt))
+    load_report = load_checkpoint_state(model, ckpt, args.allow_partial_checkpoint)
+    print(f"[export] checkpoint: {load_report['loaded']}/{len(model.state_dict())} tensors "
+          f"loaded ({load_report['mode']}, from {load_report['selected_state']})")
     apply_sliders(model, args)
-    return model.to(device)
+    return model.to(device), load_report
 
 
 def export(args: argparse.Namespace) -> None:
+    # Guarded here (not only in the parser) so programmatic callers cannot slip
+    # through: a batch-1 trace bakes the anchor/GatherElements extent to 1, and
+    # the resulting engine formally accepts dynamic N but only works at batch 1.
+    if args.trace_batch < 2:
+        raise SystemExit(f"--trace-batch must be >= 2 (got {args.trace_batch}): a batch-1 "
+                         "trace bakes an internal decoder extent and breaks dynamic batch")
     _add_repo_to_path(Path(args.dfine_src))
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"[export] device={device} variant={args.model_name} classes={args.num_classes}")
 
-    model = build_detection_model(args, device)
+    model, load_report = build_detection_model(args, device)
     model.deploy()  # eval() + fold weighting vector + truncate to eval layers
     model.eval()
 
@@ -360,6 +477,13 @@ def export(args: argparse.Namespace) -> None:
     print(f"[export] eval forward ok: logits={tuple(out['pred_logits'].shape)} boxes={tuple(out['pred_boxes'].shape)}")
 
     meta = _collect_meta(model, args)
+    # Provenance: enough to answer "which weights, loaded how" for any artifact.
+    meta["checkpoint_sha256"] = load_report["sha256"]
+    meta["checkpoint_load"] = load_report["mode"]
+    meta["checkpoint_loaded_tensors"] = load_report["loaded"]
+    if load_report["mode"] == "partial":
+        meta["checkpoint_missing_count"] = load_report["missing"]
+        meta["checkpoint_shape_mismatch_count"] = load_report["shape_mismatch"]
     print(f"[export] meta: {json.dumps({k: meta[k] for k in ('variant','num_queries','reg_max','reg_scale','num_decoder_layers','eval_idx','num_levels','hidden_dim','feat_strides')})}")
 
     onnx_path = Path(args.output).resolve()
@@ -493,6 +617,9 @@ def parse_args() -> argparse.Namespace:
                    help="batch size of the tracing dummy; must be >=2 to keep the batch axis dynamic")
     p.add_argument("--opset", type=int, default=16)
     p.add_argument("--checkpoint", required=True, help="path to a D-FINE detection .pt/.pth")
+    p.add_argument("--allow-partial-checkpoint", action="store_true",
+                   help="research only: load whatever fits instead of aborting on a "
+                        "missing/mismatched model tensor; the sidecar records the partial load")
     p.add_argument("--class-names", default="",
                    help="display names for the sidecar: a file (one name per line) or a comma "
                         "list; must match --num-classes. Default: COCO-80 when num_classes==80")

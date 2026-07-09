@@ -72,6 +72,7 @@ endif()
 add_library(dfine SHARED
   src/core/log.cpp
   src/core/engine_meta.cpp
+  src/core/failpoint.cpp
   src/core/trt_session.cpp
   src/core/postprocess.cpp
   src/core/cuda_preprocess.cu

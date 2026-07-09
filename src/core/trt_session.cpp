@@ -2,6 +2,7 @@
 
 #include "internal/cuda_check.hpp"
 #include "internal/cuda_raii.hpp"
+#include "internal/failpoint.hpp"
 
 #include <cstring>
 #include <fstream>
@@ -173,45 +174,27 @@ const BindingInfo* TrtSession::find(std::string_view name) const noexcept {
     return (i >= 0) ? &bindings_[i] : nullptr;
 }
 
-void TrtSession::update_binding_shape_(int idx, const nvinfer1::Dims& dims) {
-    BindingInfo& b = bindings_[idx];
-    const int64_t new_elems = volume(dims);
-    const std::size_t new_bytes =
-        (new_elems > 0) ? static_cast<std::size_t>(new_elems) * dtype_bytes(b.dtype) : 0;
-
-    // Evaluate the frozen-grow guard BEFORE caching `dims`: if we threw after caching
-    // the oversized shape, set_input_shape's de-dup fast path would later match it and
-    // skip re-checking, so the next call would run with an undersized buffer (OOB).
-    if (new_bytes > buffer_capacity_[idx] && frozen_) {
-        throw std::runtime_error("dfine: TrtSession is frozen but binding '" + b.name +
-                                 "' must grow to " + std::to_string(new_bytes) +
-                                 " bytes (shape/batch exceeds the frozen maximum; "
-                                 "warm up at the max shape before freeze())");
+void TrtSession::require_clean_(const char* what) const {
+    if (shape_state_ == ShapeState::kClean) return;
+    if (shape_state_ == ShapeState::kPoisoned) {
+        throw std::runtime_error("dfine: TrtSession is unusable (" + poison_reason_ +
+                                 "); destroy and recreate the detector");
     }
+    throw std::runtime_error(
+        std::string("dfine: ") + what +
+        ": a shape transition failed and the cached state is stale; call set_input_shape "
+        "again (a successful call restores service)");
+}
 
-    b.shape = dims;
-    b.element_count = new_elems;
-    b.bytes = new_bytes;
-
-    if (b.bytes > buffer_capacity_[idx]) {
-        // Grow-only: free old buffers first (RAII reset), then re-allocate.
-        device_buffers_[idx].reset();
-        host_buffers_[idx].reset();
-        buffer_capacity_[idx] = 0;
-        if (b.bytes > 0) {
-            void* dp = nullptr;
-            DFINE_CUDA_CHECK(cudaMalloc(&dp, b.bytes));
-            device_buffers_[idx].reset(dp);  // own it before the next throwing call
-            void* hp = nullptr;
-            DFINE_CUDA_CHECK(cudaMallocHost(&hp, b.bytes));
-            host_buffers_[idx].reset(hp);
-            buffer_capacity_[idx] = b.bytes;
-            bind_address_(idx);
-        }
-    }
+void TrtSession::throw_frozen_grow_(const std::string& binding, std::size_t bytes) const {
+    throw std::runtime_error("dfine: TrtSession is frozen but binding '" + binding +
+                             "' must grow to " + std::to_string(bytes) +
+                             " bytes (shape/batch exceeds the frozen maximum; "
+                             "warm up at the max shape before freeze())");
 }
 
 void TrtSession::set_input_shape(std::string_view name, const nvinfer1::Dims& dims) {
+    if (shape_state_ == ShapeState::kPoisoned) require_clean_("set_input_shape");
     const int idx = find_index(name);
     if (idx < 0) {
         throw std::runtime_error("dfine: no such binding: " + std::string(name));
@@ -222,28 +205,135 @@ void TrtSession::set_input_shape(std::string_view name, const nvinfer1::Dims& di
     // Skip setInputShape + downstream re-resolve when the shape is unchanged:
     // setInputShape triggers profile selection and reformatter work in TRT 10/11,
     // so caching it shaves per-call latency in steady-state (fixed-batch) video.
-    const nvinfer1::Dims& cur = bindings_[idx].shape;
-    if (cur.nbDims == dims.nbDims) {
-        bool same = true;
-        for (int i = 0; i < dims.nbDims; ++i) {
-            if (cur.d[i] != dims.d[i]) {
-                same = false;
-                break;
+    // Only trustworthy while the cache is known to mirror the context (kClean);
+    // after a failed transition the shape is re-issued unconditionally.
+    if (shape_state_ == ShapeState::kClean) {
+        const nvinfer1::Dims& cur = bindings_[idx].shape;
+        if (cur.nbDims == dims.nbDims) {
+            bool same = true;
+            for (int i = 0; i < dims.nbDims; ++i) {
+                if (cur.d[i] != dims.d[i]) {
+                    same = false;
+                    break;
+                }
             }
+            if (same) return;
         }
-        if (same) return;
     }
+
+    // Frozen pre-check on the input binding BEFORE the context is touched: the
+    // common violation (batch growth — every D-FINE binding scales with N) is
+    // rejected with zero side effects, so a caller that catches the error keeps
+    // a fully working detector at the frozen shape.
+    {
+        const BindingInfo& b = bindings_[idx];
+        const int64_t elems = volume(dims);
+        const std::size_t bytes =
+            elems > 0 ? static_cast<std::size_t>(elems) * dtype_bytes(b.dtype) : 0;
+        if (frozen_ && bytes > buffer_capacity_[static_cast<std::size_t>(idx)]) {
+            throw_frozen_grow_(b.name, bytes);
+        }
+    }
+
+    // Pending async work may still be reading the buffers a grow would replace.
+    // Transitions are cold (steady state takes the fast path above), so a full
+    // quiesce is cheap and removes the free-while-in-flight hazard.
+    DFINE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+
+    // From here until commit the context can diverge from bindings_. Mark dirty
+    // FIRST: if anything below throws, the fast path must not trust the cache
+    // and no infer path may run until a transition commits.
+    shape_state_ = ShapeState::kDirty;
     if (!context_->setInputShape(bindings_[idx].name.c_str(), dims)) {
         throw std::runtime_error("dfine: setInputShape rejected for: " + bindings_[idx].name);
     }
-    // Output shapes may now be resolved differently — refresh every binding.
+
+    // Plan the transition: resolve every binding's new shape and stage the
+    // replacement buffers in temporaries. The old buffers stay live and bound,
+    // so every failure below unwinds to a recoverable state (kDirty).
+    struct Staged {
+        nvinfer1::Dims shape{};
+        int64_t elems{0};
+        std::size_t bytes{0};
+        bool grow{false};
+        DevPtr dev;
+        HostPtr host;
+    };
+    std::vector<Staged> staged(bindings_.size());
     for (std::size_t i = 0; i < bindings_.size(); ++i) {
-        update_binding_shape_(static_cast<int>(i),
-                              context_->getTensorShape(bindings_[i].name.c_str()));
+        Staged& s = staged[i];
+        s.shape = context_->getTensorShape(bindings_[i].name.c_str());
+        s.elems = volume(s.shape);
+        s.bytes =
+            s.elems > 0 ? static_cast<std::size_t>(s.elems) * dtype_bytes(bindings_[i].dtype) : 0;
+        if (s.bytes > buffer_capacity_[i]) {
+            // Outputs normally grow together with the input (caught by the
+            // pre-check above); this covers engines where they do not.
+            if (frozen_) throw_frozen_grow_(bindings_[i].name, s.bytes);
+            s.grow = true;
+        }
     }
+    for (std::size_t i = 0; i < staged.size(); ++i) {
+        if (!staged[i].grow) continue;
+        void* dp = nullptr;
+        if (testing::failpoint("trt_session.dev_alloc")) {
+            throw std::runtime_error("dfine: [failpoint] simulated cudaMalloc failure");
+        }
+        DFINE_CUDA_CHECK(cudaMalloc(&dp, staged[i].bytes));
+        staged[i].dev.reset(dp);  // own it before the next throwing call
+        void* hp = nullptr;
+        if (testing::failpoint("trt_session.host_alloc")) {
+            throw std::runtime_error("dfine: [failpoint] simulated cudaMallocHost failure");
+        }
+        DFINE_CUDA_CHECK(cudaMallocHost(&hp, staged[i].bytes));
+        staged[i].host.reset(hp);
+    }
+
+    // Rebind grown bindings to the staged buffers. On failure, restore the
+    // addresses already swapped — the old buffers are still alive — and stay
+    // recoverable. If even a restore fails, the context may keep referencing a
+    // buffer the unwind is about to free: poison the session so nothing can
+    // enqueue through it again.
+    for (std::size_t i = 0; i < staged.size(); ++i) {
+        if (!staged[i].grow) continue;
+        const bool bound =
+            !testing::failpoint("trt_session.rebind") &&
+            context_->setTensorAddress(bindings_[i].name.c_str(), staged[i].dev.get());
+        if (!bound) {
+            for (std::size_t j = 0; j < i; ++j) {
+                if (!staged[j].grow || !device_buffers_[j]) continue;
+                const bool restored =
+                    !testing::failpoint("trt_session.rebind_restore") &&
+                    context_->setTensorAddress(bindings_[j].name.c_str(), device_buffers_[j].get());
+                if (!restored) {
+                    shape_state_ = ShapeState::kPoisoned;
+                    poison_reason_ = "a tensor address could not be restored after a failed "
+                                     "shape transition; the context may reference freed memory";
+                    require_clean_("set_input_shape");
+                }
+            }
+            throw std::runtime_error("dfine: setTensorAddress failed for: " + bindings_[i].name);
+        }
+    }
+
+    // Commit — nothing below throws. Swapping the staged buffers in frees the
+    // old ones; the cache becomes the context's mirror again.
+    for (std::size_t i = 0; i < bindings_.size(); ++i) {
+        BindingInfo& b = bindings_[i];
+        b.shape = staged[i].shape;
+        b.element_count = staged[i].elems;
+        b.bytes = staged[i].bytes;
+        if (staged[i].grow) {
+            device_buffers_[i] = std::move(staged[i].dev);
+            host_buffers_[i] = std::move(staged[i].host);
+            buffer_capacity_[i] = staged[i].bytes;
+        }
+    }
+    shape_state_ = ShapeState::kClean;
 }
 
 void TrtSession::set_input(std::string_view name, const void* host_data, std::size_t bytes) {
+    require_clean_("set_input");
     const int idx = find_index(name);
     if (idx < 0) {
         throw std::runtime_error("dfine: no such binding: " + std::string(name));
@@ -268,6 +358,7 @@ void TrtSession::set_input(std::string_view name, const void* host_data, std::si
 }
 
 void TrtSession::infer() {
+    require_clean_("infer");
     if (!context_->enqueueV3(stream_.get())) {
         throw std::runtime_error("dfine: enqueueV3 failed");
     }
@@ -275,6 +366,7 @@ void TrtSession::infer() {
 }
 
 void* TrtSession::device_buffer(std::string_view name) {
+    require_clean_("device_buffer");
     const int idx = find_index(name);
     if (idx < 0) {
         throw std::runtime_error("dfine: no such binding: " + std::string(name));
@@ -283,6 +375,7 @@ void* TrtSession::device_buffer(std::string_view name) {
 }
 
 const void* TrtSession::device_buffer(std::string_view name) const {
+    require_clean_("device_buffer");
     const int idx = find_index(name);
     if (idx < 0) {
         throw std::runtime_error("dfine: no such binding: " + std::string(name));
@@ -291,6 +384,7 @@ const void* TrtSession::device_buffer(std::string_view name) const {
 }
 
 void TrtSession::get_output(std::string_view name, void* host_data, std::size_t bytes) {
+    require_clean_("get_output");
     const int idx = find_index(name);
     if (idx < 0) {
         throw std::runtime_error("dfine: no such binding: " + std::string(name));
@@ -313,6 +407,7 @@ void TrtSession::get_output(std::string_view name, void* host_data, std::size_t 
 
 void TrtSession::get_output_f32(std::string_view name, float* host_float32,
                                 std::size_t element_count) {
+    require_clean_("get_output_f32");
     const int idx = find_index(name);
     if (idx < 0) throw std::runtime_error("dfine: no such binding: " + std::string(name));
     const auto& b = bindings_[idx];

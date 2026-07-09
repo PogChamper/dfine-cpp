@@ -39,6 +39,20 @@ struct BindingInfo {
 // ("images", "logits", "boxes"); nothing here is hardcoded.
 class TrtSession {
  public:
+    // Shape-transition state. set_input_shape is transactional: it either
+    // commits (context, buffers, and the bindings_ cache all agree) or leaves
+    // the OLD buffers live and the cache untouched.
+    //   kClean:    bindings_ mirrors the execution context; the de-dup fast
+    //              path may trust the cache and infer may run.
+    //   kDirty:    a transition failed after the context was touched; cache and
+    //              context may disagree. Recoverable — the next set_input_shape
+    //              re-issues the shape unconditionally; until it commits, every
+    //              infer-path entry point throws instead of running.
+    //   kPoisoned: an address rollback failed; the context may reference freed
+    //              memory. Unrecoverable — every entry point throws; destroy
+    //              and recreate the session.
+    enum class ShapeState : std::uint8_t { kClean, kDirty, kPoisoned };
+
     // user_managed_memory: create the execution context with kUSER_MANAGED so TRT
     // allocates NO activation memory; the caller must then supply it once via
     // set_device_memory() before the first infer (see device_memory_size()).
@@ -65,7 +79,13 @@ class TrtSession {
 
     // Dynamic-shape input: set the actual shape before infer. Re-resolves all bindings;
     // grows device + pinned-host buffers if needed and rebinds context tensor addresses.
+    // Transactional (see ShapeState): on failure the previous buffers/addresses stay
+    // live, the cache stays at the last committed shape, and the session is kDirty
+    // until a subsequent call commits. Frozen violations on the input binding are
+    // rejected before the context is touched (kClean is preserved).
     void set_input_shape(std::string_view name, const nvinfer1::Dims& dims);
+
+    [[nodiscard]] ShapeState shape_state() const noexcept { return shape_state_; }
 
     // Copy host bytes -> pinned staging -> device. host_bytes must equal binding.bytes.
     void set_input(std::string_view name, const void* host_data, std::size_t bytes);
@@ -120,11 +140,16 @@ class TrtSession {
     void load_engine_(const std::filesystem::path& path);
     bool user_managed_memory_{false};
     bool frozen_{false};
+    ShapeState shape_state_{ShapeState::kClean};
+    std::string poison_reason_;
     void parse_bindings_();
     void allocate_buffers_();
     void free_buffers_() noexcept;
-    void update_binding_shape_(int idx, const nvinfer1::Dims& dims);
     void bind_address_(int idx);
+    // Throws unless kClean: infer-path entry points must not run against a
+    // context whose shape/addresses may not match the cached bindings.
+    void require_clean_(const char* what) const;
+    [[noreturn]] void throw_frozen_grow_(const std::string& binding, std::size_t bytes) const;
 
     TrtLogger logger_;
     std::unique_ptr<nvinfer1::IRuntime> runtime_;

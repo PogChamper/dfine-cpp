@@ -556,6 +556,7 @@ def _verify_graph(onnx_path: Path, meta: dict) -> None:
             raise AssertionError(f"explicit core must have 0 GridSample nodes, found {n_grid}")
         meta["gridsample_nodes"] = 0
         _verify_io(graph, meta)
+        _verify_dynamic_batch_runs(onnx_path, meta)
         return
 
     # Native GridSample core: one 4D GridSample per feature level per decoder layer
@@ -579,6 +580,7 @@ def _verify_graph(onnx_path: Path, meta: dict) -> None:
     print(f"[verify] all {n_grid} GridSample inputs are rank-4 (no 5D — TRT-native)")
     meta["gridsample_nodes"] = n_grid
     _verify_io(graph, meta)
+    _verify_dynamic_batch_runs(onnx_path, meta)
 
 
 def _verify_io(graph, meta: dict) -> None:
@@ -602,7 +604,47 @@ def _verify_io(graph, meta: dict) -> None:
     print(f"[verify] non-standard-domain ops: {sorted(plugin_ops) or 'none'}")
     if plugin_ops:
         raise AssertionError(f"graph contains custom-domain ops (would need a TRT plugin): {plugin_ops}")
+
+    std = meta.get("std", [1.0, 1.0, 1.0])
+    if any(not (isinstance(s, (int, float)) and s > 0) for s in std):
+        raise AssertionError(f"sidecar std {std} must be positive "
+                             "(a zero collapses the runtime normalization to inf)")
     print("[verify] graph OK: native ops only, symbolic batch, 2 raw outputs")
+
+
+def _verify_dynamic_batch_runs(onnx_path: Path, meta: dict) -> None:
+    """The decisive dynamic-batch check: actually run the graph at N=1 and N=2.
+
+    A batch-1 trace bakes an internal decoder extent while every STATIC check
+    still passes (the graph I/O dims stay symbolic; the bake hides in folded
+    constants) — only execution exposes it: the query-selection GatherElements
+    rejects the second batch. The concrete output shapes double as the
+    sidecar-consistency check (num_queries/num_classes really match the graph).
+    """
+    try:
+        import numpy as np
+        import onnxruntime as ort
+    except ImportError as exc:
+        print(f"[verify] onnxruntime unavailable ({exc}); dynamic-batch run check SKIPPED — "
+              "verify_engine.py --batches 1 2 must cover it at build time")
+        return
+    sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    rng = np.random.default_rng(0)
+    q, c = meta["num_queries"], meta["num_classes"]
+    for n in (1, 2):
+        x = rng.random((n, 3, meta["input_h"], meta["input_w"]), dtype=np.float32)
+        try:
+            logits, boxes = sess.run(None, {"images": x})
+        except Exception as exc:  # noqa: BLE001  (ORT raises its own hierarchy)
+            raise AssertionError(
+                f"graph does not run at batch {n}: {exc}\nwith formally dynamic I/O this is "
+                "the baked-extent signature — re-export with --trace-batch >= 2") from exc
+        if tuple(logits.shape) != (n, q, c) or tuple(boxes.shape) != (n, q, 4):
+            raise AssertionError(
+                f"batch-{n} outputs logits{tuple(logits.shape)}/boxes{tuple(boxes.shape)} do not "
+                f"match the sidecar contract [N,{q},{c}]/[N,{q},4] — wrong --num-classes/"
+                "--num-queries, or the sidecar drifted from the graph")
+    print(f"[verify] dynamic batch OK: N=1 and N=2 run; outputs match [N,{q},{c}] / [N,{q},4]")
 
 
 def parse_args() -> argparse.Namespace:

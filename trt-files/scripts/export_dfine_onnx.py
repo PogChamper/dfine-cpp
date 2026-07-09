@@ -309,6 +309,10 @@ def _collect_meta(model: nn.Module, args: argparse.Namespace) -> dict:
         "max_batch": args.max_batch,
         "trace_batch": args.trace_batch,
         "opset": args.opset,
+        # Always present so no downstream tool ever has to GUESS the compute
+        # types: the FP16 converters overwrite both fields with their recipe.
+        "precision": "fp32",
+        "precision_mode": "fp32",
         "deform_core": args.deform,
         "trt_min_version": "8.5",
         **({"class_names": class_names} if class_names else {}),

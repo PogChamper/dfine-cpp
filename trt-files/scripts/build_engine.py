@@ -25,6 +25,7 @@ Precision modes:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -197,30 +198,43 @@ def build(args: argparse.Namespace) -> None:
     out_path.write_bytes(plan)
     print(f"[build] wrote {out_path} ({plan.nbytes / 1e6:.1f} MB)")
 
+    # Engine sidecar: the ONNX contract passes through untouched; the builder only
+    # appends facts IT owns. Precision is decided by whoever set the compute types:
+    # a weakly-typed flag mode here, or the converter's ONNX types (strongly typed) —
+    # the builder must never overwrite the converter's recipe with a flag guess
+    # (v0.3.0 stamped every strongly-typed FP16 engine "fp32" this way).
     sidecar = onnx_path.with_suffix(".json")
-    if sidecar.exists():
-        meta = json.loads(sidecar.read_text())
-        # precision is the engine's dominant compute type; the mixed build is an FP16
-        # engine (backbone+encoder) whose decoder is pinned FP32 — recorded separately.
-        if args.int8:
-            precision = "int8"
-        elif args.bf16_decoder_fp32:
-            precision = "bf16"
-        elif args.fp16 or args.fp16_decoder_fp32:
-            precision = "fp16"
-        else:
-            precision = "fp32"
-        meta.update({
-            "precision": precision,
-            "fp16_decoder_fp32": bool(args.fp16_decoder_fp32 or args.bf16_decoder_fp32),
-            "cuda_graph_compat": bool(args.cuda_graph),
-            "trt_version": trt.__version__,
-            "opt_batch": args.opt_batch,
-            "min_batch": args.min_batch,
-            "max_batch": args.max_batch,
-        })
-        out_path.with_suffix(".json").write_text(json.dumps(meta, indent=2) + "\n")
-        print(f"[build] wrote engine sidecar {out_path.with_suffix('.json')}")
+    meta = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+    if not sidecar.exists():
+        print(f"[build] NOTE: no ONNX sidecar ({sidecar.name}) — writing build facts only; "
+              "the engine sidecar will carry no class names/normalization contract")
+    if args.int8:
+        meta["precision"], meta["precision_mode"] = "int8", "weakly_typed_int8_qdq"
+    elif args.bf16_decoder_fp32:
+        meta["precision"], meta["precision_mode"] = "bf16", "weakly_typed_bf16_decoder_fp32"
+    elif args.fp16_decoder_fp32:
+        meta["precision"], meta["precision_mode"] = "fp16", "weakly_typed_fp16_decoder_fp32"
+    elif args.fp16:
+        meta["precision"], meta["precision_mode"] = "fp16", "weakly_typed_fp16"
+    else:
+        # No flag changed compute types. Normalize legacy sidecars (pre-v0.3.1
+        # exports carry no precision_mode) without inventing a recipe.
+        meta.setdefault("precision", "fp32")
+        meta.setdefault("precision_mode",
+                        "fp32" if meta["precision"] == "fp32" else "strongly_typed_unknown")
+    meta.update({
+        "network_typing": "strong" if args.strongly_typed else "weak",
+        "fp16_decoder_fp32": bool(args.fp16_decoder_fp32 or args.bf16_decoder_fp32),
+        "cuda_graph_compat": bool(args.cuda_graph),
+        "trt_version": trt.__version__,
+        "opt_batch": args.opt_batch,
+        "min_batch": args.min_batch,
+        "max_batch": args.max_batch,
+        "onnx_sha256": hashlib.sha256(onnx_path.read_bytes()).hexdigest(),
+    })
+    out_path.with_suffix(".json").write_text(json.dumps(meta, indent=2) + "\n")
+    print(f"[build] wrote engine sidecar {out_path.with_suffix('.json')} "
+          f"(precision={meta['precision']}, mode={meta['precision_mode']})")
 
 
 def parse_args() -> argparse.Namespace:

@@ -9,6 +9,13 @@ target_include_directories(dfine_test_image_layout
 target_link_libraries(dfine_test_image_layout PRIVATE dfine_warnings)
 add_test(NAME image_layout COMMAND dfine_test_image_layout)
 
+# CPU-only: sidecar value validation (links libdfine for EngineMeta only).
+add_executable(dfine_test_engine_meta test_engine_meta.cpp)
+target_include_directories(dfine_test_engine_meta
+  PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(dfine_test_engine_meta PRIVATE dfine::dfine dfine_warnings)
+add_test(NAME engine_meta COMMAND dfine_test_engine_meta)
+
 # GPU: TrtSession shape-transition recovery (frozen rejects, failpoint faults).
 add_executable(dfine_test_shape_transitions test_shape_transitions.cpp)
 target_include_directories(dfine_test_shape_transitions

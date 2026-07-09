@@ -2,8 +2,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cmath>
 #include <fstream>
 #include <stdexcept>
+#include <string>
 
 namespace dfine {
 
@@ -21,6 +23,58 @@ std::vector<std::string> read_string_array(const json& j, const char* key,
         if (!out.empty()) return out;
     }
     return fallback;
+}
+
+[[noreturn]] void bad_meta(const std::filesystem::path& path, const std::string& what) {
+    throw std::runtime_error("dfine: invalid meta sidecar " + path.string() + ": " + what);
+}
+
+// Value validation. Absent fields stay allowed (old sidecars default), but a
+// PRESENT value that would silently corrupt inference — a zero std dividing to
+// inf, a typo'd resize mode falling back to stretch, an inverted batch range —
+// must be a load-time error, not garbage detections an hour later.
+void validate_meta(const EngineMeta& m, const std::filesystem::path& path) {
+    if (m.schema_version > kEngineMetaSchemaVersion) {
+        bad_meta(path, "schema_version " + std::to_string(m.schema_version) +
+                           " is newer than this runtime supports (" +
+                           std::to_string(kEngineMetaSchemaVersion) + ") — upgrade dfine");
+    }
+    if (m.task != "detect") bad_meta(path, "task '" + m.task + "' (this runtime does detect)");
+    if (m.input_h <= 0 || m.input_w <= 0) {
+        bad_meta(path, "input_h/input_w must be positive (got " + std::to_string(m.input_h) +
+                           "x" + std::to_string(m.input_w) + ")");
+    }
+    if (m.num_classes <= 0) bad_meta(path, "num_classes must be positive");
+    if (m.num_queries <= 0) bad_meta(path, "num_queries must be positive");
+    for (int i = 0; i < 3; ++i) {
+        if (!std::isfinite(m.mean[i])) bad_meta(path, "mean has a non-finite component");
+        if (!std::isfinite(m.std[i]) || m.std[i] <= 0.0f) {
+            bad_meta(path, "std must be positive and finite (a zero collapses the "
+                           "normalization to inf)");
+        }
+    }
+    if (m.color_order != "RGB" && m.color_order != "BGR") {
+        bad_meta(path, "color_order '" + m.color_order + "' (RGB or BGR)");
+    }
+    if (m.resize != "stretch" && m.resize != "letterbox") {
+        bad_meta(path, "resize '" + m.resize + "' (stretch or letterbox)");
+    }
+    if (m.letterbox_anchor != "center" && m.letterbox_anchor != "topleft") {
+        bad_meta(path, "letterbox_anchor '" + m.letterbox_anchor + "' (center or topleft)");
+    }
+    if (m.letterbox_pad < 0 || m.letterbox_pad > 255) {
+        bad_meta(path, "letterbox_pad " + std::to_string(m.letterbox_pad) + " (0..255)");
+    }
+    if (m.min_batch < 1 || m.opt_batch < m.min_batch || m.max_batch < m.opt_batch) {
+        bad_meta(path, "batch profile must satisfy 1 <= min <= opt <= max (got " +
+                           std::to_string(m.min_batch) + "/" + std::to_string(m.opt_batch) + "/" +
+                           std::to_string(m.max_batch) + ")");
+    }
+    if (!m.class_names.empty() &&
+        m.class_names.size() != static_cast<std::size_t>(m.num_classes)) {
+        bad_meta(path, std::to_string(m.class_names.size()) + " class_names for " +
+                           std::to_string(m.num_classes) + " classes");
+    }
 }
 
 }  // namespace
@@ -64,6 +118,7 @@ EngineMeta EngineMeta::from_json_file(const std::filesystem::path& path) {
     m.input_names = read_string_array(j, "input_names", {"images"});
     m.output_names = read_string_array(j, "output_names", {"logits", "boxes"});
     m.class_names = read_string_array(j, "class_names", {});
+    validate_meta(m, path);
     return m;
 }
 

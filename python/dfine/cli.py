@@ -209,8 +209,10 @@ def _check_onnx_precision(onnx: Path, precision: str) -> None:
         return
     try:
         actual = json.loads(sidecar.read_text()).get("precision", "fp32")
-    except (OSError, ValueError):
-        return
+    except (OSError, ValueError) as e:
+        # An unreadable sidecar must not silently DISABLE this safety check.
+        raise SystemExit(f"{sidecar.name} exists but cannot be parsed ({e}); "
+                         "fix or remove it before building")
     if actual != precision:
         raise SystemExit(
             f"{onnx.name} is an {actual} export (per its sidecar) but --precision is "

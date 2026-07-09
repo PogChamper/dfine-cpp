@@ -194,6 +194,26 @@ struct DFineDetector::Impl {
         if (N <= 0) N = meta.num_queries;
         if (C <= 0) C = meta.num_classes;
 
+        if (have_meta) {
+            // A PRESENT sidecar must agree with the engine. Shape facts always
+            // come from the bindings, but labels/normalization/geometry come
+            // from the sidecar — a stale file (e.g. an old export next to a new
+            // engine) would silently mislabel every detection.
+            auto conflict = [](const char* what, int meta_v, int engine_v) {
+                if (meta_v > 0 && engine_v > 0 && meta_v != engine_v) {
+                    throw std::runtime_error(
+                        std::string("dfine: meta sidecar contradicts the engine: ") + what +
+                        " = " + std::to_string(meta_v) + " but the engine has " +
+                        std::to_string(engine_v) + " — the sidecar is stale; regenerate it "
+                        "(rebuild the engine) or remove it to fall back to engine facts");
+                }
+            };
+            conflict("input_h", meta.input_h, in_h_);
+            conflict("input_w", meta.input_w, in_w_);
+            conflict("num_queries", meta.num_queries, N);
+            conflict("num_classes", meta.num_classes, C);
+        }
+
         preprocessor = std::make_unique<ImagePreprocessor>(in_h_, in_w_);
         preprocessor->set_mean(meta.mean[0], meta.mean[1], meta.mean[2]);
         preprocessor->set_std(meta.std[0], meta.std[1], meta.std[2]);

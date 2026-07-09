@@ -661,7 +661,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-batch", type=int, default=8)
     p.add_argument("--trace-batch", type=int, default=2,
                    help="batch size of the tracing dummy; must be >=2 to keep the batch axis dynamic")
-    p.add_argument("--opset", type=int, default=16)
+    p.add_argument("--opset", type=int, default=19,
+                   help="ONNX opset (default 19, the production base: native LayerNormalization, "
+                        "required by the surgical FP16 converter; 16 = the legacy research base)")
     p.add_argument("--checkpoint", required=True, help="path to a D-FINE detection .pt/.pth")
     p.add_argument("--allow-partial-checkpoint", action="store_true",
                    help="research only: load whatever fits instead of aborting on a "

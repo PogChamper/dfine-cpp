@@ -24,12 +24,12 @@ from typing import Optional
 
 MODELS = ("n", "s", "m", "l", "x")
 _ENGINE_SUFFIX = {"fp32": "fp32", "fp16": "fp16_st"}
-# ONNX stem suffixes tried per precision, in preference order. `_fp16_st` stays first:
-# it is the name `dfine export --precision fp16` writes, and a user's own export must
-# keep beating a downloaded stock asset. `_slim` (the v0.3.0 release surgical FP16) and
-# `_op19` (the release FP32 base) are found when they are the only candidates;
-# _find_onnx warns whenever several names match.
-_ONNX_SUFFIXES = {"fp32": ("", "_op19"), "fp16": ("_fp16_st", "_slim")}
+# ONNX stem suffixes tried per precision, in preference order. `_slim` first: it is
+# both the v0.3 release surgical FP16 asset name AND what `dfine export --precision
+# fp16` writes since v0.3.1, so the production tier always wins. `_fp16_st` (the
+# legacy decoder-FP32 tier, still produced by --precision fp16-legacy) is found when
+# it is the only candidate; _find_onnx warns whenever several names match.
+_ONNX_SUFFIXES = {"fp32": ("", "_op19"), "fp16": ("_slim", "_fp16_st")}
 # Known D-FINE-seg checkpoints (relative to the seg source dir).
 _CHECKPOINTS = {
     "n": "dfine_n_coco.pt",
@@ -247,13 +247,30 @@ def _build_engine(onnx: Path, output: Path, precision: str, max_batch: int,
 
 
 def _convert_fp16(fp32_onnx: Path, output: Path) -> Path:
-    """Strongly-typed FP16 ONNX (backbone+encoder FP16, decoder FP32) via convert_fp16.py."""
+    """Legacy strongly-typed FP16 (backbone+encoder FP16, whole decoder FP32) via
+    convert_fp16.py — the v0.2 tier, kept as --precision fp16-legacy."""
     output.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable,
         str(_scripts_dir() / "convert_fp16.py"),
         "--onnx", str(fp32_onnx),
         "--output", str(output),
+    ]
+    print("[dfine] $", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+    return output
+
+
+def _convert_fp16_surgical(fp32_onnx: Path, output: Path) -> Path:
+    """Production FP16 (v0.3 surgical/slim: FP16 decoder with the FDR/deform FP32
+    island) via convert_fp16_surgical.py. Needs an opset >= 19 base graph."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        str(_scripts_dir() / "convert_fp16_surgical.py"),
+        "--onnx", str(fp32_onnx),
+        "--output", str(output),
+        "--slim",
     ]
     print("[dfine] $", " ".join(cmd))
     subprocess.run(cmd, check=True)
@@ -388,23 +405,41 @@ def cmd_build(args) -> int:
 
 def cmd_export(args) -> int:
     model = args.model
+    # Validated opset/recipe pairings only. fp16 = the v0.3 production surgical/slim
+    # recipe, which hard-requires an opset-19 base (opset-16 decomposed LayerNorm
+    # miscompiles under fine-grained FP16 in TRT 10.13); fp16-legacy = the measured
+    # v0.2 tier on its original opset-16 base. Unmeasured combinations are refused
+    # rather than silently exported.
+    if args.precision == "fp16" and args.opset is not None and args.opset < 19:
+        raise SystemExit(f"--precision fp16 (surgical) needs --opset >= 19, got {args.opset}; "
+                         "use --precision fp16-legacy for the opset-16 tier")
+    if args.precision == "fp16-legacy" and args.opset not in (None, 16):
+        raise SystemExit("--precision fp16-legacy is the validated opset-16 v0.2 tier; "
+                         "drop --opset or use --precision fp16")
+    opset = args.opset if args.opset is not None else (16 if args.precision == "fp16-legacy"
+                                                       else 19)
+
     # Always produce the FP32 ONNX first (its name has no precision suffix, matching
-    # _find_onnx for fp32). For fp16, convert it to the strongly-typed FP16 ONNX under
-    # the first-preference name `dfine build --precision fp16` / `predict` look up.
+    # _find_onnx for fp32). For the fp16 recipes, convert it under the name
+    # `dfine build --precision fp16` / `predict` resolve first (_ONNX_SUFFIXES).
     fp32_out = (
         Path(args.output)
         if (args.output and args.precision == "fp32")
         else _cache_dir() / f"dfine_{model}.onnx"
     )
-    _export_onnx(model, args.checkpoint, fp32_out, args.opset,
+    _export_onnx(model, args.checkpoint, fp32_out, opset,
                  num_classes=args.num_classes, class_names=args.class_names,
                  allow_partial=args.allow_partial_checkpoint)
     if args.precision == "fp32":
         print(f"exported {fp32_out}")
         return 0
-    fp16_out = Path(args.output) if args.output else _cache_dir() / f"dfine_{model}_fp16_st.onnx"
-    _convert_fp16(fp32_out, fp16_out)
-    print(f"exported {fp16_out}")
+    if args.precision == "fp16":
+        out = Path(args.output) if args.output else _cache_dir() / f"dfine_{model}_slim.onnx"
+        _convert_fp16_surgical(fp32_out, out)
+    else:  # fp16-legacy
+        out = Path(args.output) if args.output else _cache_dir() / f"dfine_{model}_fp16_st.onnx"
+        _convert_fp16(fp32_out, out)
+    print(f"exported {out}")
     return 0
 
 
@@ -463,8 +498,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     pe = sub.add_parser("export", help="export a checkpoint to ONNX (needs D-FINE-seg)")
     pe.add_argument("--model", choices=MODELS, default="m")
-    pe.add_argument("--precision", choices=("fp32", "fp16"), default="fp32",
-                    help="fp16 additionally runs convert_fp16 (strongly-typed FP16 ONNX)")
+    pe.add_argument("--precision", choices=("fp32", "fp16", "fp16-legacy"), default="fp32",
+                    help="fp16 = the v0.3 production surgical/slim recipe (opset 19); "
+                         "fp16-legacy = the v0.2 decoder-FP32 tier (opset 16)")
     pe.add_argument("--checkpoint", help="path to a D-FINE .pt (defaults to the known seg ckpt)")
     pe.add_argument("--num-classes", type=int, default=None,
                     help="class count of the checkpoint (default 80); a mismatch aborts "
@@ -476,8 +512,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "missing/mismatched (the sidecar records the partial load)")
     pe.add_argument("--output", help="ONNX output path (default: cache)")
     pe.add_argument("--opset", type=int, default=None,
-                    help="ONNX opset (export script default: 16; the surgical FP16 "
-                         "converter needs >= 19)")
+                    help="ONNX opset (default: 19; fp16-legacy uses its validated 16)")
     pe.set_defaults(func=cmd_export)
 
     pbe = sub.add_parser("bench", help="benchmark latency/throughput (C++ dfine_bench)")

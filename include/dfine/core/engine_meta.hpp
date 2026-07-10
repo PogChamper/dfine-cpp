@@ -51,6 +51,13 @@ struct EngineMeta {
     // Empty = unknown; consumers fall back to COCO-80 when num_classes == 80.
     std::vector<std::string> class_names;
 
+    // Which contract fields the sidecar actually ASSERTED (vs defaulted): the
+    // detector's sidecar-vs-engine cross-check may only flag a conflict on a
+    // present value — an absent field is unknown, not a claim of the default.
+    bool has_input_hw{false};
+    bool has_num_classes{false};
+    bool has_num_queries{false};
+
     [[nodiscard]] static EngineMeta from_json_file(const std::filesystem::path& path);
     void to_json_file(const std::filesystem::path& path) const;
 };

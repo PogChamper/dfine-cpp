@@ -38,18 +38,17 @@ def onnx_file(d: Path, name: str, body: bytes, sidecar: str | None = None) -> Pa
     return p
 
 
-def test_fingerprint_tracks_every_input(env):
+def test_fingerprint_tracks_artifact_content_only(env):
     d, _ = env
     a = onnx_file(d, "a.onnx", b"graph-a", '{"num_classes": 80}')
-    base = cli._artifact_fingerprint(a, 1, 8)
-    assert base == cli._artifact_fingerprint(a, 1, 8)  # deterministic
+    base = cli._artifact_fingerprint(a)
+    assert base == cli._artifact_fingerprint(a)  # deterministic
     onnx_file(d, "a.onnx", b"graph-A", '{"num_classes": 80}')
-    assert cli._artifact_fingerprint(a, 1, 8) != base  # bytes changed
+    assert cli._artifact_fingerprint(a) != base  # bytes changed
     onnx_file(d, "a.onnx", b"graph-a", '{"num_classes": 3}')
-    assert cli._artifact_fingerprint(a, 1, 8) != base  # sidecar changed
+    assert cli._artifact_fingerprint(a) != base  # sidecar changed
     onnx_file(d, "a.onnx", b"graph-a", '{"num_classes": 80}')
-    assert cli._artifact_fingerprint(a, 8, 8) != base  # profile changed
-    assert cli._artifact_fingerprint(a, 1, 8) == base  # and back
+    assert cli._artifact_fingerprint(a) == base  # and back
 
 
 def test_explicit_onnx_never_gets_a_foreign_engine(env):
@@ -57,7 +56,7 @@ def test_explicit_onnx_never_gets_a_foreign_engine(env):
     coco = onnx_file(d, "dfine_m_slim.onnx", b"coco-80")
     fresh = onnx_file(d, "custom.onnx", b"custom-3")
     # A cached engine exists — but it was built from the COCO export.
-    fp_coco = cli._artifact_fingerprint(coco, 1, 8)
+    fp_coco = cli._artifact_fingerprint(coco)
     cli._cache_engine_path("m", "fp16", fp_coco, 1, 8).write_bytes(b"coco engine")
 
     # Engine-only resolution for the custom ONNX must refuse, not serve COCO.
@@ -66,7 +65,7 @@ def test_explicit_onnx_never_gets_a_foreign_engine(env):
     # With building allowed it builds from the EXPLICIT onnx, into its own slot.
     out = cli._resolve_engine("m", None, "fp16", str(fresh), allow_build=True)
     assert builds == [(fresh, out)]
-    assert cli._artifact_fingerprint(fresh, 1, 8) in out.name
+    assert cli._artifact_fingerprint(fresh) in out.name
 
 
 def test_rebuilt_export_invalidates_the_old_entry(env):
@@ -81,6 +80,18 @@ def test_rebuilt_export_invalidates_the_old_entry(env):
     onnx_file(d, "dfine_m_slim.onnx", b"v2")
     second = cli._resolve_engine("m", None, "fp16", None, allow_build=True)
     assert second != first and len(builds) == 2
+
+
+def test_same_artifact_other_profile_is_still_served(env, capsys):
+    d, _ = env
+    a = onnx_file(d, "dfine_m_slim.onnx", b"graph")
+    fp = cli._artifact_fingerprint(a)
+    # The user built with a serving profile; predict's defaults (1/8) must still
+    # find it — the profile shapes performance, not identity.
+    built = cli._cache_engine_path("m", "fp16", fp, 8, 16)
+    built.write_bytes(b"engine")
+    assert cli._resolve_engine("m", None, "fp16", None, allow_build=False) == built
+    assert "batch profile" in capsys.readouterr().err
 
 
 def test_orphaned_engines_are_never_picked_silently(env, capsys):

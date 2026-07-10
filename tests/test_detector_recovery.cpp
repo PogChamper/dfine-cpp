@@ -16,6 +16,10 @@
 #include <cuda_runtime_api.h>
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+
+#include <unistd.h>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -146,6 +150,23 @@ int main() {
         DFINE_CHECK(equal(det.detect(f.view, kThr), base));  // batch-1 service restored
         DFINE_CHECK(det.detect_batch(four, kThr).size() == 4);  // and the grow now works
         DFINE_CHECK(equal(det.detect(f.view, kThr), base));
+    }
+
+    // --- a stale sidecar contradicting the engine must refuse to load ----------
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir =
+            fs::temp_directory_path() / ("dfine_rec_test_" + std::to_string(::getpid()));
+        fs::create_directories(dir);
+        const fs::path eng = dir / "stale.engine";
+        fs::copy_file(engine, eng, fs::copy_options::overwrite_existing);
+        std::ofstream(dir / "stale.json")
+            << R"({"num_classes": 81, "class_names": []})";  // engine has 80
+        DFINE_EXPECT_THROW((void)DFineDetector(eng), "contradicts");
+        // A facts-only sidecar asserts nothing and must load fine.
+        std::ofstream(dir / "stale.json") << R"({"trt_version": "10.13", "max_batch": 8})";
+        { DFineDetector ok(eng); (void)ok; }
+        fs::remove_all(dir);
     }
 
     // --- full-pipeline graph: rejected call neither replays nor corrupts -------

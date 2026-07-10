@@ -195,10 +195,12 @@ struct DFineDetector::Impl {
         if (C <= 0) C = meta.num_classes;
 
         if (have_meta) {
-            // A PRESENT sidecar must agree with the engine. Shape facts always
-            // come from the bindings, but labels/normalization/geometry come
-            // from the sidecar — a stale file (e.g. an old export next to a new
-            // engine) would silently mislabel every detection.
+            // A sidecar must agree with the engine on every field it ASSERTS.
+            // Shape facts always come from the bindings, but labels/
+            // normalization/geometry come from the sidecar — a stale file (e.g.
+            // an old export next to a new engine) would silently mislabel every
+            // detection. Absent fields are unknown, not claims of the defaults:
+            // a facts-only sidecar (built from a contract-less ONNX) must load.
             auto conflict = [](const char* what, int meta_v, int engine_v) {
                 if (meta_v > 0 && engine_v > 0 && meta_v != engine_v) {
                     throw std::runtime_error(
@@ -208,10 +210,12 @@ struct DFineDetector::Impl {
                         "(rebuild the engine) or remove it to fall back to engine facts");
                 }
             };
-            conflict("input_h", meta.input_h, in_h_);
-            conflict("input_w", meta.input_w, in_w_);
-            conflict("num_queries", meta.num_queries, N);
-            conflict("num_classes", meta.num_classes, C);
+            if (meta.has_input_hw) {
+                conflict("input_h", meta.input_h, in_h_);
+                conflict("input_w", meta.input_w, in_w_);
+            }
+            if (meta.has_num_queries) conflict("num_queries", meta.num_queries, N);
+            if (meta.has_num_classes) conflict("num_classes", meta.num_classes, C);
         }
 
         preprocessor = std::make_unique<ImagePreprocessor>(in_h_, in_w_);

@@ -13,6 +13,8 @@
 #include <fstream>
 #include <string>
 
+#include <unistd.h>
+
 using dfine::EngineMeta;
 
 namespace {
@@ -43,7 +45,9 @@ int main(int argc, char** argv) {
         return rc;
     }
 
-    const fs::path dir = fs::temp_directory_path() / "dfine_meta_test";
+    // Unique per-process dir: parallel ctest runs must not share/collide.
+    const fs::path dir =
+        fs::temp_directory_path() / ("dfine_meta_test_" + std::to_string(::getpid()));
     fs::create_directories(dir);
 
     // Defaults: an empty object is a valid (fully defaulted) sidecar.
@@ -91,6 +95,23 @@ int main(int argc, char** argv) {
     DFINE_EXPECT_THROW(
         (void)EngineMeta::from_json_file(write_json(dir, R"({"color_order": "BRG"})")),
         "color_order");
+    // A PRESENT mean/std of the wrong shape is an error, not a silent default.
+    DFINE_EXPECT_THROW(
+        (void)EngineMeta::from_json_file(write_json(dir, R"({"mean": [1.0, 2.0]})")),
+        "3-element");
+    DFINE_EXPECT_THROW((void)EngineMeta::from_json_file(write_json(dir, R"({"std": 255})")),
+                       "3-element");
+
+    // Presence tracking: a facts-only sidecar (no contract fields) loads and
+    // asserts nothing, so the detector's cross-check must not invent defaults.
+    {
+        const EngineMeta m = EngineMeta::from_json_file(
+            write_json(dir, R"({"trt_version": "10.13", "max_batch": 8})"));
+        DFINE_CHECK(!m.has_input_hw && !m.has_num_classes && !m.has_num_queries);
+        const EngineMeta full = EngineMeta::from_json_file(
+            write_json(dir, R"({"num_classes": 3, "class_names": ["a","b","c"]})"));
+        DFINE_CHECK(full.has_num_classes && !full.has_num_queries);
+    }
 
     fs::remove_all(dir);
     return dfine::testing::finish("test_engine_meta");

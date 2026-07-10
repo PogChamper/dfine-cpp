@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import tensorrt as trt
@@ -195,7 +196,12 @@ def build(args: argparse.Namespace) -> None:
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError("build_serialized_network returned None")
-    out_path.write_bytes(plan)
+    # Atomic: an interrupted/OOM-killed build must not leave a truncated file at
+    # the final path — the CLI cache treats existence as validity, so a partial
+    # engine would poison the entry until manually deleted.
+    tmp_path = Path(str(out_path) + ".tmp")
+    tmp_path.write_bytes(plan)
+    os.replace(tmp_path, out_path)
     print(f"[build] wrote {out_path} ({plan.nbytes / 1e6:.1f} MB)")
 
     # Engine sidecar: the ONNX contract passes through untouched; the builder only
@@ -206,25 +212,48 @@ def build(args: argparse.Namespace) -> None:
     sidecar = onnx_path.with_suffix(".json")
     meta = json.loads(sidecar.read_text()) if sidecar.exists() else {}
     if not sidecar.exists():
-        print(f"[build] NOTE: no ONNX sidecar ({sidecar.name}) — writing build facts only; "
-              "the engine sidecar will carry no class names/normalization contract")
+        # No contract sidecar: record what the parsed network itself asserts, so
+        # the runtime's sidecar-vs-engine cross-check sees the engine's real
+        # dims/classes/queries instead of absent fields (class names and
+        # normalization stay unknown — the runtime warns and uses its defaults).
+        inp_shape = network.get_input(0).shape
+        out_shapes = [tuple(network.get_output(i).shape) for i in range(network.num_outputs)]
+        logits_shape = next((s for s in out_shapes if len(s) == 3 and s[-1] != 4), None)
+        if len(inp_shape) == 4 and inp_shape[2] > 0 and inp_shape[3] > 0:
+            meta["input_h"], meta["input_w"] = int(inp_shape[2]), int(inp_shape[3])
+        if logits_shape and logits_shape[1] > 0 and logits_shape[2] > 0:
+            meta["num_queries"], meta["num_classes"] = int(logits_shape[1]), int(logits_shape[2])
+        print(f"[build] NOTE: no ONNX sidecar ({sidecar.name}) — engine sidecar carries the "
+              "graph contract + build facts only (no class names/normalization)")
     if args.int8:
         meta["precision"], meta["precision_mode"] = "int8", "weakly_typed_int8_qdq"
+        meta["fp16_decoder_fp32"] = False
     elif args.bf16_decoder_fp32:
         meta["precision"], meta["precision_mode"] = "bf16", "weakly_typed_bf16_decoder_fp32"
+        meta["fp16_decoder_fp32"] = True
     elif args.fp16_decoder_fp32:
         meta["precision"], meta["precision_mode"] = "fp16", "weakly_typed_fp16_decoder_fp32"
+        meta["fp16_decoder_fp32"] = True
     elif args.fp16:
         meta["precision"], meta["precision_mode"] = "fp16", "weakly_typed_fp16"
+        meta["fp16_decoder_fp32"] = False
     else:
-        # No flag changed compute types. Normalize legacy sidecars (pre-v0.3.1
-        # exports carry no precision_mode) without inventing a recipe.
-        meta.setdefault("precision", "fp32")
-        meta.setdefault("precision_mode",
-                        "fp32" if meta["precision"] == "fp32" else "strongly_typed_unknown")
+        # No flag changed compute types: the ONNX decides. Normalize legacy
+        # sidecars (pre-v0.3.1 exports carry no precision_mode) without inventing
+        # a recipe; a strongly-typed graph with no sidecar is honestly unknown,
+        # not "fp32". fp16_decoder_fp32 likewise passes through untouched — the
+        # legacy converter's decoder really does run FP32 (convert_fp16.py sets
+        # it), and the builder has no better knowledge here.
+        if args.strongly_typed:
+            meta.setdefault("precision", "unknown" if not sidecar.exists() else "fp32")
+            meta.setdefault("precision_mode", "strongly_typed_unknown"
+                            if meta["precision"] != "fp32" else "fp32")
+        else:
+            meta.setdefault("precision", "fp32")
+            meta.setdefault("precision_mode",
+                            "fp32" if meta["precision"] == "fp32" else "strongly_typed_unknown")
     meta.update({
         "network_typing": "strong" if args.strongly_typed else "weak",
-        "fp16_decoder_fp32": bool(args.fp16_decoder_fp32 or args.bf16_decoder_fp32),
         "cuda_graph_compat": bool(args.cuda_graph),
         "trt_version": trt.__version__,
         "opt_batch": args.opt_batch,
@@ -232,8 +261,17 @@ def build(args: argparse.Namespace) -> None:
         "max_batch": args.max_batch,
         "onnx_sha256": hashlib.sha256(onnx_path.read_bytes()).hexdigest(),
     })
-    out_path.with_suffix(".json").write_text(json.dumps(meta, indent=2) + "\n")
-    print(f"[build] wrote engine sidecar {out_path.with_suffix('.json')} "
+    # The engine sidecar must never clobber the ONNX's own sidecar: with a
+    # same-stem output next to the ONNX (the README quickstart does exactly
+    # this), with_suffix(".json") IS the ONNX sidecar. The runtime looks for
+    # "<engine-path>.json" first, so the appended name stays resolvable.
+    engine_sidecar = out_path.with_suffix(".json")
+    if sidecar.exists() and engine_sidecar.resolve() == sidecar.resolve():
+        engine_sidecar = Path(str(out_path) + ".json")
+        print(f"[build] NOTE: engine and ONNX share a stem — engine sidecar goes to "
+              f"{engine_sidecar.name} (the ONNX's own sidecar stays untouched)")
+    engine_sidecar.write_text(json.dumps(meta, indent=2) + "\n")
+    print(f"[build] wrote engine sidecar {engine_sidecar} "
           f"(precision={meta['precision']}, mode={meta['precision_mode']})")
 
 

@@ -73,6 +73,17 @@ def test_json_stdout_is_pure_even_with_resolver_diagnostics(env, capsys):
     assert "provenance" in err  # ... the diagnostic still reached the user
 
 
+def test_json_with_out_stays_pure(env, capsys, monkeypatch, tmp_path):
+    d, img = env
+    cli._cache_engine_path("m", "fp16", "aaaaaaaaaaaa", 1, 8).write_bytes(b"e")
+    monkeypatch.setattr(cli, "_draw", lambda image, dets, out: None)
+    out = str(tmp_path / "ann.png")
+    assert cli.main(["predict", "--model", "m", "--image", img, "--json", "--out", out]) == 0
+    stdout, err = capsys.readouterr()
+    json.loads(stdout)               # the 'wrote ...' confirmation must not be here
+    assert "wrote" in err
+
+
 def test_human_mode_keeps_results_on_stdout(env, capsys):
     tmp_path, img = env
     cli._cache_engine_path("m", "fp16", "aaaaaaaaaaaa", 1, 8).write_bytes(b"e")

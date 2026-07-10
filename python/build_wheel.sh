@@ -29,7 +29,7 @@ BUNDLED_SCRIPTS=dfine/_scripts
 # exit so the dev tree stays clean and stale copies can't leak into later wheels.
 # Also drop setuptools' staging dirs (python/build, dfine.egg-info) — only
 # dist/ is the product. NB: "build" here is python/build, not the C++ ../build.
-cleanup() { rm -rf "$BUNDLED" "$BUNDLED_SCRIPTS" build dfine.egg-info; }
+cleanup() { rm -rf "$BUNDLED" "$BUNDLED_SCRIPTS" build dfine.egg-info "${RPATH_SCRIPT:-}"; }
 trap cleanup EXIT
 
 "$PYTHON" -c "import build" 2>/dev/null \
@@ -60,7 +60,6 @@ CMAKE=${CMAKE:-$(command -v cmake || true)}
 RPATH_SCRIPT=$(mktemp)
 printf '%s\n' "file(RPATH_REMOVE FILE \"\$ENV{DFINE_STRIP_LIB}\")" > "$RPATH_SCRIPT"
 DFINE_STRIP_LIB="$PWD/$BUNDLED" "$CMAKE" -P "$RPATH_SCRIPT"
-rm -f "$RPATH_SCRIPT"
 if readelf -d "$BUNDLED" | grep -qE 'RPATH|RUNPATH'; then
     echo "error: bundled libdfine.so still carries an RPATH/RUNPATH:" >&2
     readelf -d "$BUNDLED" | grep -E 'RPATH|RUNPATH' >&2

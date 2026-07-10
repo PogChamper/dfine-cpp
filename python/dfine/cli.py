@@ -113,18 +113,19 @@ def _have_tensorrt() -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def _artifact_fingerprint(onnx: Path, opt_batch: int, max_batch: int) -> str:
-    """Identity of everything that determines an engine's behavior: the ONNX
-    bytes, its sidecar (class names / normalization travel into the engine
-    sidecar), and the batch profile. Two different fine-tunes of the same size
-    can never share a cache entry, and a stale engine can never shadow a fresh
-    export. 12 hex chars — enough to never collide within one cache dir."""
+def _artifact_fingerprint(onnx: Path) -> str:
+    """Identity of the MODEL an engine was built from: the ONNX bytes plus its
+    sidecar (class names / normalization travel into the engine sidecar). Two
+    different fine-tunes of the same size can never share a cache entry, and a
+    stale engine can never shadow a fresh export. The batch profile is NOT part
+    of the identity — it only shapes performance, lives in the filename, and a
+    same-artifact engine with a different profile is still the right model
+    (12 hex chars — enough to never collide within one cache dir)."""
     h = hashlib.sha256()
     h.update(onnx.read_bytes())
     sidecar = onnx.with_suffix(".json")
     if sidecar.exists():
         h.update(sidecar.read_bytes())
-    h.update(f"b1-{opt_batch}-{max_batch}".encode())
     return h.hexdigest()[:12]
 
 
@@ -132,6 +133,13 @@ def _cache_engine_path(model: str, precision: str, fingerprint: str,
                        opt_batch: int, max_batch: int) -> Path:
     return _cache_dir() / (f"dfine_{model}_{precision}-{fingerprint}-b1-{opt_batch}-{max_batch}"
                            f"-sm{_gpu_arch()}-trt{_trt_version()}.engine")
+
+
+def _same_artifact_engines(model: str, precision: str, fingerprint: str) -> list:
+    """Every cached engine built from exactly this artifact, any batch profile."""
+    pattern = (f"dfine_{model}_{precision}-{fingerprint}-b*"
+               f"-sm{_gpu_arch()}-trt{_trt_version()}.engine")
+    return sorted(_cache_dir().glob(pattern))
 
 
 def _legacy_cache_engine_path(model: str, precision: str) -> Path:
@@ -191,10 +199,22 @@ def _resolve_engine(
 
     onnx = _find_onnx(model, precision, onnx_arg)
     if onnx is not None:
-        fp = _artifact_fingerprint(onnx, opt_batch, max_batch)
+        fp = _artifact_fingerprint(onnx)
         cached = _cache_engine_path(model, precision, fp, opt_batch, max_batch)
         if cached.exists():
             return cached
+        # Same artifact, different batch profile (e.g. the user ran
+        # `dfine build --opt-batch 8`): still the right model — the profile only
+        # shapes performance. Prefer the largest max-batch entry deterministically.
+        others = _same_artifact_engines(model, precision, fp)
+        if others:
+            pick = others[-1]
+            if len(others) > 1:
+                _log(f"[dfine] {len(others)} engines for this artifact with different "
+                     f"batch profiles; using {pick.name}")
+            else:
+                _log(f"[dfine] using {pick.name} (same artifact, different batch profile)")
+            return pick
         if allow_build:
             _log(f"[dfine] no cached engine for {onnx.name} ({fp}) — "
                  f"building {model} ({precision}) ...")
@@ -223,6 +243,7 @@ def _resolve_engine(
     if repo:
         dev = repo / "trt-files" / "engines" / f"dfine_{model}_{_ENGINE_SUFFIX[precision]}.engine"
         if dev.exists():
+            _log(f"[dfine] using dev-tree engine {dev.name} — not bound to an ONNX artifact")
             return dev
     if allow_build:
         raise SystemExit(
@@ -405,7 +426,11 @@ def _draw(image_path: str, dets, out_path: str) -> None:
 
 def cmd_predict(args) -> int:
     import numpy as np
-    from PIL import Image
+
+    try:
+        from PIL import Image
+    except ImportError:
+        raise SystemExit("predict needs pillow — install the CLI extra: pip install 'dfine[cli]'")
 
     from .detector import Detector
 
@@ -426,7 +451,7 @@ def cmd_predict(args) -> int:
 
     if args.out:
         _draw(args.image, dets, args.out)
-        print(f"wrote {args.out}")
+        _log(f"wrote {args.out}")
     return 0
 
 
@@ -462,11 +487,27 @@ def cmd_build(args) -> int:
     if args.output:
         out = Path(args.output)
     else:
-        fp = _artifact_fingerprint(onnx, args.opt_batch, args.max_batch)
+        fp = _artifact_fingerprint(onnx)
         out = _cache_engine_path(args.model, args.precision, fp, args.opt_batch, args.max_batch)
     _build_engine(onnx, out, args.precision, args.max_batch, args.opt_batch)
     print(f"built {out}")
     return 0
+
+
+def _warn_if_replacing_different_checkpoint(onnx_out: Path) -> None:
+    """An export into the cache overwrites the previous export of that stem. Same
+    checkpoint = routine refresh; a DIFFERENT checkpoint deserves a loud note,
+    because every later `dfine predict --model X` resolves the new artifact."""
+    sidecar = onnx_out.with_suffix(".json")
+    if not sidecar.exists():
+        return
+    try:
+        old = json.loads(sidecar.read_text()).get("checkpoint_sha256")
+    except (OSError, ValueError):
+        return
+    if old:
+        _log(f"[dfine] note: replacing cached {onnx_out.name} (previous checkpoint "
+             f"{old[:12]}…) — pass --output to keep exports side by side")
 
 
 def cmd_export(args) -> int:
@@ -486,13 +527,16 @@ def cmd_export(args) -> int:
                                                        else 19)
 
     # Always produce the FP32 ONNX first (its name has no precision suffix, matching
-    # _find_onnx for fp32). For the fp16 recipes, convert it under the name
-    # `dfine build --precision fp16` / `predict` resolve first (_ONNX_SUFFIXES).
-    fp32_out = (
-        Path(args.output)
-        if (args.output and args.precision == "fp32")
-        else _cache_dir() / f"dfine_{model}.onnx"
-    )
+    # _find_onnx for fp32). With --output, EVERYTHING lands next to the requested
+    # path — an explicit destination must not mutate the shared cache as a side
+    # effect (the FP32 base of an fp16 export goes to <output-stem>_op19.onnx).
+    if args.output:
+        out_path = Path(args.output)
+        fp32_out = (out_path if args.precision == "fp32"
+                    else out_path.parent / (out_path.stem + "_op19.onnx"))
+    else:
+        fp32_out = _cache_dir() / f"dfine_{model}.onnx"
+        _warn_if_replacing_different_checkpoint(fp32_out)
     _export_onnx(model, args.checkpoint, fp32_out, opset,
                  num_classes=args.num_classes, class_names=args.class_names,
                  allow_partial=args.allow_partial_checkpoint)

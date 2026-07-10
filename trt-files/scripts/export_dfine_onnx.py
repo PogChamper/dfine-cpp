@@ -504,18 +504,29 @@ def export(args: argparse.Namespace) -> None:
         opset_version=args.opset,
         do_constant_folding=True,
     )
+    # Stage everything in a temp file and move into place only after EVERY gate
+    # passes: a failed postcondition must not leave a consumable artifact at the
+    # output path (the CLI cache auto-discovers it, and a rejected graph next to
+    # the PREVIOUS export's sidecar would fingerprint as a fresh valid pair).
     wrapped = RawDetect(model)
+    tmp_path = Path(str(onnx_path) + ".tmp")
     try:
-        torch.onnx.export(wrapped, (dummy,), str(onnx_path), dynamo=False, **export_kwargs)
-    except TypeError:
-        torch.onnx.export(wrapped, (dummy,), str(onnx_path), **export_kwargs)
+        try:
+            torch.onnx.export(wrapped, (dummy,), str(tmp_path), dynamo=False, **export_kwargs)
+        except TypeError:
+            torch.onnx.export(wrapped, (dummy,), str(tmp_path), **export_kwargs)
+        print(f"[export] staged {tmp_path}")
+
+        if not args.no_simplify:
+            _simplify(tmp_path, args)
+
+        _verify_graph(tmp_path, meta)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    os.replace(tmp_path, onnx_path)
     print(f"[export] wrote {onnx_path}")
-
-    if not args.no_simplify:
-        _simplify(onnx_path, args)
-
-    _verify_graph(onnx_path, meta)
-
     sidecar = onnx_path.with_suffix(".json")
     sidecar.write_text(json.dumps(meta, indent=2) + "\n")
     print(f"[export] wrote sidecar {sidecar}")

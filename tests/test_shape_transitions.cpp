@@ -118,6 +118,7 @@ int main() {
 
         arm_failpoint(point, 1);
         DFINE_EXPECT_THROW(s->set_input_shape(io.input, nvinfer1::Dims4{4, 3, io.h, io.w}), "");
+        arm_failpoint(point, 0);  // defensive: a regressed fault path must not leak the arm
         DFINE_CHECK(s->shape_state() == ShapeState::kDirty);
         // Until a transition commits, infer paths refuse to run...
         DFINE_EXPECT_THROW(s->infer(), "stale");

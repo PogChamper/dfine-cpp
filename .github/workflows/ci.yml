@@ -109,6 +109,14 @@ jobs:
           export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
           ./build/dfine_detect --help
           ./build/dfine_bench --help
+      - name: ctest (CPU suites; GPU suites skip via 77)
+        # image_layout and engine_meta are CPU-only and must PASS here; the
+        # shape-transition/recovery suites need a GPU + DFINE_TEST_ENGINE and
+        # report SKIP_RETURN_CODE 77 on hosted runners. Building the test
+        # binaries without ever running ctest was a v0.3.1-review finding.
+        run: |
+          export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+          ctest --test-dir build --output-on-failure
 
   python-nogpu:
     name: python bindings (no-GPU pytest subset)
@@ -119,18 +127,26 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install package + test deps
-        run: pip install -e "python/[dev]"
+        # Beyond the dev extra: CPU torch + onnx/onnxruntime so the release-gate
+        # suites (strict checkpoint loading, the mandatory ORT N=1/2 dynamic-batch
+        # postcondition) actually EXECUTE here instead of importorskip-ping away —
+        # a v0.3.1-review finding: CI was green with those gates never run.
+        run: |
+          pip install -e "python/[dev]"
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install onnx onnxruntime
       - name: pytest
-        # conftest.py fixtures skip per-test when libdfine.so, an engine, or a
-        # GPU is missing. In a bare checkout (no build/, engines gitignored)
-        # exactly one test executes — test_package_version_is_static — and the
-        # other 13 skip at the `lib` fixture. Measured under these conditions:
-        # "1 passed, 13 skipped". pytest already fails the job on collection
-        # errors and on zero collected tests (exit 5); the grep additionally
-        # rejects an all-skipped run where nothing passed.
+        # conftest.py fixtures still skip the GPU-bound subset (libdfine/engine/
+        # GPU missing). The CPU subset — CLI cache/export/json suites plus the
+        # export safety gates — must pass; the greps reject an all-skipped run
+        # AND any skip inside the two release-gate suites.
         run: |
           pytest python/tests -rs | tee pytest-nogpu.log
           grep -qE '[1-9][0-9]* passed' pytest-nogpu.log
+          pytest python/tests/test_export_checkpoint.py \
+                 python/tests/test_export_postconditions.py -rs | tee pytest-gates.log
+          grep -qE '[1-9][0-9]* passed' pytest-gates.log
+          ! grep -qE '[1-9][0-9]* skipped' pytest-gates.log
 
   wheel:
     name: wheel (bundled libdfine.so, linux_x86_64)

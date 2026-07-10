@@ -13,6 +13,7 @@ import pytest
 onnx = pytest.importorskip("onnx")
 pytest.importorskip("onnxruntime")
 np = pytest.importorskip("numpy")
+pytest.importorskip("torch")  # the exporter module imports torch at import time
 
 from onnx import TensorProto, helper  # noqa: E402
 

@@ -95,13 +95,21 @@ EngineMeta EngineMeta::from_json_file(const std::filesystem::path& path) {
     m.input_w = j.value("input_w", 640);
     m.num_classes = j.value("num_classes", 80);
     m.num_queries = j.value("num_queries", 300);
+    m.has_input_hw = j.contains("input_h") || j.contains("input_w");
+    m.has_num_classes = j.contains("num_classes");
+    m.has_num_queries = j.contains("num_queries");
 
-    if (j.contains("mean") && j["mean"].is_array() && j["mean"].size() == 3) {
-        m.mean = j["mean"].get<std::array<float, 3>>();
+    // A PRESENT mean/std that is not a 3-element numeric array must be an error,
+    // not a silent fall-through to the defaults — the value the author wrote
+    // would otherwise be ignored and every frame mis-normalized quietly.
+    for (const char* key : {"mean", "std"}) {
+        if (j.contains(key) && !(j[key].is_array() && j[key].size() == 3)) {
+            bad_meta(path, std::string(key) + " must be a 3-element array (got " +
+                               j[key].dump() + ")");
+        }
     }
-    if (j.contains("std") && j["std"].is_array() && j["std"].size() == 3) {
-        m.std = j["std"].get<std::array<float, 3>>();
-    }
+    if (j.contains("mean")) m.mean = j["mean"].get<std::array<float, 3>>();
+    if (j.contains("std")) m.std = j["std"].get<std::array<float, 3>>();
 
     m.color_order = j.value("color_order", std::string{"RGB"});
     m.resize = j.value("resize", std::string{"stretch"});

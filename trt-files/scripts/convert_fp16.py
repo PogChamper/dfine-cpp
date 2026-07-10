@@ -26,6 +26,28 @@ from onnx import TensorProto, numpy_helper
 from onnxconverter_common import float16
 
 
+
+def _publish_pair(graph_tmp, graph_out, sidecar_text, sidecar_out, tag):
+    """Publish a staged graph and its (optional) sidecar with the smallest
+    possible inconsistency window: the sidecar is staged BEFORE either swap,
+    then both land via two adjacent atomic renames (each rename atomic; the
+    pair is not jointly transactional — the window is two syscalls).
+    sidecar_text=None means this producer has no contract to carry through;
+    a sidecar already sitting at sidecar_out would then describe the PREVIOUS
+    graph, so it is removed in the same publish step."""
+    graph_tmp, graph_out = Path(graph_tmp), Path(graph_out)
+    sidecar_out = Path(sidecar_out)
+    sc_tmp = None
+    if sidecar_text is not None:
+        sc_tmp = Path(str(sidecar_out) + ".tmp")
+        sc_tmp.write_text(sidecar_text)
+    os.replace(graph_tmp, graph_out)
+    if sc_tmp is not None:
+        os.replace(sc_tmp, sidecar_out)
+    elif sidecar_out.exists():
+        sidecar_out.unlink()
+        print(f"[{tag}] removed stale sidecar {sidecar_out} (source has none)")
+
 def keep_fp32_nodes(model: onnx.ModelProto, prefixes: tuple[str, ...]) -> list[str]:
     return [n.name for n in model.graph.node if n.name.startswith(prefixes)]
 
@@ -125,28 +147,22 @@ def main(args: argparse.Namespace) -> None:
         print(f"[fp16] harmonized {n_harmonized} mixed Half/Float node inputs "
               "(strongly-typed TRT would reject them)")
     onnx.checker.check_model(model16)
-    # Stage both files, then two adjacent atomic swaps (pair not jointly
-    # transactional — the window is two syscalls).
     tmp = Path(str(out_path) + ".tmp")
     onnx.save(model16, str(tmp))
     side = onnx_path.with_suffix(".json")
-    tmp_sc = sidecar = None
+    sidecar_text = None
     if side.exists():
         meta = json.loads(side.read_text())
         meta["precision"] = "fp16"
         meta["fp16_decoder_fp32"] = True
         meta["precision_mode"] = "strongly_typed_onnx_fp16"
-        sidecar = out_path.with_suffix(".json")
-        tmp_sc = Path(str(sidecar) + ".tmp")
-        tmp_sc.write_text(json.dumps(meta, indent=2) + "\n")
-    os.replace(tmp, out_path)
-    if tmp_sc is not None:
-        os.replace(tmp_sc, sidecar)
+        sidecar_text = json.dumps(meta, indent=2) + "\n"
+    _publish_pair(tmp, out_path, sidecar_text, out_path.with_suffix(".json"), "fp16")
 
     n_cast = sum(1 for n in model16.graph.node if n.op_type == "Cast")
     print(f"[fp16] wrote {out_path} ({n_cast} Cast nodes at precision boundaries)")
-    if sidecar is not None:
-        print(f"[fp16] wrote sidecar {sidecar}")
+    if sidecar_text is not None:
+        print(f"[fp16] wrote sidecar {out_path.with_suffix('.json')}")
 
 
 def parse_args() -> argparse.Namespace:

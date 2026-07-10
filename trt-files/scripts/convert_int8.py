@@ -34,6 +34,28 @@ from onnxruntime.quantization import (  # noqa: E402
 from onnxruntime.quantization.shape_inference import quant_pre_process  # noqa: E402
 
 
+
+def _publish_pair(graph_tmp, graph_out, sidecar_text, sidecar_out, tag):
+    """Publish a staged graph and its (optional) sidecar with the smallest
+    possible inconsistency window: the sidecar is staged BEFORE either swap,
+    then both land via two adjacent atomic renames (each rename atomic; the
+    pair is not jointly transactional — the window is two syscalls).
+    sidecar_text=None means this producer has no contract to carry through;
+    a sidecar already sitting at sidecar_out would then describe the PREVIOUS
+    graph, so it is removed in the same publish step."""
+    graph_tmp, graph_out = Path(graph_tmp), Path(graph_out)
+    sidecar_out = Path(sidecar_out)
+    sc_tmp = None
+    if sidecar_text is not None:
+        sc_tmp = Path(str(sidecar_out) + ".tmp")
+        sc_tmp.write_text(sidecar_text)
+    os.replace(graph_tmp, graph_out)
+    if sc_tmp is not None:
+        os.replace(sc_tmp, sidecar_out)
+    elif sidecar_out.exists():
+        sidecar_out.unlink()
+        print(f"[{tag}] removed stale sidecar {sidecar_out} (source has none)")
+
 def decoder_node_names(model: onnx.ModelProto, prefixes: tuple[str, ...]) -> list[str]:
     """Every node whose name is under the decoder scope — these stay FP32 (no Q/DQ)."""
     return [n.name for n in model.graph.node if n.name.startswith(prefixes)]
@@ -88,8 +110,9 @@ def main(args: argparse.Namespace) -> None:
               "entropy": CalibrationMethod.Entropy,
               "percentile": CalibrationMethod.Percentile}[args.calib_method]
 
+    quant_tmp = Path(str(out_path) + ".tmp")
     quantize_static(
-        str(pre_path), str(out_path), reader,
+        str(pre_path), str(quant_tmp), reader,
         quant_format=QuantFormat.QDQ,
         op_types_to_quantize=["Conv", "MatMul"],  # the compute-heavy backbone/encoder ops
         nodes_to_exclude=exclude,                  # decoder stays FP32
@@ -105,22 +128,22 @@ def main(args: argparse.Namespace) -> None:
     )
     pre_path.unlink(missing_ok=True)
 
-    q = onnx.load(str(out_path))
+    q = onnx.load(str(quant_tmp))
     n_q = sum(1 for n in q.graph.node if n.op_type == "QuantizeLinear")
     n_dq = sum(1 for n in q.graph.node if n.op_type == "DequantizeLinear")
-    print(f"[int8] wrote {out_path}: {n_q} QuantizeLinear / {n_dq} DequantizeLinear nodes")
 
     # Carry the descriptive sidecar through so the C++ runtime stays model-generic.
     side = onnx_path.with_suffix(".json")
+    sidecar_text = None
     if side.exists():
         import json
         meta = json.loads(side.read_text())
         meta["precision"] = "int8"
         meta["quant"] = "qdq_backbone_encoder"
-        sidecar = out_path.with_suffix(".json")
-        sc_tmp = Path(str(sidecar) + ".tmp")
-        sc_tmp.write_text(json.dumps(meta, indent=2) + "\n")
-        os.replace(sc_tmp, sidecar)
+        sidecar_text = json.dumps(meta, indent=2) + "\n"
+    _publish_pair(quant_tmp, out_path, sidecar_text, out_path.with_suffix(".json"), "int8")
+    print(f"[int8] wrote {out_path}: {n_q} QuantizeLinear / {n_dq} DequantizeLinear nodes")
+    if sidecar_text is not None:
         print(f"[int8] wrote sidecar {out_path.with_suffix('.json')}")
 
 

@@ -39,6 +39,28 @@ _NO_COMPUTE_PRECISION = (trt.LayerType.CONSTANT, trt.LayerType.SHAPE,
                          trt.LayerType.ASSERTION, trt.LayerType.IDENTITY)
 
 
+
+def _publish_pair(graph_tmp, graph_out, sidecar_text, sidecar_out, tag):
+    """Publish a staged graph and its (optional) sidecar with the smallest
+    possible inconsistency window: the sidecar is staged BEFORE either swap,
+    then both land via two adjacent atomic renames (each rename atomic; the
+    pair is not jointly transactional — the window is two syscalls).
+    sidecar_text=None means this producer has no contract to carry through;
+    a sidecar already sitting at sidecar_out would then describe the PREVIOUS
+    graph, so it is removed in the same publish step."""
+    graph_tmp, graph_out = Path(graph_tmp), Path(graph_out)
+    sidecar_out = Path(sidecar_out)
+    sc_tmp = None
+    if sidecar_text is not None:
+        sc_tmp = Path(str(sidecar_out) + ".tmp")
+        sc_tmp.write_text(sidecar_text)
+    os.replace(graph_tmp, graph_out)
+    if sc_tmp is not None:
+        os.replace(sc_tmp, sidecar_out)
+    elif sidecar_out.exists():
+        sidecar_out.unlink()
+        print(f"[{tag}] removed stale sidecar {sidecar_out} (source has none)")
+
 def pin_decoder_fp32(network: "trt.INetworkDefinition", prefixes: tuple[str, ...],
                      verbose: bool) -> int:
     """Force every float-compute decoder layer to FP32 while the rest of the graph is
@@ -198,11 +220,11 @@ def build(args: argparse.Namespace) -> None:
         raise RuntimeError("build_serialized_network returned None")
     # Atomic: an interrupted/OOM-killed build must not leave a truncated file at
     # the final path — the CLI cache treats existence as validity, so a partial
-    # engine would poison the entry until manually deleted.
+    # engine would poison the entry until manually deleted. The engine is staged
+    # here and published only after its sidecar is staged too, so the pair lands
+    # in two adjacent renames.
     tmp_path = Path(str(out_path) + ".tmp")
     tmp_path.write_bytes(plan)
-    os.replace(tmp_path, out_path)
-    print(f"[build] wrote {out_path} ({plan.nbytes / 1e6:.1f} MB)")
 
     # Engine sidecar: the ONNX contract passes through untouched; the builder only
     # appends facts IT owns. Precision is decided by whoever set the compute types:
@@ -270,9 +292,9 @@ def build(args: argparse.Namespace) -> None:
         engine_sidecar = Path(str(out_path) + ".json")
         print(f"[build] NOTE: engine and ONNX share a stem — engine sidecar goes to "
               f"{engine_sidecar.name} (the ONNX's own sidecar stays untouched)")
-    sc_tmp = Path(str(engine_sidecar) + ".tmp")
-    sc_tmp.write_text(json.dumps(meta, indent=2) + "\n")
-    os.replace(sc_tmp, engine_sidecar)
+    _publish_pair(tmp_path, out_path, json.dumps(meta, indent=2) + "\n",
+                  engine_sidecar, "build")
+    print(f"[build] wrote {out_path} ({plan.nbytes / 1e6:.1f} MB)")
     print(f"[build] wrote engine sidecar {engine_sidecar} "
           f"(precision={meta['precision']}, mode={meta['precision_mode']})")
 

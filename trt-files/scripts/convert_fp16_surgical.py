@@ -49,6 +49,28 @@ FDR_SCOPES = _EXTRA + (
 )
 
 
+
+def _publish_pair(graph_tmp, graph_out, sidecar_text, sidecar_out, tag):
+    """Publish a staged graph and its (optional) sidecar with the smallest
+    possible inconsistency window: the sidecar is staged BEFORE either swap,
+    then both land via two adjacent atomic renames (each rename atomic; the
+    pair is not jointly transactional — the window is two syscalls).
+    sidecar_text=None means this producer has no contract to carry through;
+    a sidecar already sitting at sidecar_out would then describe the PREVIOUS
+    graph, so it is removed in the same publish step."""
+    graph_tmp, graph_out = Path(graph_tmp), Path(graph_out)
+    sidecar_out = Path(sidecar_out)
+    sc_tmp = None
+    if sidecar_text is not None:
+        sc_tmp = Path(str(sidecar_out) + ".tmp")
+        sc_tmp.write_text(sidecar_text)
+    os.replace(graph_tmp, graph_out)
+    if sc_tmp is not None:
+        os.replace(sc_tmp, sidecar_out)
+    elif sidecar_out.exists():
+        sidecar_out.unlink()
+        print(f"[{tag}] removed stale sidecar {sidecar_out} (source has none)")
+
 def is_glue_leaf(name: str) -> bool:
     """Leaf op directly under /model/decoder/ or /model/decoder/decoder/."""
     for prefix in ("/model/decoder/decoder/", "/model/decoder/"):
@@ -280,24 +302,18 @@ def main() -> None:
             raise RuntimeError("harmonize did not converge")
     print(f"[surgical] harmonized {total} mixed-type inputs")
     onnx.checker.check_model(model16)
-    # Atomic writes: BOTH files are staged before either swap, so the
-    # graph/sidecar pair exchanges in two adjacent renames (each atomic; the
-    # pair is not jointly transactional — the window is two syscalls).
     tmp = args.output + ".tmp"
     onnx.save(model16, tmp)
     src_sidecar = Path(args.onnx).with_suffix(".json")
-    tmp_sc = out_sidecar = None
+    sidecar_text = None
     if src_sidecar.exists():
         meta = json.loads(src_sidecar.read_text())
         meta["precision"] = "fp16"
         meta["precision_mode"] = ("strongly_typed_onnx_fp16_surgical_slim" if slim
                                   else "strongly_typed_onnx_fp16_surgical_decoder")
-        out_sidecar = Path(args.output).with_suffix(".json")
-        tmp_sc = Path(str(out_sidecar) + ".tmp")
-        tmp_sc.write_text(json.dumps(meta, indent=2) + "\n")
-    os.replace(tmp, args.output)
-    if tmp_sc is not None:
-        os.replace(tmp_sc, out_sidecar)
+        sidecar_text = json.dumps(meta, indent=2) + "\n"
+    _publish_pair(tmp, args.output, sidecar_text,
+                  Path(args.output).with_suffix(".json"), "surgical")
     print(f"[surgical] wrote {args.output}")
 
 

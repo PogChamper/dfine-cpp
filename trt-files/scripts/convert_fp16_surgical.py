@@ -280,22 +280,24 @@ def main() -> None:
             raise RuntimeError("harmonize did not converge")
     print(f"[surgical] harmonized {total} mixed-type inputs")
     onnx.checker.check_model(model16)
-    # Atomic: a converter interrupted mid-write must not leave a half-written
-    # graph at the final path the CLI cache auto-discovers.
+    # Atomic writes: BOTH files are staged before either swap, so the
+    # graph/sidecar pair exchanges in two adjacent renames (each atomic; the
+    # pair is not jointly transactional — the window is two syscalls).
     tmp = args.output + ".tmp"
     onnx.save(model16, tmp)
-    os.replace(tmp, args.output)
-
-    sidecar = Path(args.onnx).with_suffix(".json")
-    if sidecar.exists():
-        meta = json.loads(sidecar.read_text())
+    src_sidecar = Path(args.onnx).with_suffix(".json")
+    tmp_sc = out_sidecar = None
+    if src_sidecar.exists():
+        meta = json.loads(src_sidecar.read_text())
         meta["precision"] = "fp16"
         meta["precision_mode"] = ("strongly_typed_onnx_fp16_surgical_slim" if slim
                                   else "strongly_typed_onnx_fp16_surgical_decoder")
-        sidecar = Path(args.output).with_suffix(".json")
-        tmp_sc = Path(str(sidecar) + ".tmp")
+        out_sidecar = Path(args.output).with_suffix(".json")
+        tmp_sc = Path(str(out_sidecar) + ".tmp")
         tmp_sc.write_text(json.dumps(meta, indent=2) + "\n")
-        os.replace(tmp_sc, sidecar)
+    os.replace(tmp, args.output)
+    if tmp_sc is not None:
+        os.replace(tmp_sc, out_sidecar)
     print(f"[surgical] wrote {args.output}")
 
 

@@ -547,10 +547,15 @@ def export(args: argparse.Namespace) -> None:
         tmp_path.unlink(missing_ok=True)
         raise
 
-    os.replace(tmp_path, onnx_path)
-    print(f"[export] wrote {onnx_path}")
+    # Both files are fully staged before either swap, so the graph/sidecar pair
+    # exchanges in two adjacent atomic renames (each file individually atomic;
+    # the pair is not jointly transactional — the window is two syscalls).
     sidecar = onnx_path.with_suffix(".json")
-    sidecar.write_text(json.dumps(meta, indent=2) + "\n")
+    sc_tmp = Path(str(sidecar) + ".tmp")
+    sc_tmp.write_text(json.dumps(meta, indent=2) + "\n")
+    os.replace(tmp_path, onnx_path)
+    os.replace(sc_tmp, sidecar)
+    print(f"[export] wrote {onnx_path}")
     print(f"[export] wrote sidecar {sidecar}")
 
 

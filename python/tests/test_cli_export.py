@@ -78,6 +78,22 @@ def test_fp16_output_derives_release_base_name(harness, tmp_path):
     assert flag(calls[1], "--output").endswith("dfine_m_slim.onnx")
 
 
+def test_legacy_and_custom_opset_bases_never_masquerade_as_op19(harness, tmp_path):
+    calls, ckpt = harness
+    # fp16-legacy exports an opset-16 base: naming it _op19 would let it clobber
+    # the real production asset in a release dir.
+    out = str(tmp_path / "dfine_m_fp16_st.onnx")
+    assert cli.main(["export", "--model", "m", "--precision", "fp16-legacy",
+                     "--checkpoint", ckpt, "--output", out]) == 0
+    assert flag(calls[0], "--output").endswith("dfine_m_op16.onnx")
+    calls.clear()
+    # An explicitly requested newer opset is named for what it is.
+    out20 = str(tmp_path / "dfine_m_slim.onnx")
+    assert cli.main(["export", "--model", "m", "--precision", "fp16", "--opset", "20",
+                     "--checkpoint", ckpt, "--output", out20]) == 0
+    assert flag(calls[0], "--output").endswith("dfine_m_op20.onnx")
+
+
 def test_custom_model_args_passthrough(harness):
     calls, ckpt = harness
     assert cli.main(["export", "--model", "s", "--checkpoint", ckpt,

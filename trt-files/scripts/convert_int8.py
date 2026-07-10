@@ -17,6 +17,7 @@ it with profile.py before trusting the engine.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -116,7 +117,10 @@ def main(args: argparse.Namespace) -> None:
         meta = json.loads(side.read_text())
         meta["precision"] = "int8"
         meta["quant"] = "qdq_backbone_encoder"
-        out_path.with_suffix(".json").write_text(json.dumps(meta, indent=2) + "\n")
+        sidecar = out_path.with_suffix(".json")
+        sc_tmp = Path(str(sidecar) + ".tmp")
+        sc_tmp.write_text(json.dumps(meta, indent=2) + "\n")
+        os.replace(sc_tmp, sidecar)
         print(f"[int8] wrote sidecar {out_path.with_suffix('.json')}")
 
 

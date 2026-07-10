@@ -125,14 +125,12 @@ def main(args: argparse.Namespace) -> None:
         print(f"[fp16] harmonized {n_harmonized} mixed Half/Float node inputs "
               "(strongly-typed TRT would reject them)")
     onnx.checker.check_model(model16)
+    # Stage both files, then two adjacent atomic swaps (pair not jointly
+    # transactional — the window is two syscalls).
     tmp = Path(str(out_path) + ".tmp")
     onnx.save(model16, str(tmp))
-    os.replace(tmp, out_path)
-
-    n_cast = sum(1 for n in model16.graph.node if n.op_type == "Cast")
-    print(f"[fp16] wrote {out_path} ({n_cast} Cast nodes at precision boundaries)")
-
     side = onnx_path.with_suffix(".json")
+    tmp_sc = sidecar = None
     if side.exists():
         meta = json.loads(side.read_text())
         meta["precision"] = "fp16"
@@ -141,8 +139,14 @@ def main(args: argparse.Namespace) -> None:
         sidecar = out_path.with_suffix(".json")
         tmp_sc = Path(str(sidecar) + ".tmp")
         tmp_sc.write_text(json.dumps(meta, indent=2) + "\n")
+    os.replace(tmp, out_path)
+    if tmp_sc is not None:
         os.replace(tmp_sc, sidecar)
-        print(f"[fp16] wrote sidecar {out_path.with_suffix('.json')}")
+
+    n_cast = sum(1 for n in model16.graph.node if n.op_type == "Cast")
+    print(f"[fp16] wrote {out_path} ({n_cast} Cast nodes at precision boundaries)")
+    if sidecar is not None:
+        print(f"[fp16] wrote sidecar {sidecar}")
 
 
 def parse_args() -> argparse.Namespace:

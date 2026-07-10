@@ -1,8 +1,9 @@
-"""Engine-cache identity: an engine is bound to the exact ONNX (+sidecar +batch
-profile) it was built from, an explicit --onnx can never lose to a cache entry
-built from something else, and provenance-less fallbacks are never picked
-silently among several candidates. Regression for the v0.3.0 shadowing bug
-(a stale COCO engine silently served a fresh custom export)."""
+"""Engine-cache identity: an engine is bound to the exact ONNX + sidecar bytes
+it was built from (the batch profile lives in the filename but is NOT identity),
+an explicit --onnx can never lose to a cache entry built from something else,
+and provenance-less fallbacks are never picked silently among several
+candidates. Regression for the v0.3.0 shadowing bug (a stale COCO engine
+silently served a fresh custom export)."""
 
 from __future__ import annotations
 

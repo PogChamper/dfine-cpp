@@ -53,7 +53,7 @@ shareable — cheap to build, high visibility, low technical risk.
 | WASM/WebGPU browser demo | HIGH-HYPE — needs a timeboxed feasibility spike first | M | Very high | Medium (operator/memory coverage on browser runtimes unproven) |
 | Real-time demo apps (video/camera, FPS overlay) | WORTH-IT | M | High | Low |
 | Zero-setup CLI (export → build → cache → run) | ✅ DONE (M4, `dfine` CLI) | M | Medium-high | Low-medium |
-| Dockerfile, GPU-runner CI, engine cache/registry | NICE | S-M | Incremental | Low |
+| Dockerfile ✅ · engine cache ✅ (v0.3.1, content-fingerprinted) · GPU-runner CI | NICE (CI runner remains) | S-M | Incremental | Low |
 
 - **WASM/WebGPU browser demo.** The explicit-gather export (no `GridSample` plugin) removes the known
   blocker for `onnxruntime-web`, since browser runtimes can't load custom TRT plugins anyway — but
@@ -66,9 +66,10 @@ shareable — cheap to build, high visibility, low technical risk.
 - **Zero-setup CLI.** Auto-downloading weights from Hugging Face, then exporting, building, and running in
   one command hides the conversion pain that currently requires the D-FINE-seg source on `PYTHONPATH`. The
   wrinkle is that the export step still needs that source package, so this CLI has to vendor or fetch it.
-- **Dockerfile/build.sh, GPU-runner CI, engine cache.** `build.sh` already exists; a Dockerfile, a
-  GPU-enabled CI runner, and an engine cache/registry (hash of ONNX + SM arch → cached `.engine`) are
-  incremental trust- and DX-building work rather than new capability.
+- **Dockerfile/build.sh, GPU-runner CI, engine cache.** `build.sh`, the Dockerfile, and the engine
+  cache all exist (v0.3.1 keys the cache by ONNX+sidecar content fingerprint + SM arch + TRT version);
+  the remaining item is a GPU-enabled CI runner — incremental trust-building work rather than new
+  capability.
 
 ## Tier 3 — Serving & infra (high-load)
 

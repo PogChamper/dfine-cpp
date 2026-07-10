@@ -542,15 +542,18 @@ def cmd_export(args) -> int:
         if args.precision == "fp32":
             fp32_out = out_path
         else:
-            # Base name per the release convention: dfine_m_slim.onnx ->
-            # dfine_m_op19.onnx (strip the precision suffix, add the base one),
-            # so an fp16 export into a release dir produces the exact asset pair.
+            # Base name per the release convention and the ACTUAL opset:
+            # dfine_m_slim.onnx (fp16) -> dfine_m_op19.onnx, matching the release
+            # asset pair — while fp16-legacy yields dfine_m_op16.onnx and an
+            # explicit --opset 20 yields dfine_m_op20.onnx, so a legacy or
+            # research base can never masquerade as (or clobber) the production
+            # opset-19 asset.
             stem = out_path.stem
             for suffix in ("_slim", "_fp16_st"):
                 if stem.endswith(suffix):
                     stem = stem[: -len(suffix)]
                     break
-            fp32_out = out_path.parent / (stem + "_op19.onnx")
+            fp32_out = out_path.parent / (stem + f"_op{opset}.onnx")
     else:
         fp32_out = _cache_dir() / f"dfine_{model}.onnx"
         _warn_if_replacing_different_checkpoint(fp32_out)

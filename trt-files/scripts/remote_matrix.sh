@@ -136,7 +136,11 @@ fi
 say "C++ build (CUDA_ARCH=$ARCH)"
 # Conda's cross-gcc (dragged in by conda cuda-toolkit) mixes its own sysroot
 # with the system TensorRT/glibc headers and dies in math.h — force the system
-# toolchain for host code whenever it exists.
+# toolchain for host code whenever it exists. Conda's nvcc activation injects
+# its own -ccbin via NVCC_*_FLAGS (and a double activation leaks the literal
+# "UNSET" sentinel, which is fatal to nvcc) — drop the injection entirely;
+# CUDAHOSTCXX below is the one source of truth for the host compiler.
+unset NVCC_PREPEND_FLAGS NVCC_APPEND_FLAGS
 if [ -x /usr/bin/g++ ]; then
   export CC=/usr/bin/gcc CXX=/usr/bin/g++ CUDAHOSTCXX=/usr/bin/g++
 fi

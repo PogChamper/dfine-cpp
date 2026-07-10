@@ -156,27 +156,47 @@ jobs:
             -DDFINE_BUILD_APPS=OFF
           cmake --build build --target dfine -j"$(nproc)"
       - name: Package wheel
-        # Same flow as python/build_wheel.sh minus the native build step:
-        # cp -L dereferences the .so symlink chain (wheels/zip cannot hold
-        # symlinks; _ffi.py loads the literal name libdfine.so), then retag.
-        # linux_x86_64, not manylinux: libdfine.so links CUDA/TensorRT libs
-        # that are non-redistributable and outside the manylinux policy, so a
-        # manylinux tag can never be audit-clean. At runtime the target machine
-        # must provide TensorRT 10.x + CUDA 12 (e.g. pip install tensorrt==10.13.*).
+        # THE release packaging path (python/build_wheel.sh, SKIP_BUILD reuses
+        # the .so built above) — CI must test the same artifact users install,
+        # not a hand-rolled approximation. v0.3.0 shipped exactly that bug: the
+        # CI wheel silently lacked the bundled build_engine.py.
         run: |
-          cp -L build/libdfine.so python/dfine/libdfine.so
           # wheel >= 0.40 for the `tags` subcommand (the container's wheel predates it)
           python3 -m pip install build 'wheel>=0.40'
-          python3 -m build --wheel --outdir dist python/
-          python3 -m wheel tags --platform-tag linux_x86_64 --remove dist/dfine-*-py3-none-any.whl
-      - name: Smoke-install (import only — no GPU, native lib not loaded)
+          SKIP_BUILD=1 ./python/build_wheel.sh
+      - name: Wheel hygiene (contents + relocatable ELF)
         run: |
-          python3 -m pip install dist/*.whl
-          python3 -c "import dfine, pathlib; p = pathlib.Path(dfine.__file__).parent / 'libdfine.so'; assert p.exists(), p; print(dfine.__version__, p)"
+          unzip -l python/dist/dfine-*.whl | grep -q "dfine/libdfine.so"
+          unzip -l python/dist/dfine-*.whl | grep -q "dfine/_scripts/build_engine.py"
+          mkdir -p /tmp/whl-audit && unzip -q -o python/dist/dfine-*.whl -d /tmp/whl-audit
+          # No RPATH/RUNPATH (a baked build-machine path would hijack TensorRT
+          # resolution on any host where it happens to exist) and no absolute
+          # build paths anywhere in the dynamic section.
+          if readelf -d /tmp/whl-audit/dfine/libdfine.so | grep -E 'RPATH|RUNPATH|/home/'; then
+            echo "::error::bundled libdfine.so is not relocatable"; exit 1
+          fi
+          readelf -d /tmp/whl-audit/dfine/libdfine.so | grep -q 'SONAME.*libdfine.so.1'
+      - name: Smoke-install outside the checkout (wheel-only contract)
+        # A wheel-only user has no repo: the CLI must still find the bundled
+        # engine-build script through its real resolution path. `build --help`
+        # is NOT sufficient (argparse exits before script resolution runs).
+        run: |
+          python3 -m pip install python/dist/dfine-*.whl
+          cd /tmp
+          python3 - <<'EOF'
+          import pathlib
+          import dfine
+          from dfine.cli import _build_engine_script
+          lib = pathlib.Path(dfine.__file__).parent / "libdfine.so"
+          assert lib.is_file(), lib
+          script = _build_engine_script()
+          assert script.is_file() and "_scripts" in str(script), script
+          print("wheel-only contract OK:", dfine.__version__, script)
+          EOF
       - uses: actions/upload-artifact@v4
         with:
           name: dfine-wheel
-          path: dist/*.whl
+          path: python/dist/*.whl
           if-no-files-found: error
 
   # gpu-build:

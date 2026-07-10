@@ -47,6 +47,25 @@ fi
 # chain, wheels (zip) cannot hold symlinks, and _ffi.py loads the literal name
 # libdfine.so. One real file avoids shipping three copies.
 cp -L "$REPO/build/libdfine.so" "$BUNDLED"
+chmod u+w "$BUNDLED"
+
+# The dev build bakes an absolute RPATH (this machine's TensorRT/conda dirs).
+# A wheel must not ship it: DT_RPATH is searched BEFORE LD_LIBRARY_PATH, so a
+# path that happens to exist on the target machine would silently hijack
+# TensorRT/CUDA resolution. Strip it from the bundled copy only — the dev-tree
+# .so keeps its RPATH for local runs. (cmake for file(RPATH_REMOVE): PATH or
+# $CMAKE, same override as ../build.sh.)
+CMAKE=${CMAKE:-$(command -v cmake || true)}
+[[ -n "$CMAKE" ]] || { echo "error: cmake not found (needed to strip the RPATH); set \$CMAKE" >&2; exit 1; }
+RPATH_SCRIPT=$(mktemp)
+echo 'file(RPATH_REMOVE FILE "$ENV{DFINE_STRIP_LIB}")' > "$RPATH_SCRIPT"
+DFINE_STRIP_LIB="$PWD/$BUNDLED" "$CMAKE" -P "$RPATH_SCRIPT"
+rm -f "$RPATH_SCRIPT"
+if readelf -d "$BUNDLED" | grep -qE 'RPATH|RUNPATH'; then
+    echo "error: bundled libdfine.so still carries an RPATH/RUNPATH:" >&2
+    readelf -d "$BUNDLED" | grep -E 'RPATH|RUNPATH' >&2
+    exit 1
+fi
 
 # Snapshot the self-contained engine-build script so a wheel-only install can go
 # release-ONNX -> .engine (`dfine build --onnx ...`) without a repo checkout.

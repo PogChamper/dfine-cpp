@@ -50,7 +50,8 @@ jobs:
         # shellcheck is preinstalled on ubuntu-latest runners.
         run: |
           # Fully clean scripts — no exclusions.
-          shellcheck build.sh cmake/cuda_host_ccbin.sh python/build_wheel.sh
+          shellcheck build.sh cmake/cuda_host_ccbin.sh python/build_wheel.sh \
+            trt-files/scripts/remote_matrix.sh
           # overnight_bench.sh predates gating: SC2086 ($PY/$SUBSET_ARGS/... rely
           # on intentional word splitting), SC2015 (`A && B || C` used as
           # success/failure logging). Both info-level; excluded for this file only.

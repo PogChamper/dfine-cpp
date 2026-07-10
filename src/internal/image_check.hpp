@@ -15,9 +15,9 @@ namespace dfine {
 inline void validate_image_layout(const ImageU8& image) {
     if (!image.data) throw std::invalid_argument("dfine: image data is NULL");
     if (image.width <= 0 || image.height <= 0) {
-        throw std::invalid_argument("dfine: invalid image size (width=" +
-                                    std::to_string(image.width) +
-                                    " height=" + std::to_string(image.height) + ")");
+        throw std::invalid_argument(
+            "dfine: invalid image size (width=" + std::to_string(image.width) +
+            " height=" + std::to_string(image.height) + ")");
     }
     if (image.channels != 3) {
         throw std::invalid_argument("dfine: channels must be 3 (got " +
@@ -39,8 +39,8 @@ inline void validate_image_layout(const ImageU8& image) {
     // The CUDA kernels index the packed source with int arithmetic; bound the
     // packed image size so row offsets cannot overflow.
     if (static_cast<long long>(image.height) * packed_row > INT_MAX) {
-        throw std::invalid_argument("dfine: image too large (" + std::to_string(image.width) +
-                                    "x" + std::to_string(image.height) +
+        throw std::invalid_argument("dfine: image too large (" + std::to_string(image.width) + "x" +
+                                    std::to_string(image.height) +
                                     "); packed size must stay under 2 GiB");
     }
 }

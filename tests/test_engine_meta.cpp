@@ -84,21 +84,19 @@ int main(int argc, char** argv) {
         "batch");
     DFINE_EXPECT_THROW(
         (void)EngineMeta::from_json_file(write_json(dir, R"({"letterbox_pad": 300})")), "pad");
-    DFINE_EXPECT_THROW(
-        (void)EngineMeta::from_json_file(
-            write_json(dir, R"({"num_classes": 3, "class_names": ["a", "b"]})")),
-        "class_names");
-    DFINE_EXPECT_THROW(
-        (void)EngineMeta::from_json_file(write_json(dir, R"({"task": "segment"})")), "task");
-    DFINE_EXPECT_THROW(
-        (void)EngineMeta::from_json_file(write_json(dir, R"({"num_queries": 0})")), "num_queries");
+    DFINE_EXPECT_THROW((void)EngineMeta::from_json_file(
+                           write_json(dir, R"({"num_classes": 3, "class_names": ["a", "b"]})")),
+                       "class_names");
+    DFINE_EXPECT_THROW((void)EngineMeta::from_json_file(write_json(dir, R"({"task": "segment"})")),
+                       "task");
+    DFINE_EXPECT_THROW((void)EngineMeta::from_json_file(write_json(dir, R"({"num_queries": 0})")),
+                       "num_queries");
     DFINE_EXPECT_THROW(
         (void)EngineMeta::from_json_file(write_json(dir, R"({"color_order": "BRG"})")),
         "color_order");
     // A PRESENT mean/std of the wrong shape is an error, not a silent default.
-    DFINE_EXPECT_THROW(
-        (void)EngineMeta::from_json_file(write_json(dir, R"({"mean": [1.0, 2.0]})")),
-        "3-element");
+    DFINE_EXPECT_THROW((void)EngineMeta::from_json_file(write_json(dir, R"({"mean": [1.0, 2.0]})")),
+                       "3-element");
     DFINE_EXPECT_THROW((void)EngineMeta::from_json_file(write_json(dir, R"({"std": 255})")),
                        "3-element");
 

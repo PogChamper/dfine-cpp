@@ -25,8 +25,8 @@
 #include <vector>
 
 using dfine::Detections;
-using dfine::DFineDetector;
 using dfine::DetectorOptions;
+using dfine::DFineDetector;
 using dfine::FreezeSpec;
 using dfine::ImageU8;
 using dfine::testing::arm_failpoint;
@@ -147,7 +147,7 @@ int main() {
         arm_failpoint("trt_session.dev_alloc", 1);
         std::vector<ImageU8> four(4, f.view);
         DFINE_EXPECT_THROW((void)det.detect_batch(four, kThr), "failpoint");
-        DFINE_CHECK(equal(det.detect(f.view, kThr), base));  // batch-1 service restored
+        DFINE_CHECK(equal(det.detect(f.view, kThr), base));     // batch-1 service restored
         DFINE_CHECK(det.detect_batch(four, kThr).size() == 4);  // and the grow now works
         DFINE_CHECK(equal(det.detect(f.view, kThr), base));
     }
@@ -165,7 +165,10 @@ int main() {
         DFINE_EXPECT_THROW((void)DFineDetector(eng), "contradicts");
         // A facts-only sidecar asserts nothing and must load fine.
         std::ofstream(dir / "stale.json") << R"({"trt_version": "10.13", "max_batch": 8})";
-        { DFineDetector ok(eng); (void)ok; }
+        {
+            DFineDetector ok(eng);
+            (void)ok;
+        }
         fs::remove_all(dir);
     }
 
@@ -195,15 +198,17 @@ int main() {
             DFINE_CHECK(det.full_graph_replays() == replays + 1);
             DFINE_CHECK(equal(replayed, base));
         } else {
-            std::fprintf(stderr, "full graph inactive on DFINE_TEST_ENGINE_G0 — "
-                                 "configured release-gate coverage was not exercised\n");
+            std::fprintf(stderr,
+                         "full graph inactive on DFINE_TEST_ENGINE_G0 — "
+                         "configured release-gate coverage was not exercised\n");
             DFINE_CHECK(det.full_pipeline_graph_active());
         }
     } else if (std::getenv("DFINE_TEST_REQUIRE_FULL_GRAPH")) {
         // Release-gate mode: the full-graph section is mandatory, a silently
         // skipped section must fail the run, not pass it.
-        std::fprintf(stderr, "FAIL: DFINE_TEST_REQUIRE_FULL_GRAPH set but "
-                             "DFINE_TEST_ENGINE_G0 is unset\n");
+        std::fprintf(stderr,
+                     "FAIL: DFINE_TEST_REQUIRE_FULL_GRAPH set but "
+                     "DFINE_TEST_ENGINE_G0 is unset\n");
         DFINE_CHECK(false);
     } else {
         std::fprintf(stderr, "note: DFINE_TEST_ENGINE_G0 unset — full-graph section skipped\n");

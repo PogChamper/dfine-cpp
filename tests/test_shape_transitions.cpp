@@ -150,7 +150,7 @@ int main() {
         DFINE_EXPECT_THROW(s->infer(), "recreate");
         DFINE_EXPECT_THROW(s->set_input_shape(io.input, nvinfer1::Dims4{1, 3, io.h, io.w}),
                            "recreate");
-        arm_failpoint("trt_session.rebind", 0);          // disarm leftovers
+        arm_failpoint("trt_session.rebind", 0);  // disarm leftovers
         arm_failpoint("trt_session.rebind_restore", 0);
     }
 

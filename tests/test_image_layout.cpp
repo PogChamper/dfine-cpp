@@ -31,10 +31,10 @@ int main() {
     const std::uint8_t* p = buf.data();
 
     // Well-formed views pass.
-    validate_image_layout(view(p, 64, 64));           // tightly packed (stride 0)
-    validate_image_layout(view(p, 64, 64, 64 * 3));   // explicit packed stride
-    validate_image_layout(view(p, 64, 64, 64 * 4));   // padded rows
-    validate_image_layout(view(p, 1, 1));             // minimal image
+    validate_image_layout(view(p, 64, 64));          // tightly packed (stride 0)
+    validate_image_layout(view(p, 64, 64, 64 * 3));  // explicit packed stride
+    validate_image_layout(view(p, 64, 64, 64 * 4));  // padded rows
+    validate_image_layout(view(p, 1, 1));            // minimal image
 
     // Rejected views.
     DFINE_EXPECT_THROW(validate_image_layout(view(nullptr, 64, 64)), "data is NULL");

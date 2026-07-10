@@ -14,10 +14,13 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 
+# Module-level imports each script pulls in; the fixture importorskips them so
+# an environment without the heavy deps SKIPS (CI runs the surgical/fp16 copies;
+# int8/build_engine run wherever tensorrt/pycocotools live).
 SCRIPTS = {
-    "convert_fp16_surgical": ["onnx"],
+    "convert_fp16_surgical": ["onnx", "onnxconverter_common"],
     "convert_fp16": ["onnx", "numpy", "onnxconverter_common"],
-    "convert_int8": ["onnx", "numpy", "onnxruntime"],
+    "convert_int8": ["onnx", "numpy", "onnxruntime", "cv2", "torch", "tensorrt", "pycocotools"],
     "build_engine": ["tensorrt"],
 }
 

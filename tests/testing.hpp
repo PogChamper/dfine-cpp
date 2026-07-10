@@ -51,6 +51,7 @@ inline int finish(const char* name) {
 
 }  // namespace dfine::testing
 
-#define DFINE_CHECK(cond) ::dfine::testing::check(static_cast<bool>(cond), #cond, __FILE__, __LINE__)
+#define DFINE_CHECK(cond) \
+    ::dfine::testing::check(static_cast<bool>(cond), #cond, __FILE__, __LINE__)
 #define DFINE_EXPECT_THROW(stmt, needle) \
     ::dfine::testing::expect_throw([&] { stmt; }, (needle), #stmt, __FILE__, __LINE__)

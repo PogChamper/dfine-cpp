@@ -41,16 +41,17 @@ void validate_meta(const EngineMeta& m, const std::filesystem::path& path) {
     }
     if (m.task != "detect") bad_meta(path, "task '" + m.task + "' (this runtime does detect)");
     if (m.input_h <= 0 || m.input_w <= 0) {
-        bad_meta(path, "input_h/input_w must be positive (got " + std::to_string(m.input_h) +
-                           "x" + std::to_string(m.input_w) + ")");
+        bad_meta(path, "input_h/input_w must be positive (got " + std::to_string(m.input_h) + "x" +
+                           std::to_string(m.input_w) + ")");
     }
     if (m.num_classes <= 0) bad_meta(path, "num_classes must be positive");
     if (m.num_queries <= 0) bad_meta(path, "num_queries must be positive");
     for (int i = 0; i < 3; ++i) {
         if (!std::isfinite(m.mean[i])) bad_meta(path, "mean has a non-finite component");
         if (!std::isfinite(m.std[i]) || m.std[i] <= 0.0f) {
-            bad_meta(path, "std must be positive and finite (a zero collapses the "
-                           "normalization to inf)");
+            bad_meta(path,
+                     "std must be positive and finite (a zero collapses the "
+                     "normalization to inf)");
         }
     }
     if (m.color_order != "RGB" && m.color_order != "BGR") {
@@ -70,8 +71,7 @@ void validate_meta(const EngineMeta& m, const std::filesystem::path& path) {
                            std::to_string(m.min_batch) + "/" + std::to_string(m.opt_batch) + "/" +
                            std::to_string(m.max_batch) + ")");
     }
-    if (!m.class_names.empty() &&
-        m.class_names.size() != static_cast<std::size_t>(m.num_classes)) {
+    if (!m.class_names.empty() && m.class_names.size() != static_cast<std::size_t>(m.num_classes)) {
         bad_meta(path, std::to_string(m.class_names.size()) + " class_names for " +
                            std::to_string(m.num_classes) + " classes");
     }
@@ -104,8 +104,8 @@ EngineMeta EngineMeta::from_json_file(const std::filesystem::path& path) {
     // would otherwise be ignored and every frame mis-normalized quietly.
     for (const char* key : {"mean", "std"}) {
         if (j.contains(key) && !(j[key].is_array() && j[key].size() == 3)) {
-            bad_meta(path, std::string(key) + " must be a 3-element array (got " +
-                               j[key].dump() + ")");
+            bad_meta(path,
+                     std::string(key) + " must be a 3-element array (got " + j[key].dump() + ")");
         }
     }
     if (j.contains("mean")) m.mean = j["mean"].get<std::array<float, 3>>();

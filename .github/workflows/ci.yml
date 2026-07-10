@@ -134,7 +134,7 @@ jobs:
         run: |
           pip install -e "python/[dev]"
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install onnx onnxruntime
+          pip install onnx onnxruntime onnxconverter-common
       - name: pytest
         # conftest.py fixtures still skip the GPU-bound subset (libdfine/engine/
         # GPU missing). The CPU subset — CLI cache/export/json suites plus the

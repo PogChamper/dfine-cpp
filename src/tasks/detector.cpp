@@ -204,9 +204,9 @@ struct DFineDetector::Impl {
             auto conflict = [](const char* what, int meta_v, int engine_v) {
                 if (meta_v > 0 && engine_v > 0 && meta_v != engine_v) {
                     throw std::runtime_error(
-                        std::string("dfine: meta sidecar contradicts the engine: ") + what +
-                        " = " + std::to_string(meta_v) + " but the engine has " +
-                        std::to_string(engine_v) + " — the sidecar is stale; regenerate it "
+                        std::string("dfine: meta sidecar contradicts the engine: ") + what + " = " +
+                        std::to_string(meta_v) + " but the engine has " + std::to_string(engine_v) +
+                        " — the sidecar is stale; regenerate it "
                         "(rebuild the engine) or remove it to fall back to engine facts");
                 }
             };
@@ -359,10 +359,10 @@ struct DFineDetector::Impl {
         // gets an actionable message and a detector that is untouched — catching
         // this error and continuing at the frozen batch is fully supported.
         if (frozen_ && B > frozen_batch_) {
-            throw std::runtime_error("dfine: detector is frozen for batch <= " +
-                                     std::to_string(frozen_batch_) + " but got " +
-                                     std::to_string(B) +
-                                     "; freeze() with the larger batch or create a new detector");
+            throw std::runtime_error(
+                "dfine: detector is frozen for batch <= " + std::to_string(frozen_batch_) +
+                " but got " + std::to_string(B) +
+                "; freeze() with the larger batch or create a new detector");
         }
         if (input_dynamic_) {
             if (max_batch_ > 0 && B > max_batch_) {

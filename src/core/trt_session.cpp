@@ -309,8 +309,9 @@ void TrtSession::set_input_shape(std::string_view name, const nvinfer1::Dims& di
                     context_->setTensorAddress(bindings_[j].name.c_str(), device_buffers_[j].get());
                 if (!restored) {
                     shape_state_ = ShapeState::kPoisoned;
-                    poison_reason_ = "a tensor address could not be restored after a failed "
-                                     "shape transition; the context may reference freed memory";
+                    poison_reason_ =
+                        "a tensor address could not be restored after a failed "
+                        "shape transition; the context may reference freed memory";
                     require_clean_("set_input_shape");
                 }
             }

@@ -6,11 +6,14 @@ This is a performance- and correctness-critical inference library, so the bar is
 ## Ground rules (the hard-won ones)
 
 - **Preprocessing is `/255` only** — no ImageNet mean/std. Do not "fix" this.
-- **The decoder must stay FP32.** FP16 is achieved via strong typing (`convert_fp16.py`), never the weakly-typed
-  `kFP16` builder flag. Never ship a non-FP32-validated engine from `dfine_build`.
+- **FP16 is achieved via strong typing, never the weakly-typed `kFP16` builder flag** (that flag alone
+  costs ~10 AP). The production recipe is the surgical converter (`convert_fp16_surgical.py --slim`,
+  opset ≥ 19): the decoder runs FP16 *except* the FDR/deform-coordinate FP32 island the converter pins.
+  Do not widen or shrink that island without a full-COCO gate.
 - **The FDR/Integral/LQE box math stays inside the engine** — never reimplement it in C++.
-- Read [docs/HANDOFF.md](docs/HANDOFF.md) before touching anything — it is the single source of truth, and the
-  "Decisions & gotchas" section will save you a day.
+- [docs/HANDOFF.md](docs/HANDOFF.md) is the historical lab journal — decisions and gotchas in context,
+  worth reading, but not a contract. Current contracts live in the README, this file, and
+  docs/RESEARCH_MATRIX.md.
 
 ## Build
 
@@ -38,8 +41,12 @@ conda-`ld` workaround is applied only for conda toolchains. Plain CMake works to
 
 ## Testing / validation
 
-There are no unit tests (the model *is* the test); validation is empirical:
+Fast tests run everywhere; accuracy validation is empirical against the model:
 
+- **`ctest` green.** `tests/` holds CPU-only tests (image-layout validation, sidecar parsing) that run
+  anywhere, and GPU tests (shape-transition recovery, detector error recovery) that skip without a GPU —
+  set `DFINE_TEST_ENGINE` (and optionally `DFINE_TEST_ENGINE_G0`) to run them. Python-side:
+  `pytest python/tests` (CPU subset needs no GPU).
 - **Build clean** with `WERROR=ON`.
 - **mAP unchanged** for anything touching export/build/decode: `profile.py --backends trt cpp --subset 2000`
   (or `--full`) must hold the reference AP for the size you touched.

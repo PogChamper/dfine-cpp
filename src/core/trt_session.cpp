@@ -1,3 +1,5 @@
+// Derived from rf-detr-cpp (github.com/infracv/rf-detr-cpp, Apache-2.0); substantially
+// extended for D-FINE-cpp (see trt_session.hpp).
 #include "internal/trt_session.hpp"
 
 #include "internal/cuda_check.hpp"

@@ -1,6 +1,11 @@
-# D-FINE-cpp — HANDOFF (read this first)
+# D-FINE-cpp — HANDOFF (historical lab journal)
 
-Single source of truth for the current state. Any agent/dev should be able to continue from here.
+> **Status note (v0.3.1).** This file is the append-only development journal of the M0–v0.3 sessions:
+> decisions and gotchas in the context that produced them. It is worth reading for the *why*, but it is
+> no longer the source of truth — individual sections below may describe superseded contracts (e.g. the
+> opset-16 export default, the decoder-FP32 rule). Current contracts: README.md, CONTRIBUTING.md,
+> docs/RESEARCH_MATRIX.md, docs/ROADMAP.md.
+
 Goal: a production C++/TensorRT inference library for **D-FINE** (detection now, optional instance-seg later),
 modeled on `rf-detr-cpp`. Repo: `/home/dxdxxd/projects/custom-dfine/D-FINE-cpp`.
 

@@ -7,6 +7,13 @@ See the LICENSE file for the full license text.
 D-FINE-cpp is a C++/TensorRT inference port of D-FINE
 (https://github.com/Peterande/D-FINE), which is licensed under Apache-2.0.
 
+Parts of the runtime scaffolding were derived from rf-detr-cpp
+(https://github.com/infracv/rf-detr-cpp), Copyright 2026 rf-detr-cpp
+contributors, licensed under Apache-2.0: the TensorRT session wrapper,
+CUDA RAII/check helpers, logging, the C ABI surface, the preprocessing
+kernel core, and the CPU decode skeleton. All derived files carry
+substantial D-FINE-specific modifications; see the per-file notices.
+
 Bundled / vendored third-party components:
   - third_party/stb (stb_image) — public domain / MIT
   - nlohmann/json — MIT (fetched at build time)

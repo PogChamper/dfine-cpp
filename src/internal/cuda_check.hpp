@@ -1,3 +1,4 @@
+// Derived from rf-detr-cpp (github.com/infracv/rf-detr-cpp, Apache-2.0); modified for D-FINE-cpp.
 #pragma once
 
 #include <cuda_runtime_api.h>

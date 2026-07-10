@@ -4,21 +4,24 @@ D-FINE-cpp is a validated C++/TensorRT inference library, not a research prototy
 raw explicit-gather ONNX export that fixes a −10.5 AP TensorRT `grid_sample` trap, **M1** shipped an
 OpenCV-free C++ detector matching PyTorch to 0.5506 vs 0.5507 AP, and **M2** shipped strongly-typed FP16
 (−0.2% mAP at 1.6–2.2×) plus CUDA-graph replay (−34.5% batch-1 latency on 0-aux-stream engines) — while
-INT8 and BF16 were both **investigated and rejected** because D-FINE's FDR box-decode is exquisitely
-mantissa-precision-sensitive.
+the INT8/BF16 PTQ recipes we tried in v0.3.0 were **closed as measured negatives on GeForce Ada**
+(details and scope in docs/RESEARCH_MATRIX.md §6).
 
-That FDR sensitivity is the through-line constraint for everything below: it explains why the naive
-`grid_sample` export lost AP, why the `kFP16` builder flag alone lost AP, why BF16/INT8 fail outright, and
-why several Tier 4 ideas exist specifically to work *around* it. The tiers below are ordered by what makes
-the library complete and adoptable first, then developer experience and hype, then production-serving
-infrastructure, and finally research bets that may or may not pay off.
+FDR sensitivity to reduced precision is the through-line constraint for everything below: it explains why
+the naive `grid_sample` export lost AP and why the `kFP16` builder flag alone lost AP. For INT8 the matrix's
+own conclusion is narrower than "impossible" — accuracy behaved like an activation-*calibration* problem,
+and the v0.3.0 closure was ultimately a throughput verdict on Ada (surgical FP16 dominated every INT8
+recipe we could build); later calibration research has re-opened the accuracy question, so treat the
+closure as scoped to those recipes/date/hardware, not as physics. The tiers below are ordered by what
+makes the library complete and adoptable first, then developer experience and hype, then
+production-serving infrastructure, and finally research bets that may or may not pay off.
 
 ---
 
-## Tier 1 — Complete the core (do next)
+## Tier 1 — Complete the core
 
-The library is currently detection-only, C++-only, and has no stable ABI. These three items close that
-gap and are the direct prerequisites for almost everything else in this document.
+The library is detection-only by design for now; the stable C ABI, Python bindings, and pip wheel below
+are DONE and shipped (v0.1.0–v0.3.0). Segmentation remains shelved until checkpoints and a use-case show up.
 
 | Item | Verdict | Effort | Impact | Risk |
 |---|---|---|---|---|
@@ -141,15 +144,20 @@ engineering.
 
 ## Recommended v1.0 sequence
 
-1. **C ABI → Python bindings.** Nothing downstream (demos, serving, tracking) is easy to build without a
-   stable, non-C++ entry point first.
-2. **M3 instance segmentation.** Closes the last major capability gap versus upstream D-FINE-seg while the
-   codebase and export patterns are freshest.
-3. **Demo apps + WASM demo + gifs.** Convert the now-complete, bindable library into visible proof —
-   this is the cheapest, highest-leverage adoption work in the whole roadmap.
+The v0.1–v0.3 releases already delivered the original step 1 (C ABI → Python bindings → wheel). What
+remains, in order:
+
+1. **Hardening and packaging** (v0.3.1 track): fail-safe error recovery, strict custom-checkpoint
+   export, artifact-bound engine cache, one canonical wheel path, CMake `install()`/`find_package`.
+2. **External validation.** Ampere/Turing reports, a TensorRT 11 pass, Jetson build docs — every
+   "validated" claim backed by a reproducible report, contributed or rented.
+3. **Demo apps + gifs; a browser demo only after a timeboxed feasibility spike** (the explicit-gather
+   graph removes the GridSample blocker, but operator coverage and memory on a real browser runtime are
+   unproven — see Tier 2).
 4. **Async worker pool for serving.** Unlocks Triton and DeepStream integration and turns the library from
    an offline-batch tool into something that can sit behind a production endpoint.
 5. **Pick a lane.** From there, choose **video-analytics** (tracking + DeepStream/NVDEC zero-copy) or
-   **hardcore-precision** (FP8, QAT, fused-FDR plugin) based on where demand actually shows up — both are
-   legitimate next chapters, but trying to do both at once will stall progress on either.
+   **hardcore-precision** (INT8 calibration productization, QAT) based on where demand actually shows
+   up — both are legitimate next chapters, but trying to do both at once will stall progress on either.
+   (M3 segmentation re-enters here if checkpoints and a use-case materialize.)
 

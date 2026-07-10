@@ -1,3 +1,6 @@
+// The fused bilinear resize/normalize kernel core derives from rf-detr-cpp
+// (github.com/infracv/rf-detr-cpp, Apache-2.0); the letterbox path, staging
+// management, and freeze contract are D-FINE-cpp additions.
 #include "internal/cuda_preprocess.cuh"
 
 #include "internal/cuda_check.hpp"

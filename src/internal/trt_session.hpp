@@ -1,3 +1,6 @@
+// Derived from rf-detr-cpp (github.com/infracv/rf-detr-cpp, Apache-2.0); substantially
+// extended for D-FINE-cpp (frozen-memory contract, transactional shape transitions,
+// user-managed activation memory).
 #pragma once
 
 #include "cuda_raii.hpp"

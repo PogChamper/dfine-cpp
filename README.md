@@ -234,12 +234,15 @@ is miscompiled by TensorRT in FP16 — see the [Precision guide](#precision-guid
 takes accuracy/speed sliders (`--num-queries`, `--eval-idx`, `--cascade K:KEEP`) that shrink the
 graph itself — the `fast` column in the hero table is `--num-queries 200 --cascade 1:100`; the
 cost/gain of every slider is tabulated in [docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md).
-The older `convert_fp16.py` (decoder kept FP32) remains the fallback for opset-16 exports.
+The older `convert_fp16.py` (decoder kept FP32) remains available as the legacy opset-16 tier
+(`dfine export --precision fp16-legacy`).
 
 Standard checkpoints (`dfine_<size>_<dataset>.pt`) can be fetched from Hugging Face with D-FINE-seg's
 `ensure_pretrained` helper (`src/d_fine/utils.py` in that repo); nano has no obj2coco checkpoint — use
-`dfine_n_coco.pt`. Any other checkpoint: pass its path to `--checkpoint`. The `dfine export` CLI (below)
-wraps the same script.
+`dfine_n_coco.pt`. Any other checkpoint: pass its path to `--checkpoint` (the loader is strict — a
+class-count or variant mismatch stops the export with a hint instead of exporting random weights;
+pass `--num-classes`/`--class-names` for custom label sets). The `dfine export` CLI (below) runs this
+exact recipe: `--precision fp16` = opset-19 export + surgical `--slim`.
 
 ## Benchmarks
 
@@ -361,15 +364,21 @@ per-image results. Detections are **byte-identical to the C++ `dfine_detect`** (
 ### Zero-setup CLI
 
 The package installs a `dfine` command that resolves an engine from `--engine`, an on-disk cache
-(`~/.cache/dfine`, keyed by GPU arch + TRT version), the dev-tree, or builds one on demand:
+(`~/.cache/dfine`, keyed by the source ONNX's content hash + batch profile + GPU arch + TRT version,
+so a stale engine can never shadow a fresh export), the dev-tree, or builds one on demand:
 
 ```sh
 dfine predict --model m --image dog.jpg --threshold 0.5 --out annotated.jpg   # detect + draw
 dfine info    --model m                                                        # introspection
 dfine build   --model m --precision fp16                                       # ONNX -> .engine (cached)
-dfine export  --model m                                                        # .pt  -> ONNX (needs D-FINE-seg)
+dfine export  --model m --precision fp16                                       # .pt -> surgical/slim ONNX
 dfine bench   --model m --batches 1,2,4,8                                       # latency/throughput
 ```
+
+`dfine export --precision fp16` produces the production surgical/slim tier (the hero-table numbers);
+the v0.2 decoder-FP32 tier remains available as `--precision fp16-legacy`. Custom checkpoints:
+`--checkpoint model.pt --num-classes 3 --class-names a,b,c`. `predict --json` keeps stdout pure JSON
+(diagnostics go to stderr), so it pipes into `jq` even when the first run builds an engine.
 
 ## Apps
 
@@ -405,7 +414,7 @@ reproduces the host reference to +0.0002 AP.
 | FP16 (decoder FP32) | 0.5500 | 2.0× | `convert_fp16.py` → `build_engine.py --strongly-typed` (**not** the `kFP16` flag) |
 | **surgical FP16** ✅ | lossless, all 5 sizes (m: 0.5502 surgical / 0.5500 `--slim`) | 2.3× (2.4× opt8) | opset-19 export → `convert_fp16_surgical.py` (release ships `--slim`) |
 | FP8 | −17.6 AP (subset) | 1.8× (7-9% *slower* than FP16) | rejected: E4M3 mantissa + GeForce Ada runs FP8 at FP16 rate |
-| INT8 | −3.2 AP | 2.26× | rejected: slower than surgical FP16 with real accuracy cost (`convert_int8.py` kept for reference) |
+| INT8 | −3.2 AP | 2.26× | closed for v0.3 on Ada: slower than surgical FP16 with real accuracy cost under the PTQ recipes tried (`convert_int8.py` kept for reference); later calibration research re-opened the accuracy side — the closure is scoped, not physics |
 | BF16 | −0.0012 (sim) | — | no win over FP16 paths; the old "−27 AP" was a weak-typing artifact |
 
 **Opset 19 is mandatory for surgical FP16**: opset-16 exports decompose LayerNorm into primitive
@@ -439,9 +448,11 @@ CLI — detections byte-identical to the C++ path) · **intensive-core P1–P3**
 full-pipeline graph) · optional letterbox preprocessing · **v0.3.0 precision campaign** (surgical FP16
 lossless on all five sizes, export sliders, cascade pruning; FP8/INT8/deform-plugin closed with
 measurements — [docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md)).
-M3 instance segmentation is shelved. Next: a WASM/WebGPU browser demo and real-time video apps — see
-**[docs/ROADMAP.md](docs/ROADMAP.md)** and [docs/HANDOFF.md](docs/HANDOFF.md) for the single source of
-truth on the current state.
+M3 instance segmentation is shelved. A browser demo is under investigation (the explicit-gather export
+removes the GridSample blocker, but operator coverage on browser runtimes is unproven — no promise until
+a feasibility spike passes); near-term focus is hardening, packaging, and external hardware validation —
+see **[docs/ROADMAP.md](docs/ROADMAP.md)**. [docs/HANDOFF.md](docs/HANDOFF.md) is the historical lab
+journal behind these decisions.
 
 ## Troubleshooting
 
@@ -460,6 +471,11 @@ sanitizer-clean, mAP-neutral) is spelled out there.
 ## Credits & license
 
 C++/TensorRT port of **D-FINE** (Peng et al.), Apache-2.0; export path built on
-[D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg). Vendored: `stb_image` (public domain); nlohmann/json
-(MIT) is found on the system or fetched at configure time. Links NVIDIA TensorRT/CUDA (install separately).
-This project is **Apache-2.0** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+[D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg). The runtime scaffolding (TensorRT session wrapper,
+CUDA RAII helpers, logging, C ABI surface, preprocessing kernel core, CPU decode skeleton) was initially
+derived from [rf-detr-cpp](https://github.com/infracv/rf-detr-cpp) (Apache-2.0) and substantially adapted;
+the explicit-gather deformable-attention export, surgical FP16 conversion, GPU decode, frozen-memory
+contract, and full-pipeline CUDA graph are original to this project. Vendored: `stb_image` (public
+domain); nlohmann/json (MIT) is found on the system or fetched at configure time. Links NVIDIA
+TensorRT/CUDA (install separately). This project is **Apache-2.0** — see [LICENSE](LICENSE) and
+[NOTICE](NOTICE).

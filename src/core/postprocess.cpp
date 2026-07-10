@@ -1,3 +1,6 @@
+// The sigmoid/top-k decode skeleton derives from rf-detr-cpp
+// (github.com/infracv/rf-detr-cpp, Apache-2.0); the D-FINE box decode and
+// coordinate un-mapping are D-FINE-cpp additions.
 #include "dfine/core/postprocess.hpp"
 
 #include <algorithm>

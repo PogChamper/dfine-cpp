@@ -6,8 +6,8 @@ C++ decode — at up to **1550+ FPS** (D-FINE-N) and **2.47 ms** end-to-end batc
 RTX 4070 Ti SUPER, matching PyTorch mAP to within **0.002 AP** in the default configuration.
 
 <p align="center">
-  <a href="#supported-hardware--prerequisites">Supported hardware</a> ·
   <a href="#quickstart">Quickstart</a> ·
+  <a href="#supported-hardware--prerequisites">Supported hardware</a> ·
   <a href="#benchmarks">Benchmarks</a> ·
   <a href="#using-the-library">C++ API</a> ·
   <a href="#from-python">Python</a> ·
@@ -67,55 +67,6 @@ and ships a lean, dependency-light C++ runtime:
   typing** (precision baked into ONNX types): **1.6–2.2× faster at −0.2% mAP**, validated on all five sizes.
 - **Lean runtime.** `libdfine.so` takes a raw `ImageU8` (HWC uint8) — **no OpenCV** in the core — and hides
   all TensorRT/CUDA behind a PIMPL. RAII everywhere, sanitizer-clean, `-Werror` clean.
-
-## Supported hardware & prerequisites
-
-**Platforms** (three statuses: *validated* = benchmarked/CI here; *expected* = no known blocker,
-not benchmarked here; *not supported* = known blocker):
-
-| Platform | Status |
-|---|---|
-| Linux x86_64 (Ubuntu 22.04+) | ✅ **validated** — every number in this README (measured in a WSL2 Ubuntu guest, same stack as bare metal) + CI builds on ubuntu-latest |
-| **WSL2** (Windows 11, Ubuntu guest) | ✅ **validated** — the development & benchmark environment itself |
-| Other Linux x86_64 distros | expected (plain CMake + CUDA 12 + TRT 10 stack) |
-| Jetson Orin (aarch64, JetPack ≥ 6.1) | expected, **not validated** — JetPack 6.1+ ships TensorRT 10.3 + CUDA 12.6; the runtime is plain CUDA + TRT with no x86-specific code. Note: the `tensorrt` pip wheel does not exist for Jetson — use JetPack's TensorRT for both build and run |
-| Windows native | ❌ not supported (Linux-only build scripts and `.so` packaging) — use WSL2 |
-| macOS | ❌ n/a (no NVIDIA/CUDA) |
-
-**GPU** — any GPU TensorRT 10.x supports (compute capability **7.5 / Turing or newer**, per
-NVIDIA's TRT support matrix); this project is validated on **8.9 (Ada)**:
-
-| GPU family | `CUDA_ARCH` | Status / notes |
-|---|:---:|---|
-| RTX 40xx (Ada) | `89` | ✅ validated (RTX 4070 Ti SUPER) |
-| RTX 30xx (Ampere) | `86` | expected |
-| RTX 20xx / T4 (Turing) | `75` | expected (TRT 10 floor; FP16 tensor cores present) |
-| RTX 50xx (Blackwell) | `120` | expected — needs CUDA ≥ 12.8 **and** TensorRT ≥ 10.8 |
-| Jetson Orin | `87` | expected, not validated (see platform row) |
-
-`./build.sh` targets your local GPU by default (`CUDA_ARCH=native`); pass one value
-(`CUDA_ARCH=86 ./build.sh`) for headless/CI builds or a semicolon list (`CUDA_ARCH="86;89"`) for a
-fat binary.
-
-**Dependencies** — what you need and *when* you need it:
-
-| Dependency | Version | Needed for |
-|---|---|---|
-| NVIDIA driver | CUDA-12-capable (R525+; RTX 50xx needs R570+/CUDA 12.8 stack) | build + run |
-| CUDA toolkit (`nvcc`) | 12.x (sm_120 needs ≥ 12.8) | build only |
-| TensorRT | **10.x** — validated on 10.13; any 10.x ≥ your GPU's floor works, e.g. `pip install "tensorrt==10.13.*"` as a lib source. **TensorRT 11 (2026) is not yet validated** — it makes strongly-typed networks the default (exactly this repo's approach), but nothing here has been re-gated on it | build + run |
-| CMake | ≥ 3.24 for `native` arch / ≥ 3.20 with explicit arch | build only |
-| C++ compiler | C++17 — any GCC/Clang your CUDA 12.x `nvcc` accepts (CUDA 12.9: GCC ≤ 14, Clang ≤ 19) | build only |
-| Python | 3.9+ — engine build & ONNX export scripts only, **never at inference** | tooling only |
-| OpenCV | — | **not required, ever** |
-
-**Prebuilt binaries:** the release wheel bundles `libdfine.so` for **sm_89 / linux_x86_64 only**;
-every other GPU/platform builds from source (one `./build.sh`) — the Python package, CLI, and every
-command below then work identically. A system TensorRT is found automatically
-([cmake/FindTensorRT.cmake](cmake/FindTensorRT.cmake) searches `$TENSORRT_DIR`,
-`/usr/local/TensorRT`, `/opt/tensorrt`, `/usr`); alternatively populate `third_party/tensorrt`
-([third_party/README.md](third_party/README.md)). Engines are machine-specific build outputs —
-always compiled locally from the release ONNX (that is why we ship ONNX, not engines).
 
 ## Quickstart
 
@@ -243,6 +194,66 @@ Standard checkpoints (`dfine_<size>_<dataset>.pt`) can be fetched from Hugging F
 class-count or variant mismatch stops the export with a hint instead of exporting random weights;
 pass `--num-classes`/`--class-names` for custom label sets). The `dfine export` CLI (below) runs this
 exact recipe: `--precision fp16` = opset-19 export + surgical `--slim`.
+
+## Supported hardware & prerequisites
+
+**Validated:** Linux x86_64 / WSL2 · RTX 40xx (Ada, `CUDA_ARCH=89`) · TensorRT 10.13 — every number
+in this README. **Expected (build from source, not yet validated):** other Linux distros, Ampere/
+Turing/Blackwell GPUs, Jetson Orin. **Not supported:** Windows native (use WSL2), macOS.
+The release wheel bundles `libdfine.so` for **sm_89 / linux_x86_64 only** — everything else is one
+`./build.sh` from source, after which every command works identically.
+
+<details>
+<summary><b>Full platform / GPU / dependency tables</b> (statuses, CUDA_ARCH values, versions)</summary>
+
+**Platforms** (three statuses: *validated* = benchmarked/CI here; *expected* = no known blocker,
+not benchmarked here; *not supported* = known blocker):
+
+| Platform | Status |
+|---|---|
+| Linux x86_64 (Ubuntu 22.04+) | ✅ **validated** — every number in this README (measured in a WSL2 Ubuntu guest, same stack as bare metal) + CI builds on ubuntu-latest |
+| **WSL2** (Windows 11, Ubuntu guest) | ✅ **validated** — the development & benchmark environment itself |
+| Other Linux x86_64 distros | expected (plain CMake + CUDA 12 + TRT 10 stack) |
+| Jetson Orin (aarch64, JetPack ≥ 6.1) | expected, **not validated** — JetPack 6.1+ ships TensorRT 10.3 + CUDA 12.6; the runtime is plain CUDA + TRT with no x86-specific code. Note: the `tensorrt` pip wheel does not exist for Jetson — use JetPack's TensorRT for both build and run |
+| Windows native | ❌ not supported (Linux-only build scripts and `.so` packaging) — use WSL2 |
+| macOS | ❌ n/a (no NVIDIA/CUDA) |
+
+**GPU** — any GPU TensorRT 10.x supports (compute capability **7.5 / Turing or newer**, per
+NVIDIA's TRT support matrix); this project is validated on **8.9 (Ada)**:
+
+| GPU family | `CUDA_ARCH` | Status / notes |
+|---|:---:|---|
+| RTX 40xx (Ada) | `89` | ✅ validated (RTX 4070 Ti SUPER) |
+| RTX 30xx (Ampere) | `86` | expected |
+| RTX 20xx / T4 (Turing) | `75` | expected (TRT 10 floor; FP16 tensor cores present) |
+| RTX 50xx (Blackwell) | `120` | expected — needs CUDA ≥ 12.8 **and** TensorRT ≥ 10.8 |
+| Jetson Orin | `87` | expected, not validated (see platform row) |
+
+`./build.sh` targets your local GPU by default (`CUDA_ARCH=native`); pass one value
+(`CUDA_ARCH=86 ./build.sh`) for headless/CI builds or a semicolon list (`CUDA_ARCH="86;89"`) for a
+fat binary.
+
+**Dependencies** — what you need and *when* you need it:
+
+| Dependency | Version | Needed for |
+|---|---|---|
+| NVIDIA driver | CUDA-12-capable (R525+; RTX 50xx needs R570+/CUDA 12.8 stack) | build + run |
+| CUDA toolkit (`nvcc`) | 12.x (sm_120 needs ≥ 12.8) | build only |
+| TensorRT | **10.x** — validated on 10.13; any 10.x ≥ your GPU's floor works, e.g. `pip install "tensorrt==10.13.*"` as a lib source. **TensorRT 11 (2026) is not yet validated** — it makes strongly-typed networks the default (exactly this repo's approach), but nothing here has been re-gated on it | build + run |
+| CMake | ≥ 3.24 for `native` arch / ≥ 3.20 with explicit arch | build only |
+| C++ compiler | C++17 — any GCC/Clang your CUDA 12.x `nvcc` accepts (CUDA 12.9: GCC ≤ 14, Clang ≤ 19) | build only |
+| Python | 3.9+ — engine build & ONNX export scripts only, **never at inference** | tooling only |
+| OpenCV | — | **not required, ever** |
+
+**Prebuilt binaries:** the release wheel bundles `libdfine.so` for **sm_89 / linux_x86_64 only**;
+every other GPU/platform builds from source (one `./build.sh`) — the Python package, CLI, and every
+command below then work identically. A system TensorRT is found automatically
+([cmake/FindTensorRT.cmake](cmake/FindTensorRT.cmake) searches `$TENSORRT_DIR`,
+`/usr/local/TensorRT`, `/opt/tensorrt`, `/usr`); alternatively populate `third_party/tensorrt`
+([third_party/README.md](third_party/README.md)). Engines are machine-specific build outputs —
+always compiled locally from the release ONNX (that is why we ship ONNX, not engines).
+
+</details>
 
 ## Benchmarks
 

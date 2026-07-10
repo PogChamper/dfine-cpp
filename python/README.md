@@ -9,9 +9,9 @@ library at import.
 ## From zero to detections (no repo checkout)
 
 ```sh
-pip install "dfine[tensorrt,cli] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine-0.3.0-py3-none-linux_x86_64.whl"
-curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.onnx \
-     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.json
+pip install "dfine[tensorrt,cli] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.1/dfine-0.3.1-py3-none-linux_x86_64.whl"
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.1/dfine_m_slim.onnx \
+     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.1/dfine_m_slim.json
 dfine build --model m --onnx dfine_m_slim.onnx --output dfine_m_slim.engine
 ```
 
@@ -68,7 +68,7 @@ Stretch stays the default — it is D-FINE's training convention and measures
   install the Releases wheel with the `[tensorrt]` extra —
 
   ```sh
-  pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine-0.3.0-py3-none-linux_x86_64.whl"
+  pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.1/dfine-0.3.1-py3-none-linux_x86_64.whl"
   ```
 
   (the extra pulls the `tensorrt` pip wheel; the bindings best-effort preload

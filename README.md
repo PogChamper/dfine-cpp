@@ -132,9 +132,9 @@ linux_x86_64 (see [Supported hardware](#supported-hardware--prerequisites)); oth
 source first, then everything below is identical.
 
 ```sh
-pip install "dfine[tensorrt,cli] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine-0.3.0-py3-none-linux_x86_64.whl"
-curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.onnx \
-     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.json
+pip install "dfine[tensorrt,cli] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.1/dfine-0.3.1-py3-none-linux_x86_64.whl"
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.1/dfine_m_slim.onnx \
+     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.1/dfine_m_slim.json
 dfine build --model m --onnx dfine_m_slim.onnx --output dfine_m_slim.engine
 ```
 
@@ -171,8 +171,8 @@ cmake -B build -S . -DCMAKE_CUDA_ARCHITECTURES=native   # [-DTENSORRT_DIR=/path/
 cmake --build build -j
 
 # 2. Get the prebuilt ONNX + sidecar, compile the engine on your GPU
-curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.onnx
-curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine_m_slim.json
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.1/dfine_m_slim.onnx
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.1/dfine_m_slim.json
 python trt-files/scripts/build_engine.py --strongly-typed --no-tf32 --max-batch 8 \
     --onnx dfine_m_slim.onnx --output trt-files/engines/dfine_m_slim.engine
 #   (add --opt-batch 8 for batch serving: +6-10% b8 throughput, costs some b1 latency)
@@ -342,7 +342,7 @@ A dependency-light [`dfine`](python/) package wraps the C ABI via `ctypes` (no c
 prebuilt `.so`). See [`python/README.md`](python/README.md).
 
 ```sh
-pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.0/dfine-0.3.0-py3-none-linux_x86_64.whl"
+pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.1/dfine-0.3.1-py3-none-linux_x86_64.whl"
 ```
 
 The wheel bundles `libdfine.so` built for sm_89 / linux_x86_64 plus a snapshot of

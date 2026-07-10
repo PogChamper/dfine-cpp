@@ -93,13 +93,18 @@ Full five-size COCO campaign only when the precision recipe itself changed.
 CUDA_ARCH=89 ./python/build_wheel.sh    # or (preferred) take the CI artifact: same script,
                                         # but a different toolchain — the artifacts are NOT
                                         # byte-identical; gate and publish ONE of them
+python trt-files/scripts/release_assets.py assemble --input "$RELEASE_DIR" \
+    --wheel python/dist/dfine-0.3.1-py3-none-linux_x86_64.whl --out "$RELEASE_DIR/upload"
 ```
 
-- [ ] Wheel SHA256 recorded in SHA256SUMS alongside the ONNX assets.
-- [ ] Core upload is exactly 20 model files (`dfine_{n,s,m,l,x}_{op19,slim}.{onnx,json}`),
-      the one gated `dfine-0.3.1-py3-none-linux_x86_64.whl`, and `SHA256SUMS`; the manifest
-      contains all 21 payload files. Engines and custom-model artifacts are not uploaded.
+- [ ] `assemble` succeeds: it enforces the release grammar — exactly 20 model files
+      (`dfine_{n,s,m,l,x}_{op19,slim}.{onnx,json}`), every graph paired with its sidecar,
+      sidecar precision matching the recipe suffix, opset 19 — and writes `SHA256SUMS`
+      over all 21 payload files (wheel included). Engines and custom-model artifacts are
+      not staged and not uploaded.
 - [ ] Release notes name every behavior change (this release: `dfine export --precision fp16`
       now = surgical/slim; re-export custom models to pick up the production tier).
-- [ ] Tag; upload the *gated* artifacts; download every asset into a fresh directory and run
-      `sha256sum -c SHA256SUMS` against the pre-upload manifest.
+- [ ] Tag; upload the *gated* `$RELEASE_DIR/upload` contents (21 payload files + `SHA256SUMS`);
+      then `python trt-files/scripts/release_assets.py verify --tag <tag>` — it downloads
+      every published asset into a fresh directory, runs `sha256sum -c SHA256SUMS`, and
+      fails on any asset the manifest does not cover.

@@ -6,33 +6,34 @@
 # the official validation report) into a single tarball to take home.
 # Budget with defaults: ~1.5-2 h on an RTX 3090-class card.
 #
-# Fresh-box setup (Ubuntu 22.04+, NVIDIA driver preinstalled by the provider):
+# Fresh-box setup (Ubuntu 22.04+; driver must be >= the GPU's floor — 570 for
+# RTX 50xx. `nvidia-smi` FIRST; docs/TROUBLESHOOTING.md covers broken drivers,
+# flaky networks and the conda fallback for machines without root):
+#
 #   sudo apt-get update && sudo apt-get install -y \
-#       build-essential cmake git curl unzip nlohmann-json3-dev
-#   curl -LO https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
-#   bash Miniconda3-latest-Linux-x86_64.sh -b
-#   ~/miniconda3/bin/conda create -y -n dfine python=3.11 'cuda-toolkit>=12.4' -c nvidia
-#       # Blackwell (RTX 50xx, SM 12.x) needs 'cuda-toolkit>=12.8'
-#   source ~/miniconda3/bin/activate dfine
-#   git clone https://github.com/PogChamper/dfine-cpp && cd dfine-cpp
-#   pip install -e ".[gpu]"
-#   # The C++ build needs TensorRT HEADERS — the pip wheel ships only the .so's.
-#   # Cleanest: the NVIDIA CUDA apt repo. PIN the version: unpinned apt installs
-#   # TensorRT 11 (unvalidated here) instead of the 10.13 the pip runtime uses.
+#       build-essential cmake git curl unzip tmux nlohmann-json3-dev
+#
+#   # NVIDIA apt repo: nvcc for the C++ build + TensorRT headers. PIN the TRT
+#   # chain — unpinned apt installs TensorRT 11, not the 10.13 the runtime uses,
+#   # and apt does not down-resolve dependencies to a pin (every =$V matters).
 #   curl -LO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
 #   sudo dpkg -i cuda-keyring_1.1-1_all.deb && sudo apt-get update
+#   sudo apt-get install -y cuda-nvcc-12-9 cuda-cudart-dev-12-9
 #   V="$(apt-cache madison libnvinfer-dev | grep -oPm1 '10\.13\.[0-9.]+-1\+cuda12\.[0-9]+')"
 #   sudo apt-get install -y \
 #     "libnvinfer10=$V" "libnvinfer-headers-dev=$V" "libnvinfer-dev=$V" \
 #     "libnvinfer-plugin10=$V" "libnvinfer-headers-plugin-dev=$V" "libnvinfer-plugin-dev=$V" \
 #     "libnvonnxparsers10=$V" "libnvonnxparsers-dev=$V"
-#       # apt does not down-resolve dependencies to a pinned version — every
-#       # package in the chain must carry =$V explicitly.
-#   # Only for the export stage (SKIP_EXPORT=0). The seg source's model-build
-#   # chain imports torch, torchvision, loguru and scipy:
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-#   pip install loguru scipy
-#   git clone https://github.com/ArgoHA/D-FINE-seg "$HOME/D-FINE-seg"
+#   export PATH="/usr/local/cuda-12.9/bin:$PATH"
+#
+#   # Python env: uv + the committed lockfile (pins the export toolchain, which
+#   # is what makes exports byte-reproducible across machines).
+#   curl -LsSf https://astral.sh/uv/install.sh | sh
+#   export PATH="$HOME/.local/bin:$PATH"
+#   git clone https://github.com/PogChamper/dfine-cpp && cd dfine-cpp
+#   uv sync --frozen --extra gpu --extra torch     # drop '--extra torch' if SKIP_EXPORT=1
+#   source .venv/bin/activate
+#   git clone https://github.com/ArgoHA/D-FINE-seg "$HOME/D-FINE-seg"   # export stage only
 #
 # Then:  bash trt-files/scripts/remote_matrix.sh
 #

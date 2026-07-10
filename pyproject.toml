@@ -1,8 +1,12 @@
 # Unified Python environment for the D-FINE-cpp helper scripts (export / engine-build /
 # convert / eval / profile). Managed with uv:
 #
-#   uv venv && uv pip install -e ".[gpu,torch]"     # full (needs an NVIDIA GPU + CUDA 12)
-#   uv pip install -e ".[cpu]"                       # ONNX-graph tooling only (no GPU wheels)
+#   uv sync --frozen --extra gpu                     # scripts env (needs an NVIDIA GPU + CUDA 12)
+#   uv sync --frozen --extra gpu --extra torch       # + the checkpoint-export chain
+#   uv sync --frozen                                 # ONNX-graph tooling only (no GPU wheels)
+#
+# uv.lock pins the whole toolchain: exports are byte-reproducible only under the
+# locked versions (a different torch serializes a different ONNX).
 #
 # Notes / hard requirements (see docs/HANDOFF.md "Environment"):
 #   • TensorRT 10.13 and the matching CUDA-12 runtime must be present. The `tensorrt` wheel
@@ -34,7 +38,9 @@ gpu = [
     "tensorrt-cu12==10.13.*",
     "socksio",                                        # SOCKS proxy for HF weight downloads
 ]
-torch = ["torch==2.9.1"]                              # via the cu128 index below
+# The full checkpoint-export chain: export_dfine_onnx.py needs torch itself;
+# the D-FINE-seg model sources it imports pull in torchvision, loguru, scipy.
+torch = ["torch==2.9.1", "torchvision==0.24.*", "loguru", "scipy"]
 
 [tool.uv]
 # torch + onnxruntime-gpu ship as GPU-specific wheels; point uv at the right indexes.
@@ -46,6 +52,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
 
 [tool.ruff]
 line-length = 100

@@ -627,6 +627,67 @@ def cmd_bench(args) -> int:
     raise SystemExit("dfine_bench binary not found (build it with ./build.sh) — no bench backend")
 
 
+def cmd_doctor(_args) -> int:
+    """Every fact a bug report needs, one command. Exit 0 iff libdfine loads."""
+    import platform
+
+    from . import __version__, _ffi
+
+    print(f"dfine         : {__version__}")
+    print(f"python        : {platform.python_version()} ({sys.executable})")
+    kernel = platform.release()
+    flavor = "WSL2" if "microsoft" in kernel.lower() else "native"
+    print(f"os            : {platform.system()} {kernel} ({flavor})")
+
+    gpu = None
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,driver_version,compute_cap",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            gpu = out.stdout.strip().splitlines()[0]
+    except Exception:
+        pass
+    print(f"gpu           : {gpu or 'nvidia-smi unavailable — driver missing or no GPU'}")
+
+    try:
+        import tensorrt  # type: ignore
+
+        print(f"tensorrt      : {tensorrt.__version__}")
+    except Exception as e:
+        print(f"tensorrt      : import failed ({e}); pip install 'tensorrt-cu12==10.13.*'")
+    try:
+        import tensorrt_libs  # type: ignore
+
+        print(f"tensorrt libs : {Path(tensorrt_libs.__file__).parent}")
+    except Exception:
+        print("tensorrt libs : not importable — LD_LIBRARY_PATH must provide libnvinfer")
+
+    print("libdfine candidates (+ exists, - missing):")
+    for cand in _ffi._candidate_paths():
+        print(f"  {'+' if cand.exists() else '-'} {cand}")
+    try:
+        _ffi.get_lib()
+        loads = True
+        print("libdfine      : loads OK")
+    except RuntimeError as e:
+        loads = False
+        print(f"libdfine      : FAILED\n{e}")
+
+    headers = next(
+        (d for d in ("/usr/include/x86_64-linux-gnu", "/usr/local/TensorRT/include",
+                     "/opt/tensorrt/include", "/usr/include")
+         if (Path(d) / "NvInfer.h").exists()),
+        None,
+    )
+    print(f"trt headers   : {headers or 'not found (needed only to BUILD from source)'}")
+    engines = sorted(_cache_dir().glob("*.engine"))
+    print(f"engine cache  : {_cache_dir()} ({len(engines)} engine(s))")
+    return 0 if loads else 1
+
+
 # --------------------------------------------------------------------------- #
 # Argument parsing
 # --------------------------------------------------------------------------- #
@@ -695,6 +756,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(pbe, onnx=False)
     pbe.add_argument("--batches", default="1,2,4,8")
     pbe.set_defaults(func=cmd_bench)
+
+    pd = sub.add_parser("doctor", help="print environment diagnostics (attach to bug reports)")
+    pd.set_defaults(func=cmd_doctor)
     return p
 
 

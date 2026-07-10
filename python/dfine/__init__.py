@@ -20,7 +20,7 @@ __all__ = ["Box", "Detection", "Detector", "set_log_callback", "__version__", "l
 
 # Static package version (mirrors the C library's dfine_version()). Kept static
 # so `import dfine` does not require libdfine to be loadable.
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 
 def library_version() -> str:

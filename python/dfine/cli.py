@@ -46,6 +46,12 @@ _CHECKPOINTS = {
 # --------------------------------------------------------------------------- #
 
 
+def _log(*parts) -> None:
+    """Diagnostics go to stderr: stdout is reserved for results, so
+    `dfine predict --json | jq .` works even on a cold cache that builds."""
+    print(*parts, file=sys.stderr)
+
+
 def _cache_dir() -> Path:
     d = Path(os.environ.get("DFINE_CACHE", Path.home() / ".cache" / "dfine"))
     d.mkdir(parents=True, exist_ok=True)
@@ -149,7 +155,7 @@ def _find_onnx(model: str, precision: str, onnx_arg: Optional[str]) -> Optional[
                 candidates.append(base / name)
     if len(candidates) > 1:
         others = ", ".join(str(c) for c in candidates[1:])
-        print(f"[dfine] using {candidates[0]} (also found: {others} — pass --onnx to override)")
+        _log(f"[dfine] using {candidates[0]} (also found: {others} — pass --onnx to override)")
     return candidates[0] if candidates else None
 
 
@@ -190,8 +196,8 @@ def _resolve_engine(
         if cached.exists():
             return cached
         if allow_build:
-            print(f"[dfine] no cached engine for {onnx.name} ({fp}) — "
-                  f"building {model} ({precision}) ...")
+            _log(f"[dfine] no cached engine for {onnx.name} ({fp}) — "
+                 f"building {model} ({precision}) ...")
             return _build_engine(onnx, cached, precision, max_batch=max_batch,
                                  opt_batch=opt_batch)
         raise SystemExit(f"no engine built from {onnx.name} (fingerprint {fp}); "
@@ -201,8 +207,8 @@ def _resolve_engine(
     pattern = f"dfine_{model}_{precision}-*-b*-sm{_gpu_arch()}-trt{_trt_version()}.engine"
     hashed = sorted(_cache_dir().glob(pattern))
     if len(hashed) == 1:
-        print(f"[dfine] using cached {hashed[0].name} — its source ONNX is gone, "
-              "so its provenance cannot be re-verified")
+        _log(f"[dfine] using cached {hashed[0].name} — its source ONNX is gone, "
+             "so its provenance cannot be re-verified")
         return hashed[0]
     if len(hashed) > 1:
         names = "\n  ".join(h.name for h in hashed)
@@ -210,8 +216,8 @@ def _resolve_engine(
                          f"to disambiguate:\n  {names}\npass --engine (or --onnx to rebuild)")
     legacy = _legacy_cache_engine_path(model, precision)
     if legacy.exists():
-        print(f"[dfine] using pre-v0.3.1 cache entry {legacy.name} — not bound to an ONNX; "
-              "re-run `dfine build` to bind it")
+        _log(f"[dfine] using pre-v0.3.1 cache entry {legacy.name} — not bound to an ONNX; "
+             "re-run `dfine build` to bind it")
         return legacy
     repo = _repo_root()
     if repo:
@@ -295,8 +301,8 @@ def _build_engine(onnx: Path, output: Path, precision: str, max_batch: int,
     if precision == "fp16":
         # ONNX is already FP16-typed (convert_fp16.py / convert_fp16_surgical.py output)
         cmd += ["--strongly-typed"]
-    print("[dfine] $", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    _log("[dfine] $", " ".join(cmd))
+    subprocess.run(cmd, check=True, stdout=sys.stderr)
     if not output.exists():
         raise SystemExit(f"build reported success but {output} is missing")
     return output
@@ -312,8 +318,8 @@ def _convert_fp16(fp32_onnx: Path, output: Path) -> Path:
         "--onnx", str(fp32_onnx),
         "--output", str(output),
     ]
-    print("[dfine] $", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    _log("[dfine] $", " ".join(cmd))
+    subprocess.run(cmd, check=True, stdout=sys.stderr)
     return output
 
 
@@ -328,8 +334,8 @@ def _convert_fp16_surgical(fp32_onnx: Path, output: Path) -> Path:
         "--output", str(output),
         "--slim",
     ]
-    print("[dfine] $", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    _log("[dfine] $", " ".join(cmd))
+    subprocess.run(cmd, check=True, stdout=sys.stderr)
     return output
 
 
@@ -361,8 +367,8 @@ def _export_onnx(model: str, checkpoint: Optional[str], output: Path,
         cmd += ["--class-names", class_names]
     if allow_partial:
         cmd += ["--allow-partial-checkpoint"]
-    print("[dfine] $", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    _log("[dfine] $", " ".join(cmd))
+    subprocess.run(cmd, check=True, stdout=sys.stderr)
     return output
 
 
@@ -509,7 +515,7 @@ def cmd_bench(args) -> int:
     bench_bin = repo / "build" / "dfine_bench" if repo else None
     if bench_bin and bench_bin.exists():
         cmd = [str(bench_bin), "--engine", str(engine), "--batches", args.batches]
-        print("[dfine] $", " ".join(cmd))
+        _log("[dfine] $", " ".join(cmd))
         return subprocess.run(cmd).returncode
     raise SystemExit("dfine_bench binary not found (build it with ./build.sh) — no bench backend")
 

@@ -89,7 +89,7 @@ def test_orphaned_engines_are_never_picked_silently(env, capsys):
     orphan = cli._cache_engine_path("m", "fp16", "aaaaaaaaaaaa", 1, 8)
     orphan.write_bytes(b"e")
     assert cli._resolve_engine("m", None, "fp16", None, allow_build=False) == orphan
-    assert "provenance" in capsys.readouterr().out
+    assert "provenance" in capsys.readouterr().err
     # Two orphans: ambiguous — refuse instead of guessing.
     cli._cache_engine_path("m", "fp16", "bbbbbbbbbbbb", 1, 8).write_bytes(b"e")
     with pytest.raises(SystemExit, match="several cached engines"):
@@ -101,7 +101,7 @@ def test_legacy_cache_entry_is_a_warned_fallback(env, capsys):
     legacy = cli._legacy_cache_engine_path("m", "fp16")
     legacy.write_bytes(b"e")
     assert cli._resolve_engine("m", None, "fp16", None, allow_build=False) == legacy
-    assert "pre-v0.3.1" in capsys.readouterr().out
+    assert "pre-v0.3.1" in capsys.readouterr().err
 
 
 def test_info_and_bench_have_no_dead_onnx_flag():

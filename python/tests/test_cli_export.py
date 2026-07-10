@@ -16,7 +16,7 @@ def harness(monkeypatch, tmp_path):
     """Record every subprocess the CLI would launch instead of running it."""
     calls: list[list[str]] = []
     monkeypatch.setattr(cli.subprocess, "run",
-                        lambda cmd, check=True: calls.append([str(c) for c in cmd]))
+                        lambda cmd, check=True, **kw: calls.append([str(c) for c in cmd]))
     monkeypatch.setattr(cli, "_seg_dir", lambda: tmp_path)
     monkeypatch.setattr(cli, "_scripts_dir", lambda: tmp_path / "scripts")
     monkeypatch.setattr(cli, "_cache_dir", lambda: tmp_path / "cache")

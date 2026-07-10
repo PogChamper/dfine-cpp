@@ -45,7 +45,13 @@ def decode(logits: np.ndarray, boxes: np.ndarray, orig_w: int, orig_h: int,
     """Raw decoder outputs -> (xyxy_pixel boxes, class_idx, scores). Reference for C++ M1."""
     prob = 1.0 / (1.0 + np.exp(-logits[0]))            # [Q, C]
     flat = prob.reshape(-1)
-    idx = np.argpartition(-flat, topk)[:topk]
+    # topk may reach or exceed Q*C (any 1-class model at the default 300);
+    # argpartition needs kth < size, so clamp — the result is simply "all".
+    k = min(topk, flat.size)
+    if k <= 0:
+        z = np.zeros(0, dtype=np.int64)
+        return np.zeros((0, 4), dtype=np.float32), z, np.zeros(0, dtype=np.float32)
+    idx = np.argpartition(-flat, k - 1)[:k]
     idx = idx[np.argsort(-flat[idx])]
     scores = flat[idx]
     labels = idx % num_classes

@@ -109,6 +109,16 @@ def test_bare_state_dict_checkpoint(exporter, tmp_path):
     assert report["selected_state"] == "checkpoint root"
 
 
+def test_regenerated_geometry_buffers_are_ignored(exporter):
+    # decoder.anchors / decoder.valid_mask are pure functions of --img-size;
+    # a retarget export must stay strict-clean, and the checkpoint's copies
+    # must never overwrite the freshly generated ones.
+    model_sd = {"backbone.w": torch.zeros(4), "decoder.anchors": torch.zeros(1, 100, 4)}
+    state = {"backbone.w": torch.zeros(4), "decoder.anchors": torch.zeros(1, 400, 4)}
+    diff = exporter._diff_state(model_sd, state)
+    assert diff["missing"] == [] and diff["shape_mismatch"] == [] and diff["extra"] == []
+
+
 def test_trace_batch_below_two_aborts(exporter):
     with pytest.raises(SystemExit, match="trace-batch"):
         exporter.export(argparse.Namespace(trace_batch=1))

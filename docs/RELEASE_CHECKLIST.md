@@ -38,7 +38,7 @@ PYTHONPATH="$PWD/python" python -m pytest "$PWD/python/tests" -q
 ```sh
 LD_LIBRARY_PATH=$TRTLIB DFINE_TEST_ENGINE=$ENGINE ./build/tests/dfine_test_shape_transitions
 LD_LIBRARY_PATH=$TRTLIB DFINE_TEST_ENGINE=$ENGINE DFINE_TEST_ENGINE_G0=$ENGINE_G0 \
-    ./build/tests/dfine_test_detector_recovery
+    DFINE_TEST_REQUIRE_FULL_GRAPH=1 ./build/tests/dfine_test_detector_recovery
 LD_LIBRARY_PATH=$TRTLIB DFINE_TEST_ENGINE=$ENGINE \
     compute-sanitizer --tool memcheck --error-exitcode 99 ./build/tests/dfine_test_shape_transitions
 ```
@@ -90,7 +90,9 @@ Full five-size COCO campaign only when the precision recipe itself changed.
 ## 7. Package and publish
 
 ```sh
-CUDA_ARCH=89 ./python/build_wheel.sh    # or take the CI artifact — same script, same bytes
+CUDA_ARCH=89 ./python/build_wheel.sh    # or (preferred) take the CI artifact: same script,
+                                        # but a different toolchain — the artifacts are NOT
+                                        # byte-identical; gate and publish ONE of them
 ```
 
 - [ ] Wheel SHA256 recorded in SHA256SUMS alongside the ONNX assets.

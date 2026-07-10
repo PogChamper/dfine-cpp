@@ -339,11 +339,25 @@ def _select_state(raw: dict) -> tuple[dict, str]:
     return raw, "checkpoint root"
 
 
+# Size-derived buffers build_model regenerates for the requested --img-size.
+# D-FINE-seg registers them persistent, so they ride along in checkpoints; they
+# are geometry, not learned state — a 960 retarget of a 640-trained checkpoint
+# is exact, and loading the checkpoint's copies would even be wrong.
+_REGENERATED_SUFFIXES = ("decoder.anchors", "decoder.valid_mask")
+
+
+def _is_regenerated(key: str) -> bool:
+    return key.endswith(_REGENERATED_SUFFIXES)
+
+
 def _diff_state(model_sd: dict, state: dict) -> dict:
     """Compare a candidate state dict against the model's: which model tensors are
     missing, which have the wrong shape, and which checkpoint tensors are unused.
-    Non-tensor entries (schedulers, counters) are ignored, not errors."""
-    tensors = {k: v for k, v in state.items() if hasattr(v, "shape")}
+    Non-tensor entries (schedulers, counters) and regenerated geometry buffers
+    are ignored, not errors."""
+    model_sd = {k: v for k, v in model_sd.items() if not _is_regenerated(k)}
+    tensors = {k: v for k, v in state.items()
+               if hasattr(v, "shape") and not _is_regenerated(k)}
     missing = [k for k in model_sd if k not in tensors]
     mismatched = [
         (k, tuple(tensors[k].shape), tuple(model_sd[k].shape))
@@ -410,7 +424,7 @@ def load_checkpoint_state(model: nn.Module, ckpt: Path, allow_partial: bool) -> 
         print("[export] --allow-partial-checkpoint: continuing with a PARTIAL load")
 
     loadable = {k: v for k, v in state.items()
-                if k in model_sd and hasattr(v, "shape")
+                if k in model_sd and hasattr(v, "shape") and not _is_regenerated(k)
                 and tuple(v.shape) == tuple(model_sd[k].shape)}
     model.load_state_dict(loadable, strict=False)
     if diff["extra"]:

@@ -199,6 +199,12 @@ int main() {
                                  "configured release-gate coverage was not exercised\n");
             DFINE_CHECK(det.full_pipeline_graph_active());
         }
+    } else if (std::getenv("DFINE_TEST_REQUIRE_FULL_GRAPH")) {
+        // Release-gate mode: the full-graph section is mandatory, a silently
+        // skipped section must fail the run, not pass it.
+        std::fprintf(stderr, "FAIL: DFINE_TEST_REQUIRE_FULL_GRAPH set but "
+                             "DFINE_TEST_ENGINE_G0 is unset\n");
+        DFINE_CHECK(false);
     } else {
         std::fprintf(stderr, "note: DFINE_TEST_ENGINE_G0 unset — full-graph section skipped\n");
     }

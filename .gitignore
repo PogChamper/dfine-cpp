@@ -25,3 +25,4 @@ python/dfine.egg-info/
 # C++ build
 build/
 /Testing/
+/build-werror/

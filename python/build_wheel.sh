@@ -79,8 +79,17 @@ cp "$REPO/trt-files/scripts/build_engine.py" "$BUNDLED_SCRIPTS/"
 # (`wheel tags` prints the new filename). manylinux is not possible: libdfine.so
 # links CUDA/TensorRT libs that are non-redistributable and outside the
 # manylinux policy.
+# A same-named wheel already in dist/ (e.g. the tracked, gated release asset)
+# is about to be replaced — make that loud, with both hashes, never silent.
+PRE_TAG="dist/$(basename "$(ls dist/dfine-*-py3-none-any.whl)")"
+TARGET="${PRE_TAG/py3-none-any/py3-none-linux_$(uname -m)}"
+if [[ -f "$TARGET" ]]; then
+    echo "WARNING: replacing existing $TARGET" >&2
+    echo "  old sha256: $(sha256sum "$TARGET" | cut -d' ' -f1)" >&2
+fi
 WHEEL="dist/$("$PYTHON" -m wheel tags --platform-tag "linux_$(uname -m)" \
               --remove dist/dfine-*-py3-none-any.whl | tail -1)"
+echo "  new sha256: $(sha256sum "$WHEEL" | cut -d' ' -f1)" >&2
 
 echo
 echo "wheel: $PWD/$WHEEL"

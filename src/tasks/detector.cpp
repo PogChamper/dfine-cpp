@@ -493,6 +493,10 @@ struct DFineDetector::Impl {
             it = graphs_.end();
         }
         if (it == graphs_.end()) {
+            // Capturing allocates (pinned buffers, a graph exec) — after freeze
+            // only the warmed batch has a graph; other batches take the plain
+            // path instead of breaking the zero-allocation contract.
+            if (frozen_) return false;
             if (!capture_graph_(B)) {
                 graph_disabled_ = true;
                 return false;

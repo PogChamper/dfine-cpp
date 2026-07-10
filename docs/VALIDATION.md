@@ -42,4 +42,4 @@ e.g. `validation: RTX 3060 / TRT 10.9`. Nothing in the report identifies you bey
 
 | GPU | SM | TRT | Driver | OS | dfine | build ok | b1 img/s | b8 img/s | submitted-by |
 |-----|----|-----|--------|----|-------|----------|----------|----------|--------------|
-| *maintainer's RTX 4070 Ti SUPER row lands with the release* | | | | | | | | | |
+| RTX 4070 Ti SUPER | 8.9 | 10.13.3.9 | 581.15 | WSL2 (6.18) | 0.3.2 | yes (132.8 s) | 279.5 | 506.1 | maintainer |

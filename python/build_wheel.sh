@@ -58,7 +58,7 @@ chmod u+w "$BUNDLED"
 CMAKE=${CMAKE:-$(command -v cmake || true)}
 [[ -n "$CMAKE" ]] || { echo "error: cmake not found (needed to strip the RPATH); set \$CMAKE" >&2; exit 1; }
 RPATH_SCRIPT=$(mktemp)
-echo 'file(RPATH_REMOVE FILE "$ENV{DFINE_STRIP_LIB}")' > "$RPATH_SCRIPT"
+printf '%s\n' "file(RPATH_REMOVE FILE \"\$ENV{DFINE_STRIP_LIB}\")" > "$RPATH_SCRIPT"
 DFINE_STRIP_LIB="$PWD/$BUNDLED" "$CMAKE" -P "$RPATH_SCRIPT"
 rm -f "$RPATH_SCRIPT"
 if readelf -d "$BUNDLED" | grep -qE 'RPATH|RUNPATH'; then

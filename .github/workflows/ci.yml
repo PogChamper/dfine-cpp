@@ -156,6 +156,7 @@ jobs:
             -DDFINE_BUILD_APPS=OFF
           cmake --build build --target dfine -j"$(nproc)"
       - name: Package wheel
+        id: package_wheel
         # THE release packaging path (python/build_wheel.sh, SKIP_BUILD reuses
         # the .so built above) — CI must test the same artifact users install,
         # not a hand-rolled approximation. v0.3.0 shipped exactly that bug: the
@@ -164,11 +165,21 @@ jobs:
           # wheel >= 0.40 for the `tags` subcommand (the container's wheel predates it)
           python3 -m pip install build 'wheel>=0.40'
           SKIP_BUILD=1 ./python/build_wheel.sh
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' python/pyproject.toml)
+          shopt -s nullglob
+          wheels=(python/dist/dfine-"$version"-py3-none-linux_*.whl)
+          if (( ${#wheels[@]} != 1 )); then
+            echo "::error::expected one wheel for dfine $version, found ${#wheels[@]}"
+            exit 1
+          fi
+          printf 'wheel=%s\n' "${wheels[0]}" >> "$GITHUB_OUTPUT"
       - name: Wheel hygiene (contents + relocatable ELF)
+        env:
+          DFINE_WHEEL: ${{ steps.package_wheel.outputs.wheel }}
         run: |
-          unzip -l python/dist/dfine-*.whl | grep -q "dfine/libdfine.so"
-          unzip -l python/dist/dfine-*.whl | grep -q "dfine/_scripts/build_engine.py"
-          mkdir -p /tmp/whl-audit && unzip -q -o python/dist/dfine-*.whl -d /tmp/whl-audit
+          unzip -l "$DFINE_WHEEL" | grep -q "dfine/libdfine.so"
+          unzip -l "$DFINE_WHEEL" | grep -q "dfine/_scripts/build_engine.py"
+          mkdir -p /tmp/whl-audit && unzip -q -o "$DFINE_WHEEL" -d /tmp/whl-audit
           # No RPATH/RUNPATH (a baked build-machine path would hijack TensorRT
           # resolution on any host where it happens to exist) and no absolute
           # build paths anywhere in the dynamic section.
@@ -180,8 +191,10 @@ jobs:
         # A wheel-only user has no repo: the CLI must still find the bundled
         # engine-build script through its real resolution path. `build --help`
         # is NOT sufficient (argparse exits before script resolution runs).
+        env:
+          DFINE_WHEEL: ${{ steps.package_wheel.outputs.wheel }}
         run: |
-          python3 -m pip install python/dist/dfine-*.whl
+          python3 -m pip install "$DFINE_WHEEL"
           cd /tmp
           python3 - <<'EOF'
           import pathlib
@@ -196,7 +209,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dfine-wheel
-          path: python/dist/*.whl
+          path: ${{ steps.package_wheel.outputs.wheel }}
           if-no-files-found: error
 
   # gpu-build:

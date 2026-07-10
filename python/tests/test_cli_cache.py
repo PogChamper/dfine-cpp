@@ -71,7 +71,7 @@ def test_explicit_onnx_never_gets_a_foreign_engine(env):
 
 def test_rebuilt_export_invalidates_the_old_entry(env):
     d, builds = env
-    a = onnx_file(d, "dfine_m_slim.onnx", b"v1")
+    onnx_file(d, "dfine_m_slim.onnx", b"v1")
     first = cli._resolve_engine("m", None, "fp16", None, allow_build=True)
     assert len(builds) == 1
     # Same bytes: the cached engine is reused, no rebuild.

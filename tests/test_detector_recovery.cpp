@@ -65,6 +65,11 @@ Frame make_frame(int w, int h, int row_pad = 0) {
     return f;
 }
 
+// Byte-exact on purpose — and therefore calibrated for bitwise-deterministic
+// engine flavors (fp32-faithful, fp16_st with its FP32 decoder), which is what
+// DFINE_TEST_ENGINE should point at. A fully-FP16 slim engine shows ULP-level
+// batch-position variance (sub-pixel box jitter, ~1e-3 score jitter) that
+// reorders the low-score tail; slim correctness is gated by mAP parity, not here.
 bool equal(const Detections& a, const Detections& b) {
     if (a.size() != b.size()) return false;
     for (std::size_t i = 0; i < a.size(); ++i) {

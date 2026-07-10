@@ -6,7 +6,8 @@
 #   pip install -e ".[dev]"        # editable, for running the tests
 #   pytest tests                   # needs a GPU + engine + LD_LIBRARY_PATH (see README)
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+# >=77: PEP 639 SPDX string for project.license.
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -15,7 +16,7 @@ version = "0.3.1"
 description = "Python bindings for D-FINE-cpp — C++/TensorRT D-FINE object detection"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 dependencies = ["numpy>=1.21"]
 
 [project.scripts]
@@ -29,8 +30,11 @@ tensorrt = ["tensorrt==10.13.*"]
 cli = ["pillow>=9"]
 dev = ["pytest>=7", "pillow>=9"]
 
-[tool.setuptools]
-packages = ["dfine"]
+# Discovery instead of a hard list: dfine/_scripts (the wheel-bundled
+# build_engine.py snapshot) exists only after build_wheel.sh copies it in, so
+# listing it statically would break editable installs from a fresh checkout.
+[tool.setuptools.packages.find]
+include = ["dfine", "dfine._scripts"]
 
 [tool.setuptools.package-data]
 # Present only when a build step copies the compiled library into the package

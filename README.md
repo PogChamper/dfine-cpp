@@ -155,6 +155,25 @@ For an FP32 engine, drop `--strongly-typed` and point `--onnx` at the base file
 [v0.2.0 release](https://github.com/PogChamper/dfine-cpp/releases/tag/v0.2.0) and are still a
 valid, slightly slower build.
 
+### Using dfine from your own CMake project
+
+The library installs as a config package — no copying headers around:
+
+```sh
+cmake --install build --prefix /opt/dfine        # after the build above
+```
+
+```cmake
+find_package(dfine CONFIG REQUIRED)               # -DCMAKE_PREFIX_PATH=/opt/dfine
+target_link_libraries(your_app PRIVATE dfine::dfine)
+```
+
+The public headers are TensorRT/CUDA-free (PIMPL), so your project needs no
+TensorRT include paths — only the TRT/CUDA libraries at link and run time (the
+shipped config resolves them via `find_dependency`). A complete out-of-tree
+consumer lives in [examples/consumer](examples/consumer/CMakeLists.txt) and is
+built by CI against every commit.
+
 ### Docker
 
 ```sh

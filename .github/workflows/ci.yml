@@ -36,15 +36,15 @@ jobs:
         # because formatting output drifts across major versions.
         run: pip install ruff==0.6.9 clang-format==18.1.8
 
-      # python/dfine is fully clean — no exclusions there. The per-file ignores
-      # carry pre-existing debt only (E401/E702/E731/F401/F541/F841/I001 in
-      # trt-files/scripts, one F401 in test_detector.py), scoped per path so
-      # any NEW rule or any violation in python/dfine still fails the job.
+      # python/dfine and python/tests are fully clean — no exclusions there.
+      # The per-file ignores carry pre-existing debt only (E401/E702/E731/
+      # F401/F541/F841/I001 in trt-files/scripts), scoped per path so any NEW
+      # rule or any violation in python/dfine still fails the job.
       - name: ruff
         run: >
           ruff check trt-files/scripts python/dfine python/tests
           --extend-per-file-ignores
-          'trt-files/scripts/*:E401,trt-files/scripts/*:E702,trt-files/scripts/*:E731,trt-files/scripts/*:F401,trt-files/scripts/*:F541,trt-files/scripts/*:F841,trt-files/scripts/*:I001,python/tests/test_detector.py:F401'
+          'trt-files/scripts/*:E401,trt-files/scripts/*:E702,trt-files/scripts/*:E731,trt-files/scripts/*:F401,trt-files/scripts/*:F541,trt-files/scripts/*:F841,trt-files/scripts/*:I001'
 
       - name: shellcheck
         # shellcheck is preinstalled on ubuntu-latest runners.
@@ -117,6 +117,60 @@ jobs:
         run: |
           export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
           ctest --test-dir build --output-on-failure
+
+  install-consumer:
+    name: cmake --install + out-of-tree consumer
+    runs-on: ubuntu-latest
+    # Same TRT container as compile-cuda: install needs the full link
+    # toolchain, and the consumer must resolve TensorRT::TensorRT through the
+    # SHIPPED FindTensorRT.cmake, not the checkout's copy.
+    container: nvcr.io/nvidia/tensorrt:24.10-py3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake build-essential nlohmann-json3-dev
+      - name: Build + install to a prefix
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+            -DCUDAToolkit_ROOT=/usr/local/cuda \
+            -DCMAKE_CUDA_ARCHITECTURES=89 \
+            -DDFINE_BUILD_APPS=OFF -DDFINE_BUILD_TESTS=OFF
+          cmake --build build -j"$(nproc)" --target dfine
+          cmake --install build --prefix /tmp/dfine-prefix
+      - name: Relocatability audit (installed lib)
+        # Same invariant the wheel enforces: no baked RPATH/RUNPATH, no
+        # build-machine paths in the dynamic section, SONAME = libdfine.so.1.
+        run: |
+          lib="$(readlink -f /tmp/dfine-prefix/lib/libdfine.so)"
+          readelf -d "$lib" | grep -E 'RPATH|RUNPATH' && exit 1
+          readelf -d "$lib" | grep -E '/home/|workspace' && exit 1
+          readelf -d "$lib" | grep -q 'SONAME.*libdfine.so.1'
+          # The config package must be self-contained: targets + version +
+          # the TensorRT find module it depends on.
+          for f in dfineConfig.cmake dfineConfigVersion.cmake dfineTargets.cmake FindTensorRT.cmake; do
+            test -f "/tmp/dfine-prefix/lib/cmake/dfine/$f"
+          done
+      - name: Build consumer OUTSIDE the checkout
+        # Copy examples/ elsewhere so a leaked build-tree path in the config
+        # package cannot be satisfied by the checkout lying around.
+        run: |
+          cp -r examples /tmp/consumer-src
+          cmake -B /tmp/consumer-build -S /tmp/consumer-src/consumer \
+            -DCMAKE_PREFIX_PATH=/tmp/dfine-prefix \
+            -DCUDAToolkit_ROOT=/usr/local/cuda
+          cmake --build /tmp/consumer-build -j"$(nproc)"
+      - name: Run consumer (no-args usage path; loads libdfine + TRT)
+        run: |
+          export LD_LIBRARY_PATH="/tmp/dfine-prefix/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+          set +e
+          /tmp/consumer-build/dfine_consumer
+          rc=$?
+          set -e
+          test "$rc" -eq 2  # usage path: proves the binary loads its deps and runs
 
   python-nogpu:
     name: python bindings (no-GPU pytest subset)

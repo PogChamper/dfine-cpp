@@ -43,6 +43,7 @@ target_compile_options(dfine_warnings INTERFACE
   $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;$<$<BOOL:${DFINE_WARNINGS_AS_ERRORS}>:-Werror>>)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+include(GNUInstallDirs)
 find_package(CUDAToolkit REQUIRED)
 find_package(TensorRT REQUIRED)
 
@@ -89,6 +90,7 @@ endif()
 
 target_include_directories(dfine
   PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+          $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dfine
   PUBLIC  TensorRT::TensorRT CUDA::cudart
@@ -172,6 +174,37 @@ if(DFINE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+
+# ---------------------------------------------------------------------------
+# Install / find_package(dfine CONFIG). Consumers link dfine::dfine. The
+# public headers are TensorRT/CUDA-clean (PIMPL), so consumers need the TRT
+# and CUDA *libraries* resolvable at link time (find_dependency in the config
+# file, which ships FindTensorRT.cmake) but never their headers. Installed
+# binaries carry NO baked RPATH — the same relocatability rule the wheel
+# enforces; TensorRT/CUDA come from LD_LIBRARY_PATH at runtime.
+# ---------------------------------------------------------------------------
+include(CMakePackageConfigHelpers)
+
+install(TARGETS dfine EXPORT dfineTargets
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY include/dfine DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT dfineTargets NAMESPACE dfine::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dfine)
+
+configure_package_config_file(cmake/dfineConfig.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/dfineConfig.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dfine)
+# SameMinorVersion: pre-1.0, 0.3.x consumers accept any 0.3.y, 0.4 breaks.
+write_basic_package_version_file(
+  ${CMAKE_CURRENT_BINARY_DIR}/dfineConfigVersion.cmake
+  COMPATIBILITY SameMinorVersion)
+install(FILES
+  ${CMAKE_CURRENT_BINARY_DIR}/dfineConfig.cmake
+  ${CMAKE_CURRENT_BINARY_DIR}/dfineConfigVersion.cmake
+  cmake/FindTensorRT.cmake
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dfine)
 
 message(STATUS "dfine ${PROJECT_VERSION}: TensorRT ${TensorRT_VERSION} (${TENSORRT_INCLUDE_DIR}), "
                "CUDA arch ${CMAKE_CUDA_ARCHITECTURES}")

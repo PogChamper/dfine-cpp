@@ -6,6 +6,9 @@ project's CMake (see the header of each file for a manual compile/link line).
 - `cpp_detector_example.cpp` — construct `dfine::DFineDetector` from an engine
   path, build an `ImageU8` from a raw HWC uint8 buffer, call `detect()`, print
   the resulting boxes/classes/scores.
+- `consumer/` — the same example as an out-of-tree CMake project against an
+  INSTALLED dfine (`cmake --install` + `find_package(dfine CONFIG)`); built by
+  CI to prove the install package is complete and relocatable.
 - `python_quickstart.ipynb` — the zero-checkout Python path: install the release
   wheel, `dfine build` the release ONNX into an engine, detect, draw, and
   measure throughput on your GPU.

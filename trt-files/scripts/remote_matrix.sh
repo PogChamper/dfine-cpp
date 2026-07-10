@@ -28,8 +28,8 @@
 #     "libnvonnxparsers10=$V" "libnvonnxparsers-dev=$V"
 #       # apt does not down-resolve dependencies to a pinned version — every
 #       # package in the chain must carry =$V explicitly.
-#   # Only for the export stage (SKIP_EXPORT=0):
-#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+#   # Only for the export stage (SKIP_EXPORT=0) — the seg source imports both:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 #   git clone https://github.com/ArgoHA/D-FINE-seg "$HOME/D-FINE-seg"
 #
 # Then:  bash trt-files/scripts/remote_matrix.sh
@@ -146,6 +146,10 @@ note "built: dfine_bench + dfine_detect OK"
 say "engines: fp32 / slim / slim-g0 per size"
 build_engine() { # onnx out extra-args...
   local onnx="$1" out="$2"; shift 2
+  if [ -f "$out" ]; then   # engines survive re-runs after a later stage fails
+    note "  cached $(basename "$out")"
+    return 0
+  fi
   python "$SCRIPTS/build_engine.py" --onnx "$onnx" --output "$out" \
     --no-tf32 --max-batch 8 "$@" >"$OUT/$(basename "$out" .engine).build.log" 2>&1
   note "  built $(basename "$out")"

@@ -18,6 +18,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -208,6 +209,12 @@ def _resolve_engine(
         # shapes performance. Prefer the largest max-batch entry deterministically.
         others = _same_artifact_engines(model, precision, fp)
         if others:
+            # Largest max-batch profile serves every smaller request; the name
+            # embeds ...-b1-<opt>-<max>-..., so sort numerically, not by path.
+            def profile_max(p: Path) -> int:
+                m = re.search(r"-b1-\d+-(\d+)-sm", p.name)
+                return int(m.group(1)) if m else 0
+            others.sort(key=profile_max)
             pick = others[-1]
             if len(others) > 1:
                 _log(f"[dfine] {len(others)} engines for this artifact with different "
@@ -532,8 +539,18 @@ def cmd_export(args) -> int:
     # effect (the FP32 base of an fp16 export goes to <output-stem>_op19.onnx).
     if args.output:
         out_path = Path(args.output)
-        fp32_out = (out_path if args.precision == "fp32"
-                    else out_path.parent / (out_path.stem + "_op19.onnx"))
+        if args.precision == "fp32":
+            fp32_out = out_path
+        else:
+            # Base name per the release convention: dfine_m_slim.onnx ->
+            # dfine_m_op19.onnx (strip the precision suffix, add the base one),
+            # so an fp16 export into a release dir produces the exact asset pair.
+            stem = out_path.stem
+            for suffix in ("_slim", "_fp16_st"):
+                if stem.endswith(suffix):
+                    stem = stem[: -len(suffix)]
+                    break
+            fp32_out = out_path.parent / (stem + "_op19.onnx")
     else:
         fp32_out = _cache_dir() / f"dfine_{model}.onnx"
         _warn_if_replacing_different_checkpoint(fp32_out)

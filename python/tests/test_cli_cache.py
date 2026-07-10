@@ -92,6 +92,15 @@ def test_same_artifact_other_profile_is_still_served(env, capsys):
     built.write_bytes(b"engine")
     assert cli._resolve_engine("m", None, "fp16", None, allow_build=False) == built
     assert "batch profile" in capsys.readouterr().err
+    # An exact-profile entry (predict's default 1/8) wins over any other...
+    exact = cli._cache_engine_path("m", "fp16", fp, 1, 8)
+    exact.write_bytes(b"engine")
+    assert cli._resolve_engine("m", None, "fp16", None, allow_build=False) == exact
+    # ...and among non-exact candidates the pick is by NUMERIC max_batch
+    # (16 must beat 8 although "16" < "8" sorts first lexicographically).
+    exact.unlink()
+    cli._cache_engine_path("m", "fp16", fp, 2, 8).write_bytes(b"engine")
+    assert cli._resolve_engine("m", None, "fp16", None, allow_build=False) == built
 
 
 def test_orphaned_engines_are_never_picked_silently(env, capsys):

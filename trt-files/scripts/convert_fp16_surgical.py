@@ -280,7 +280,11 @@ def main() -> None:
             raise RuntimeError("harmonize did not converge")
     print(f"[surgical] harmonized {total} mixed-type inputs")
     onnx.checker.check_model(model16)
-    onnx.save(model16, args.output)
+    # Atomic: a converter interrupted mid-write must not leave a half-written
+    # graph at the final path the CLI cache auto-discovers.
+    tmp = args.output + ".tmp"
+    onnx.save(model16, tmp)
+    os.replace(tmp, args.output)
 
     sidecar = Path(args.onnx).with_suffix(".json")
     if sidecar.exists():
@@ -288,7 +292,10 @@ def main() -> None:
         meta["precision"] = "fp16"
         meta["precision_mode"] = ("strongly_typed_onnx_fp16_surgical_slim" if slim
                                   else "strongly_typed_onnx_fp16_surgical_decoder")
-        Path(args.output).with_suffix(".json").write_text(json.dumps(meta, indent=2) + "\n")
+        sidecar = Path(args.output).with_suffix(".json")
+        tmp_sc = Path(str(sidecar) + ".tmp")
+        tmp_sc.write_text(json.dumps(meta, indent=2) + "\n")
+        os.replace(tmp_sc, sidecar)
     print(f"[surgical] wrote {args.output}")
 
 

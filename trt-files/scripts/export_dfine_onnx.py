@@ -340,9 +340,13 @@ def _select_state(raw: dict) -> tuple[dict, str]:
 
 
 # Size-derived buffers build_model regenerates for the requested --img-size.
-# D-FINE-seg registers them persistent, so they ride along in checkpoints; they
-# are geometry, not learned state — a 960 retarget of a 640-trained checkpoint
-# is exact, and loading the checkpoint's copies would even be wrong.
+# D-FINE-seg registers them persistent, so they ride along in checkpoints. At
+# the TRAINING size the checkpoint's copies are authoritative (they differ from
+# a fresh regeneration by float noise up to ~2e-4, and the gated v0.3.0 assets
+# embed exactly the checkpoint values — loading them keeps exports
+# byte-reproducible). At any OTHER --img-size the shapes cannot match and the
+# freshly generated geometry is the correct one, so a shape mismatch here is a
+# retarget, not a checkpoint error.
 _REGENERATED_SUFFIXES = ("decoder.anchors", "decoder.valid_mask")
 
 
@@ -353,18 +357,18 @@ def _is_regenerated(key: str) -> bool:
 def _diff_state(model_sd: dict, state: dict) -> dict:
     """Compare a candidate state dict against the model's: which model tensors are
     missing, which have the wrong shape, and which checkpoint tensors are unused.
-    Non-tensor entries (schedulers, counters) and regenerated geometry buffers
-    are ignored, not errors."""
-    model_sd = {k: v for k, v in model_sd.items() if not _is_regenerated(k)}
-    tensors = {k: v for k, v in state.items()
-               if hasattr(v, "shape") and not _is_regenerated(k)}
-    missing = [k for k in model_sd if k not in tensors]
+    Non-tensor entries (schedulers, counters) are ignored. Regenerated geometry
+    buffers are ignored only where they legitimately diverge (absent from the
+    checkpoint, or shape-mismatched by an --img-size retarget)."""
+    tensors = {k: v for k, v in state.items() if hasattr(v, "shape")}
+    missing = [k for k in model_sd if k not in tensors and not _is_regenerated(k)]
     mismatched = [
         (k, tuple(tensors[k].shape), tuple(model_sd[k].shape))
         for k in model_sd
-        if k in tensors and tuple(tensors[k].shape) != tuple(model_sd[k].shape)
+        if k in tensors and not _is_regenerated(k)
+        and tuple(tensors[k].shape) != tuple(model_sd[k].shape)
     ]
-    extra = [k for k in tensors if k not in model_sd]
+    extra = [k for k in tensors if k not in model_sd and not _is_regenerated(k)]
     return {"missing": missing, "shape_mismatch": mismatched, "extra": extra}
 
 
@@ -423,8 +427,12 @@ def load_checkpoint_state(model: nn.Module, ckpt: Path, allow_partial: bool) -> 
         print("\n".join(lines))
         print("[export] --allow-partial-checkpoint: continuing with a PARTIAL load")
 
+    # Shape-matching tensors load from the checkpoint — including the regenerated
+    # geometry buffers, whose checkpoint values the gated release assets embed
+    # (byte-reproducibility). A shape-mismatched regenerated buffer (an
+    # --img-size retarget) is simply not loaded: the fresh geometry stays.
     loadable = {k: v for k, v in state.items()
-                if k in model_sd and hasattr(v, "shape") and not _is_regenerated(k)
+                if k in model_sd and hasattr(v, "shape")
                 and tuple(v.shape) == tuple(model_sd[k].shape)}
     model.load_state_dict(loadable, strict=False)
     if diff["extra"]:

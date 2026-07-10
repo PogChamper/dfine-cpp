@@ -36,14 +36,12 @@ are DONE and shipped (v0.1.0–v0.3.0). Segmentation remains shelved until check
   than a sigmoid + `>0.5`), and populate a `mask` field on `Detection`. The existing OpenCV-free `ImageU8`
   and raw-export patterns extend directly to this task, and `rf-detr`'s `mask_decode.cu` is a working model
   to follow.
-- **`extern "C"` ABI wrapper.** An opaque handle with no C++ types or exceptions crossing the boundary
-  (catch internally, return error codes) unlocks every non-C++ consumer of `libdfine.so`. The plan is
-  already specced, and this is a hard prerequisite for bindings of
-  any kind.
-- **Python bindings + pip wheel.** Built over the C ABI (pybind11 or ctypes), this is the single highest
-  -leverage move for adoption and stars — most detector users are Python-first. The caveat is that
-  TensorRT is not redistributable, so the wheel must depend on the user's local TRT install; document this
-  clearly and ship the `.so` plus a thin loader rather than attempting to vendor TensorRT.
+- **`extern "C"` ABI wrapper — DONE (M4).** An opaque handle with no C++ types or exceptions crossing
+  the boundary (catch internally, return error codes); shipped as `include/dfine/c_api.h`, built into
+  `libdfine.so` by default, and it is what the Python bindings stand on.
+- **Python bindings + pip wheel — DONE (M4/v0.1–v0.3).** ctypes over the C ABI; the wheel ships the
+  `.so` plus a thin loader. TensorRT is not redistributable, so the wheel depends on the user's local
+  TRT install — documented in the README.
 
 ## Tier 2 — DX & hype
 
@@ -52,15 +50,16 @@ shareable — cheap to build, high visibility, low technical risk.
 
 | Item | Verdict | Effort | Impact | Risk |
 |---|---|---|---|---|
-| WASM/WebGPU browser demo | HIGH-HYPE / standout | M | Very high | Low |
+| WASM/WebGPU browser demo | HIGH-HYPE — needs a timeboxed feasibility spike first | M | Very high | Medium (operator/memory coverage on browser runtimes unproven) |
 | Real-time demo apps (video/camera, FPS overlay) | WORTH-IT | M | High | Low |
 | Zero-setup CLI (export → build → cache → run) | ✅ DONE (M4, `dfine` CLI) | M | Medium-high | Low-medium |
 | Dockerfile, GPU-runner CI, engine cache/registry | NICE | S-M | Incremental | Low |
 
-- **WASM/WebGPU browser demo.** The explicit-gather export (no `GridSample` plugin) is exactly what makes
-  the graph portable to `onnxruntime-web`, since browser runtimes can't load custom TRT plugins anyway. A
-  GitHub-Pages webcam demo running this ONNX graph client-side is a top star-magnet and costs nothing to
-  host.
+- **WASM/WebGPU browser demo.** The explicit-gather export (no `GridSample` plugin) removes the known
+  blocker for `onnxruntime-web`, since browser runtimes can't load custom TRT plugins anyway — but
+  operator coverage and memory on a real browser runtime are unproven, so a 3–4 h feasibility spike
+  (nano model, one image, box parity) comes first. If it passes, a GitHub-Pages webcam demo is a top
+  star-magnet and costs nothing to host.
 - **Real-time demo apps.** `dfine_video` / camera capture with a side-by-side FPS overlay brings OpenCV
   back, but scoped strictly to the *app* layer — the core library stays OpenCV-free. A "PyTorch 15 FPS vs
   TRT 272 FPS" gif is the single most effective marketing asset this repo could produce.
@@ -147,8 +146,9 @@ engineering.
 The v0.1–v0.3 releases already delivered the original step 1 (C ABI → Python bindings → wheel). What
 remains, in order:
 
-1. **Hardening and packaging** (v0.3.1 track): fail-safe error recovery, strict custom-checkpoint
-   export, artifact-bound engine cache, one canonical wheel path, CMake `install()`/`find_package`.
+1. **Hardening and packaging**: fail-safe error recovery, strict custom-checkpoint export,
+   artifact-bound engine cache, one canonical wheel path (shipped in v0.3.1); CMake
+   `install()`/`find_package` + an out-of-tree consumer CI job (v0.3.2).
 2. **External validation.** Ampere/Turing reports, a TensorRT 11 pass, Jetson build docs — every
    "validated" claim backed by a reproducible report, contributed or rented.
 3. **Demo apps + gifs; a browser demo only after a timeboxed feasibility spike** (the explicit-gather

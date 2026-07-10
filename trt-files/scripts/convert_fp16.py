@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -124,7 +125,9 @@ def main(args: argparse.Namespace) -> None:
         print(f"[fp16] harmonized {n_harmonized} mixed Half/Float node inputs "
               "(strongly-typed TRT would reject them)")
     onnx.checker.check_model(model16)
-    onnx.save(model16, str(out_path))
+    tmp = Path(str(out_path) + ".tmp")
+    onnx.save(model16, str(tmp))
+    os.replace(tmp, out_path)
 
     n_cast = sum(1 for n in model16.graph.node if n.op_type == "Cast")
     print(f"[fp16] wrote {out_path} ({n_cast} Cast nodes at precision boundaries)")
@@ -135,7 +138,10 @@ def main(args: argparse.Namespace) -> None:
         meta["precision"] = "fp16"
         meta["fp16_decoder_fp32"] = True
         meta["precision_mode"] = "strongly_typed_onnx_fp16"
-        out_path.with_suffix(".json").write_text(json.dumps(meta, indent=2) + "\n")
+        sidecar = out_path.with_suffix(".json")
+        tmp_sc = Path(str(sidecar) + ".tmp")
+        tmp_sc.write_text(json.dumps(meta, indent=2) + "\n")
+        os.replace(tmp_sc, sidecar)
         print(f"[fp16] wrote sidecar {out_path.with_suffix('.json')}")
 
 

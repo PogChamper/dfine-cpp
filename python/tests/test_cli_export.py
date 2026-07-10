@@ -68,6 +68,16 @@ def test_unvalidated_opset_pairings_are_refused(harness):
     assert calls == []  # refused before any subprocess
 
 
+def test_fp16_output_derives_release_base_name(harness, tmp_path):
+    calls, ckpt = harness
+    out = str(tmp_path / "dfine_m_slim.onnx")
+    assert cli.main(["export", "--model", "m", "--precision", "fp16",
+                     "--checkpoint", ckpt, "--output", out]) == 0
+    # The FP32 base lands next to the output under the release asset name.
+    assert flag(calls[0], "--output").endswith("dfine_m_op19.onnx")
+    assert flag(calls[1], "--output").endswith("dfine_m_slim.onnx")
+
+
 def test_custom_model_args_passthrough(harness):
     calls, ckpt = harness
     assert cli.main(["export", "--model", "s", "--checkpoint", ckpt,

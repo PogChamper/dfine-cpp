@@ -270,7 +270,9 @@ def build(args: argparse.Namespace) -> None:
         engine_sidecar = Path(str(out_path) + ".json")
         print(f"[build] NOTE: engine and ONNX share a stem — engine sidecar goes to "
               f"{engine_sidecar.name} (the ONNX's own sidecar stays untouched)")
-    engine_sidecar.write_text(json.dumps(meta, indent=2) + "\n")
+    sc_tmp = Path(str(engine_sidecar) + ".tmp")
+    sc_tmp.write_text(json.dumps(meta, indent=2) + "\n")
+    os.replace(sc_tmp, engine_sidecar)
     print(f"[build] wrote engine sidecar {engine_sidecar} "
           f"(precision={meta['precision']}, mode={meta['precision_mode']})")
 

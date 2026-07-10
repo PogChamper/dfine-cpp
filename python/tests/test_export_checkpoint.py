@@ -109,14 +109,34 @@ def test_bare_state_dict_checkpoint(exporter, tmp_path):
     assert report["selected_state"] == "checkpoint root"
 
 
-def test_regenerated_geometry_buffers_are_ignored(exporter):
-    # decoder.anchors / decoder.valid_mask are pure functions of --img-size;
-    # a retarget export must stay strict-clean, and the checkpoint's copies
-    # must never overwrite the freshly generated ones.
+def test_regenerated_geometry_buffers_retarget_vs_same_size(exporter, tmp_path):
+    # decoder.anchors / decoder.valid_mask are size-derived geometry. On an
+    # --img-size retarget (shape mismatch) they are ignored — strict-clean.
     model_sd = {"backbone.w": torch.zeros(4), "decoder.anchors": torch.zeros(1, 100, 4)}
     state = {"backbone.w": torch.zeros(4), "decoder.anchors": torch.zeros(1, 400, 4)}
     diff = exporter._diff_state(model_sd, state)
     assert diff["missing"] == [] and diff["shape_mismatch"] == [] and diff["extra"] == []
+
+    # At the training size (shapes match) the CHECKPOINT copies must load —
+    # the gated release assets embed exactly those values, so exports stay
+    # byte-reproducible.
+    class Geo(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("anchors", torch.zeros(1, 10, 4))
+
+    class Wrap(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.decoder = Geo()
+
+    model = Wrap()
+    donor = Wrap()
+    donor.decoder.anchors += 0.5
+    ckpt = save_ckpt(tmp_path, {"model": donor.state_dict()})
+    report = exporter.load_checkpoint_state(model, ckpt, allow_partial=False)
+    assert report["mode"] == "strict"
+    assert torch.equal(model.decoder.anchors, donor.decoder.anchors)
 
 
 def test_trace_batch_below_two_aborts(exporter):

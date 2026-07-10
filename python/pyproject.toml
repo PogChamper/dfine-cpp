@@ -12,7 +12,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dfine"
-version = "0.3.2"
+version = "0.3.3"
 description = "Python bindings for D-FINE-cpp — C++/TensorRT D-FINE object detection"
 readme = "README.md"
 requires-python = ">=3.9"

@@ -16,6 +16,11 @@
 #   source ~/miniconda3/bin/activate dfine
 #   git clone https://github.com/PogChamper/dfine-cpp && cd dfine-cpp
 #   pip install -e ".[gpu]"
+#   # The C++ build needs TensorRT HEADERS — the pip wheel ships only the .so's.
+#   # Cleanest: the NVIDIA CUDA apt repo (pin 10.13.* if apt-cache madison offers it):
+#   curl -LO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+#   sudo dpkg -i cuda-keyring_1.1-1_all.deb && sudo apt-get update
+#   sudo apt-get install -y libnvinfer-dev libnvinfer-plugin-dev libnvonnxparser-dev
 #   # Only for the export stage (SKIP_EXPORT=0):
 #   pip install torch --index-url https://download.pytorch.org/whl/cu128
 #   git clone https://github.com/ArgoHA/D-FINE-seg "$HOME/D-FINE-seg"

@@ -260,6 +260,31 @@ def _resolve_class_names(args: argparse.Namespace) -> list[str]:
     return COCO80_NAMES if args.num_classes == 80 else []
 
 
+def _tool_versions() -> dict:
+    """The export-toolchain fingerprint. Exports are byte-reproducible only
+    under identical versions (a different torch serializes a different graph),
+    so a byte mismatch between two artifacts must be explainable from their
+    sidecars alone. Imports stay lazy — this runs mid-export, when the heavy
+    modules are already loaded."""
+    import platform
+
+    import onnx
+    import torch
+
+    versions = {
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "onnx": onnx.__version__,
+    }
+    try:
+        import onnxsim
+
+        versions["onnxsim"] = onnxsim.__version__
+    except ImportError:
+        pass  # the simplify pass is best-effort; absent means it did not run
+    return versions
+
+
 def _collect_meta(model: nn.Module, args: argparse.Namespace) -> dict:
     """Read engine-contract constants off the built (deployed) model."""
     dec = model.decoder
@@ -309,6 +334,7 @@ def _collect_meta(model: nn.Module, args: argparse.Namespace) -> dict:
         "max_batch": args.max_batch,
         "trace_batch": args.trace_batch,
         "opset": args.opset,
+        "tool_versions": _tool_versions(),
         # Always present so no downstream tool ever has to GUESS the compute
         # types: the FP16 converters overwrite both fields with their recipe.
         "precision": "fp32",

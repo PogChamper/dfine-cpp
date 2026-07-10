@@ -76,6 +76,14 @@ def meta(**over) -> dict:
     return base
 
 
+def test_tool_versions_fingerprint(exporter):
+    # Non-empty version strings for the whole export toolchain: a cross-machine
+    # byte mismatch must be explainable from the two sidecars alone.
+    v = exporter._tool_versions()
+    assert {"python", "torch", "onnx"} <= v.keys()
+    assert all(isinstance(s, str) and s for s in v.values())
+
+
 def test_dynamic_graph_passes(exporter, tmp_path):
     exporter._verify_dynamic_batch_runs(tiny_graph(tmp_path, bake_batch=False), meta())
 

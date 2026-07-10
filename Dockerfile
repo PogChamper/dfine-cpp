@@ -9,16 +9,25 @@
 # runtime stage anyway (they aren't a separate apt package from the -devel bits
 # in this base image).
 #
-# Base: NVIDIA NGC TensorRT container — ships a matched CUDA + cuDNN + TensorRT
-# 10.x devel toolchain (headers, static/shared libs, nvcc) for x86_64.
-FROM nvcr.io/nvidia/tensorrt:24.10-py3
+# Base: CUDA 12.9 devel (nvcc + the NVIDIA apt repo); TensorRT 10.13 is
+# installed below as a pinned apt chain — the same recipe CI and the docs use.
+# The NGC tensorrt images that carry TRT 10.13 are all CUDA 13, and this stack
+# stays on CUDA 12 (the wheel and every validated engine link libcudart.so.12).
+FROM nvidia/cuda:12.9.1-devel-ubuntu22.04
 
-# Alt base (NOT used by default — CUDA only, no TensorRT):
-#   FROM nvidia/cuda:12.8.0-devel-ubuntu22.04
-# If you switch to this, you must separately install a matching TensorRT 10.x
-# (NVIDIA's apt repo `tensorrt-dev`/`libnvinfer-dev` packages, or the `tensorrt`
-# pip wheel) before the cmake step below can find nvinfer/nvonnxparser headers
-# and libraries. That install step is not implemented in this Dockerfile.
+# The whole chain carries one explicit version: apt does not down-resolve
+# dependencies to a pin, and unpinned it installs TensorRT 11.
+ARG TRT_DEB_VERSION=10.13.3.9-1+cuda12.9
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      "libnvinfer10=${TRT_DEB_VERSION}" \
+      "libnvinfer-headers-dev=${TRT_DEB_VERSION}" \
+      "libnvinfer-dev=${TRT_DEB_VERSION}" \
+      "libnvinfer-plugin10=${TRT_DEB_VERSION}" \
+      "libnvinfer-headers-plugin-dev=${TRT_DEB_VERSION}" \
+      "libnvinfer-plugin-dev=${TRT_DEB_VERSION}" \
+      "libnvonnxparsers10=${TRT_DEB_VERSION}" \
+      "libnvonnxparsers-dev=${TRT_DEB_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
 
 # GPU architecture for CMAKE_CUDA_ARCHITECTURES. 89 = Ada (RTX 40-series / L4),
 # matching this repo's validated dev box (RTX 4070 Ti SUPER) and CMakeLists.txt's

@@ -67,21 +67,29 @@ jobs:
             | xargs -r clang-format --dry-run --Werror
 
   compile-cuda:
-    name: C++/CUDA compile + link (TRT container)
+    name: C++/CUDA compile + link (CUDA container + pinned TRT)
     runs-on: ubuntu-latest
-    # nvcr.io/nvidia/tensorrt:24.10-py3 ships nvcc + TensorRT dev headers/libs;
-    # compiling and linking needs no GPU. Anonymous pull, but the image is
-    # multi-GB — expect a slow first pull on each runner.
-    container: nvcr.io/nvidia/tensorrt:24.10-py3
+    # CUDA 12.9 devel ships nvcc and the NVIDIA apt repo; TensorRT is installed
+    # below exactly the way the docs tell users to. The NGC tensorrt images that
+    # carry TRT 10.13 are all CUDA 13 — this stack must stay on CUDA 12 so the
+    # wheel keeps linking libcudart.so.12. Compiling and linking needs no GPU.
+    container: nvidia/cuda:12.9.1-devel-ubuntu22.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install toolchain deps
-        # Mirrors Dockerfile: jammy's apt cmake (3.22) satisfies >=3.20; the
-        # system nlohmann/json header keeps CMake off its FetchContent fallback
-        # (which would clone from GitHub mid-configure).
+      - name: Install toolchain deps + pinned TensorRT
+        # jammy's apt cmake (3.22) satisfies >=3.20; the system nlohmann/json
+        # header keeps CMake off its FetchContent fallback (which would clone
+        # from GitHub mid-configure). TensorRT: the whole chain carries one
+        # explicit version — apt does not down-resolve dependencies to a pin,
+        # and unpinned it installs TensorRT 11, not the validated 10.13.
         run: |
           apt-get update
           apt-get install -y --no-install-recommends cmake build-essential nlohmann-json3-dev
+          V=10.13.3.9-1+cuda12.9
+          apt-get install -y --no-install-recommends \
+            "libnvinfer10=$V" "libnvinfer-headers-dev=$V" "libnvinfer-dev=$V" \
+            "libnvinfer-plugin10=$V" "libnvinfer-headers-plugin-dev=$V" "libnvinfer-plugin-dev=$V" \
+            "libnvonnxparsers10=$V" "libnvonnxparsers-dev=$V"
       - name: Configure
         # CMAKE_CUDA_ARCHITECTURES must be an explicit SM here: build.sh's
         # 'native' default probes a GPU, and there is none on hosted runners.
@@ -122,16 +130,21 @@ jobs:
   install-consumer:
     name: cmake --install + out-of-tree consumer
     runs-on: ubuntu-latest
-    # Same TRT container as compile-cuda: install needs the full link
+    # Same container recipe as compile-cuda: install needs the full link
     # toolchain, and the consumer must resolve TensorRT::TensorRT through the
     # SHIPPED FindTensorRT.cmake, not the checkout's copy.
-    container: nvcr.io/nvidia/tensorrt:24.10-py3
+    container: nvidia/cuda:12.9.1-devel-ubuntu22.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install toolchain deps
+      - name: Install toolchain deps + pinned TensorRT
         run: |
           apt-get update
           apt-get install -y --no-install-recommends cmake build-essential nlohmann-json3-dev
+          V=10.13.3.9-1+cuda12.9
+          apt-get install -y --no-install-recommends \
+            "libnvinfer10=$V" "libnvinfer-headers-dev=$V" "libnvinfer-dev=$V" \
+            "libnvinfer-plugin10=$V" "libnvinfer-headers-plugin-dev=$V" "libnvinfer-plugin-dev=$V" \
+            "libnvonnxparsers10=$V" "libnvonnxparsers-dev=$V"
       - name: Build + install to a prefix
         run: |
           cmake -B build -S . \
@@ -206,15 +219,25 @@ jobs:
   wheel:
     name: wheel (bundled libdfine.so, linux_x86_64)
     runs-on: ubuntu-latest
-    # Independent of compile-cuda: builds only the `dfine` library target in
-    # the same TRT container, then packages it.
-    container: nvcr.io/nvidia/tensorrt:24.10-py3
+    # Independent of compile-cuda: builds only the `dfine` library target with
+    # the same container recipe, then packages it. Compile-time TRT headers now
+    # match the validated 10.13 runtime — the 24.10 image compiled against 10.5
+    # and every load printed a version-mismatch warning.
+    container: nvidia/cuda:12.9.1-devel-ubuntu22.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install toolchain deps
+      - name: Install toolchain deps + pinned TensorRT
+        # python3-pip: the CUDA devel image, unlike the NGC -py3 images, ships
+        # no python — the packaging steps below need pip and venv.
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends cmake build-essential nlohmann-json3-dev
+          apt-get install -y --no-install-recommends cmake build-essential nlohmann-json3-dev \
+            python3-pip python3-venv unzip
+          V=10.13.3.9-1+cuda12.9
+          apt-get install -y --no-install-recommends \
+            "libnvinfer10=$V" "libnvinfer-headers-dev=$V" "libnvinfer-dev=$V" \
+            "libnvinfer-plugin10=$V" "libnvinfer-headers-plugin-dev=$V" "libnvinfer-plugin-dev=$V" \
+            "libnvonnxparsers10=$V" "libnvonnxparsers-dev=$V"
       - name: Build libdfine.so
         # sm_89 SASS + compute_89 PTX: runs on Ada as-is and JIT-compiles on
         # newer arches; older GPUs (sm_75/86) need a rebuild with their arch.

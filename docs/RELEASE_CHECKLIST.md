@@ -14,7 +14,7 @@ export KNOWN_IMAGE="${KNOWN_IMAGE:?set KNOWN_IMAGE to a recorded COCO image}"
 export FOOD_CHECKPOINT="${FOOD_CHECKPOINT:?set FOOD_CHECKPOINT to the 3-class checkpoint}"
 export FOOD_CLASSES="${FOOD_CLASSES:-food,plate,tray}"
 export FOOD_IMAGE="${FOOD_IMAGE:?set FOOD_IMAGE to the recorded food image}"
-export RELEASE_DIR="${RELEASE_DIR:-/tmp/dfine-v0.3.1-release}"
+export RELEASE_DIR="${RELEASE_DIR:-/tmp/dfine-release}"
 mkdir -p "$RELEASE_DIR"
 ```
 
@@ -94,7 +94,7 @@ CUDA_ARCH=89 ./python/build_wheel.sh    # or (preferred) take the CI artifact: s
                                         # but a different toolchain — the artifacts are NOT
                                         # byte-identical; gate and publish ONE of them
 python trt-files/scripts/release_assets.py assemble --input "$RELEASE_DIR" \
-    --wheel python/dist/dfine-0.3.1-py3-none-linux_x86_64.whl --out "$RELEASE_DIR/upload"
+    --wheel python/dist/dfine-<version>-py3-none-linux_x86_64.whl --out "$RELEASE_DIR/upload"
 ```
 
 - [ ] `assemble` succeeds: it enforces the release grammar — exactly 20 model files

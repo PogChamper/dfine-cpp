@@ -75,7 +75,9 @@ sizes — the FP32 opset-19 base (`dfine_<size>_op19`) and the surgical-FP16 pro
 (`dfine_<size>_slim`), each with its `.json` sidecar, plus `SHA256SUMS` — attached to
 [GitHub Releases](https://github.com/PogChamper/dfine-cpp/releases). What the names and
 sidecars mean — and which one is the source of truth — is spelled out in
-[docs/NAMING.md](docs/NAMING.md).
+[docs/NAMING.md](docs/NAMING.md). Running on a GPU we haven't validated? A
+[docs/VALIDATION.md](docs/VALIDATION.md) report takes ten minutes and earns a
+row in the compatibility table.
 
 ### Python — three commands, no checkout
 

@@ -132,6 +132,12 @@ fi
 
 # --------------------------------------------------------------------------- #
 say "C++ build (CUDA_ARCH=$ARCH)"
+# Conda's cross-gcc (dragged in by conda cuda-toolkit) mixes its own sysroot
+# with the system TensorRT/glibc headers and dies in math.h — force the system
+# toolchain for host code whenever it exists.
+if [ -x /usr/bin/g++ ]; then
+  export CC=/usr/bin/gcc CXX=/usr/bin/g++ CUDAHOSTCXX=/usr/bin/g++
+fi
 ( cd "$REPO" && CUDA_ARCH="$ARCH" ./build.sh ) >"$OUT/build_cpp.log" 2>&1
 test -x "$REPO/build/dfine_bench" && test -x "$REPO/build/dfine_detect"
 note "built: dfine_bench + dfine_detect OK"

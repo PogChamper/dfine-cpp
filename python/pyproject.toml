@@ -26,7 +26,7 @@ dfine = "dfine.cli:main"
 # TensorRT is not redistributable and is CUDA/arch-specific; declare it as an
 # extra rather than vendoring it. The user's local TRT 10.13 + CUDA 12 must match
 # the engine's build.
-tensorrt = ["tensorrt==10.13.*"]
+tensorrt = ["tensorrt-cu12==10.13.*"]
 cli = ["pillow>=9"]
 dev = ["pytest>=7", "pillow>=9"]
 

@@ -87,7 +87,7 @@ linux_x86_64 (see [Supported hardware](#supported-hardware--prerequisites)); oth
 source first, then everything below is identical.
 
 ```sh
-pip install "dfine[tensorrt,cli] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.2/dfine-0.3.2-py3-none-linux_x86_64.whl"
+pip install "dfine[cli] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.2/dfine-0.3.2-py3-none-linux_x86_64.whl" "tensorrt-cu12==10.13.*"
 curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.2/dfine_m_slim.onnx \
      -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.2/dfine_m_slim.json
 dfine build --model m --onnx dfine_m_slim.onnx --output dfine_m_slim.engine
@@ -133,7 +133,7 @@ python trt-files/scripts/build_engine.py --strongly-typed --no-tf32 --max-batch 
 #   (add --opt-batch 8 for batch serving: +6-10% b8 throughput, costs some b1 latency)
 
 # 3. Run — libnvinfer/libcudart must be on LD_LIBRARY_PATH; any TensorRT 10.x libs work,
-#    e.g. `python -m pip install "tensorrt==10.13.*"` then the venv's .../site-packages/tensorrt_libs
+#    e.g. `python -m pip install "tensorrt-cu12==10.13.*"` then the venv's .../site-packages/tensorrt_libs
 export LD_LIBRARY_PATH=/path/to/tensorrt/lib:$LD_LIBRARY_PATH
 ./build/dfine_detect --engine trt-files/engines/dfine_m_slim.engine \
     --image 000000039769.jpg --threshold 0.5
@@ -262,7 +262,7 @@ fat binary.
 |---|---|---|
 | NVIDIA driver | CUDA-12-capable (R525+; RTX 50xx needs R570+/CUDA 12.8 stack) | build + run |
 | CUDA toolkit (`nvcc`) | 12.x (sm_120 needs ≥ 12.8) | build only |
-| TensorRT | **10.x** — validated on 10.13; any 10.x ≥ your GPU's floor works, e.g. `pip install "tensorrt==10.13.*"` as a lib source. **TensorRT 11 (2026) is not yet validated** — it makes strongly-typed networks the default (exactly this repo's approach), but nothing here has been re-gated on it | build + run |
+| TensorRT | **10.x** — validated on 10.13; any 10.x ≥ your GPU's floor works, e.g. `pip install "tensorrt-cu12==10.13.*"` as a lib source. **TensorRT 11 (2026) is not yet validated** — it makes strongly-typed networks the default (exactly this repo's approach), but nothing here has been re-gated on it | build + run |
 | CMake | ≥ 3.24 for `native` arch / ≥ 3.20 with explicit arch | build only |
 | C++ compiler | C++17 — any GCC/Clang your CUDA 12.x `nvcc` accepts (CUDA 12.9: GCC ≤ 14, Clang ≤ 19) | build only |
 | Python | 3.9+ — engine build & ONNX export scripts only, **never at inference** | tooling only |
@@ -376,7 +376,7 @@ A dependency-light [`dfine`](python/) package wraps the C ABI via `ctypes` (no c
 prebuilt `.so`). See [`python/README.md`](python/README.md).
 
 ```sh
-pip install "dfine[tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.2/dfine-0.3.2-py3-none-linux_x86_64.whl"
+pip install "dfine @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.2/dfine-0.3.2-py3-none-linux_x86_64.whl" "tensorrt-cu12==10.13.*"
 ```
 
 The wheel bundles `libdfine.so` built for sm_89 / linux_x86_64 plus a snapshot of
@@ -491,7 +491,7 @@ journal behind these decisions.
 ## Troubleshooting
 
 - **`libnvinfer.so.10: cannot open shared object file`** — TensorRT libs are not on `LD_LIBRARY_PATH`;
-  any TRT 10.x works, e.g. a `pip install "tensorrt==10.13.*"` venv's `tensorrt_libs` dir (Quickstart
+  any TRT 10.x works, e.g. a `pip install "tensorrt-cu12==10.13.*"` venv's `tensorrt_libs` dir (Quickstart
   step 3).
 - **Engine fails to deserialize** — `.engine` files are GPU-arch- and TRT-version-specific; rebuild from
   the ONNX on the target machine (`build_engine.py`).

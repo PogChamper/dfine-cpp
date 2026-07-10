@@ -44,3 +44,4 @@ e.g. `validation: RTX 3060 / TRT 10.9`. Nothing in the report identifies you bey
 |-----|----|-----|--------|----|-------|----------|----------|----------|--------------|
 | RTX 4070 Ti SUPER | 8.9 | 10.13.3.9 | 581.15 | WSL2 (6.18) | 0.3.2 | yes (132.8 s) | 279.5 | 506.1 | maintainer |
 | RTX 3090 | 8.6 | 10.13.3.9 | 550.107.02 | Ubuntu 22.04 native | 0.3.2 | yes | 310 | 487 | maintainer (rented) |
+| RTX 5080 | 12.0 | 10.13.3.9 | 610.43.02 | Ubuntu 22.04 native | 0.3.2 | yes | 456 | 676 | maintainer (rented) |

@@ -60,6 +60,10 @@ def tiny_graph(tmp_path: Path, *, bake_batch: bool) -> Path:
         initializer=[w_l, w_b, shp_l, shp_b],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 19)])
+    # New onnx releases default synthetic models to a newer IR than older, still
+    # supported ORT releases accept. IR 9 is sufficient for this opset-19 graph
+    # and keeps the test about batch behavior rather than tool-version skew.
+    model.ir_version = onnx.IR_VERSION_2023_5_5
     p = tmp_path / ("baked.onnx" if bake_batch else "dynamic.onnx")
     onnx.save(model, p)
     return p

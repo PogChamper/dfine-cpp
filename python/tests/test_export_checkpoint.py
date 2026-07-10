@@ -5,6 +5,7 @@ not silently export randomly-initialized weights. CPU-only; skips without torch.
 from __future__ import annotations
 
 import argparse
+import builtins
 import importlib.util
 from pathlib import Path
 
@@ -111,3 +112,18 @@ def test_bare_state_dict_checkpoint(exporter, tmp_path):
 def test_trace_batch_below_two_aborts(exporter):
     with pytest.raises(SystemExit, match="trace-batch"):
         exporter.export(argparse.Namespace(trace_batch=1))
+
+
+def test_dynamic_batch_check_requires_onnxruntime(exporter, monkeypatch):
+    real_import = builtins.__import__
+
+    def without_onnxruntime(name, *args, **kwargs):
+        if name == "onnxruntime":
+            raise ImportError("simulated missing onnxruntime")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_onnxruntime)
+    with pytest.raises(SystemExit, match="requires numpy and onnxruntime"):
+        exporter._verify_dynamic_batch_runs(Path("unused.onnx"), {})
+    with pytest.raises(SystemExit, match="requires numpy and onnxruntime"):
+        exporter.export(argparse.Namespace(trace_batch=2))

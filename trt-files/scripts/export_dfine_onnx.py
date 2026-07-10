@@ -457,6 +457,9 @@ def export(args: argparse.Namespace) -> None:
     if args.trace_batch < 2:
         raise SystemExit(f"--trace-batch must be >= 2 (got {args.trace_batch}): a batch-1 "
                          "trace bakes an internal decoder extent and breaks dynamic batch")
+    # Fail before loading a checkpoint or overwriting an output. The execution
+    # postcondition is part of a valid export, not a best-effort extra.
+    _require_dynamic_batch_runtime()
     _add_repo_to_path(Path(args.dfine_src))
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"[export] device={device} variant={args.model_name} classes={args.num_classes}")
@@ -616,6 +619,18 @@ def _verify_io(graph, meta: dict) -> None:
     print("[verify] graph OK: native ops only, symbolic batch, 2 raw outputs")
 
 
+def _require_dynamic_batch_runtime():
+    try:
+        import numpy as np
+        import onnxruntime as ort
+    except ImportError as exc:
+        raise SystemExit(
+            "dynamic-batch verification requires numpy and onnxruntime; install "
+            "onnxruntime (or onnxruntime-gpu) before exporting"
+        ) from exc
+    return np, ort
+
+
 def _verify_dynamic_batch_runs(onnx_path: Path, meta: dict) -> None:
     """The decisive dynamic-batch check: actually run the graph at N=1 and N=2.
 
@@ -625,13 +640,7 @@ def _verify_dynamic_batch_runs(onnx_path: Path, meta: dict) -> None:
     rejects the second batch. The concrete output shapes double as the
     sidecar-consistency check (num_queries/num_classes really match the graph).
     """
-    try:
-        import numpy as np
-        import onnxruntime as ort
-    except ImportError as exc:
-        print(f"[verify] onnxruntime unavailable ({exc}); dynamic-batch run check SKIPPED — "
-              "verify_engine.py --batches 1 2 must cover it at build time")
-        return
+    np, ort = _require_dynamic_batch_runtime()
     sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     rng = np.random.default_rng(0)
     q, c = meta["num_queries"], meta["num_classes"]

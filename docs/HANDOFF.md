@@ -199,7 +199,7 @@ the payoff of the explicit-deform export. The baseline engine is built via
 | Profiling (latency/mem/mAP, cross-backend) | ✅ | `dfine_bench` + `profile.py` |
 | **FP16 (strongly-typed, backbone+encoder)** | ✅ M2.1 | **1.6–2.2× infer, mAP −0.2%**; the `kFP16` *flag* is the trap, not FP16 |
 | **CUDA-graph replay (opt-in)** | ✅ M2.2 | byte-identical; **−34.5% batch-1** on a `--max-aux-streams 0` engine (D-FINE is dispatch-bound); default 2-aux engines can't capture (gated) |
-| **INT8 (QDQ)** | ⛔ rejected | builds, but mAP collapses to ~0.13 — D-FINE's FDR needs ≥FP16 precision |
+| **INT8 (QDQ)** | ⛔ rejected on Ada | this repo's naive PTQ collapses to ~0.13; a later SmoothQuant producer-fold recipe (external) reaches −0.97 AP but still loses to surgical FP16 on Ada — see the M2.3 addendum |
 | **Instance segmentation** | ⛔ M3 | D-FINE-seg mask head, threshold 0.5 (masks pre-sigmoid'd) |
 
 Numbers below are RTX 4070 Ti SUPER, COCO subset-2000, m variant, FP32 baseline **0.5669** (trt) /
@@ -290,6 +290,14 @@ Conv/MatMul, decoder excluded) + `build_engine.py --int8`. Builds cleanly and is
 0.1274 (weakly-typed) / 0.1314 (strongly-typed)** vs 0.5666 — a −0.44 AP loss either way. INT8's 8-bit
 precision on the backbone/encoder features is far below what D-FINE's FDR tolerates (FP16's 10-bit mantissa is
 already the floor). **Not recommended for D-FINE-M.** Script kept for future variants / less FP-sensitive heads.
+
+**Addendum (2026-07):** the collapse above is a property of *this naive PTQ path*, not of INT8 itself —
+a later SmoothQuant producer-fold recipe (separate research repo) reaches honest full-INT8 at
+**−0.97 AP** (m-size, decoder included). On desktop Ada it still loses to surgical FP16 in both accuracy
+and speed (0.5403 @ 354 img/s b8 vs 0.5502 @ 561), so the desktop verdict stands; the recipe is relevant
+for DLA/NPU/memory-bound targets and is not integrated into this repo yet. The runtime itself is
+precision-agnostic (it branches on real TRT binding dtypes, not sidecar strings), so an honest-INT8
+engine with FP32 I/O runs with zero C++ changes.
 
 ### M2.4 — instance segmentation (M3, optional)
 

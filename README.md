@@ -119,7 +119,9 @@ version: [examples/python_quickstart.ipynb](examples/python_quickstart.ipynb); o
 ### C++ — build, engine, run
 
 ```sh
-# 1. Build (see Supported hardware for CUDA_ARCH values; 'native' probes the local GPU)
+# 1. Build (see Supported hardware for CUDA_ARCH values; 'native' probes the local GPU).
+#    Building needs TensorRT HEADERS — `pip install tensorrt-cu12` is runtime-only;
+#    build.sh checks first and prints the fix (details: docs/TROUBLESHOOTING.md)
 ./build.sh                                              # or: CUDA_ARCH=86 ./build.sh
 # — or plain CMake:
 cmake -B build -S . -DCMAKE_CUDA_ARCHITECTURES=native   # [-DTENSORRT_DIR=/path/to/tensorrt]
@@ -220,11 +222,13 @@ exact recipe: `--precision fp16` = opset-19 export + surgical `--slim`.
 
 ## Supported hardware & prerequisites
 
-**Validated:** Linux x86_64 / WSL2 · RTX 40xx (Ada, `CUDA_ARCH=89`) · TensorRT 10.13 — every number
-in this README. **Expected (build from source, not yet validated):** other Linux distros, Ampere/
-Turing/Blackwell GPUs, Jetson Orin. **Not supported:** Windows native (use WSL2), macOS.
-The release wheel bundles `libdfine.so` for **sm_89 / linux_x86_64 only** — everything else is one
-`./build.sh` from source, after which every command works identically.
+**Validated:** Linux x86_64 (native + WSL2) · **Ada 89 / Ampere 86 / Blackwell 120** ·
+TensorRT 10.13. README numbers are the Ada reference; the Ampere (RTX 3090) and Blackwell
+(RTX 5080) full-methodology runs live in [docs/VALIDATION.md](docs/VALIDATION.md).
+**Expected (not yet validated):** Turing, Jetson Orin. **Not supported:** Windows native
+(use WSL2), macOS. The release wheel bundles `libdfine.so` built for **sm_89** — it runs
+as-is on newer arches via PTX JIT (verified on RTX 5080 with identical detections); older
+GPUs are one `./build.sh` from source, after which every command works identically.
 
 <details>
 <summary><b>Full platform / GPU / dependency tables</b> (statuses, CUDA_ARCH values, versions)</summary>
@@ -234,7 +238,7 @@ not benchmarked here; *not supported* = known blocker):
 
 | Platform | Status |
 |---|---|
-| Linux x86_64 (Ubuntu 22.04+) | ✅ **validated** — every number in this README (measured in a WSL2 Ubuntu guest, same stack as bare metal) + CI builds on ubuntu-latest |
+| Linux x86_64 (Ubuntu 22.04+) | ✅ **validated** — native Ubuntu 22.04 (the Ampere/Blackwell full runs) and the WSL2 guest below + CI builds on ubuntu-latest |
 | **WSL2** (Windows 11, Ubuntu guest) | ✅ **validated** — the development & benchmark environment itself |
 | Other Linux x86_64 distros | expected (plain CMake + CUDA 12 + TRT 10 stack) |
 | Jetson Orin (aarch64, JetPack ≥ 6.1) | expected, **not validated** — JetPack 6.1+ ships TensorRT 10.3 + CUDA 12.6; the runtime is plain CUDA + TRT with no x86-specific code. Note: the `tensorrt` pip wheel does not exist for Jetson — use JetPack's TensorRT for both build and run |
@@ -246,10 +250,10 @@ NVIDIA's TRT support matrix); this project is validated on **8.9 (Ada)**:
 
 | GPU family | `CUDA_ARCH` | Status / notes |
 |---|:---:|---|
-| RTX 40xx (Ada) | `89` | ✅ validated (RTX 4070 Ti SUPER) |
-| RTX 30xx (Ampere) | `86` | expected |
+| RTX 40xx (Ada) | `89` | ✅ validated (RTX 4070 Ti SUPER — the reference machine) |
+| RTX 30xx (Ampere) | `86` | ✅ validated (RTX 3090: full tier ladder, lossless slim — [docs/VALIDATION.md](docs/VALIDATION.md)) |
 | RTX 20xx / T4 (Turing) | `75` | expected (TRT 10 floor; FP16 tensor cores present) |
-| RTX 50xx (Blackwell) | `120` | expected — needs CUDA ≥ 12.8 **and** TensorRT ≥ 10.8 |
+| RTX 50xx (Blackwell) | `120` | ✅ validated (RTX 5080; building needs driver ≥ 570 + CUDA ≥ 12.8 — the release wheel itself runs via PTX JIT) |
 | Jetson Orin | `87` | expected, not validated (see platform row) |
 
 `./build.sh` targets your local GPU by default (`CUDA_ARCH=native`); pass one value
@@ -290,9 +294,13 @@ The full m ladder, batch-8: **PyTorch 66 → C++ fp32 230 → fp16 469 → surgi
 graph holds **2.47 ms** end-to-end batch-1 with byte-identical detections. Per-batch curves, VRAM,
 and every intermediate point: [docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md).
 
-RTX 4070 Ti SUPER · COCO val2017 (5000 imgs) · D-FINE-M · latency = e2e p50 ms
-(preprocess+infer+decode). Measured with `profile.py` in the v0.2.0 session — a couple of percent
-below the hero table's newer 3-round `dfine_bench` medians for the same engines.
+The same ladder across generations (m surgical, b8): **RTX 3090 487 · 4070 Ti SUPER 526 ·
+RTX 5080 676 img/s** — full-methodology tables in [docs/VALIDATION.md](docs/VALIDATION.md).
+Batch-1 numbers here carry a WSL2 dispatch tax the native-Linux runs don't: the RTX 5080
+holds n-surgical at **0.91 ms** end to end.
+
+RTX 4070 Ti SUPER · COCO val2017 (5000 imgs) · D-FINE-M · latency = e2e p50 ms — the v0.2.0
+`profile.py` session, a couple of percent below the hero table's newer medians.
 
 | backend | e2e (b1) | **FPS b1** | **FPS b8** | GPU MiB | mAP |
 |---|---|---|---|---|---|
@@ -407,6 +415,7 @@ dfine info    --model m                                                        #
 dfine build   --model m --precision fp16                                       # ONNX -> .engine (cached)
 dfine export  --model m --precision fp16                                       # .pt -> surgical/slim ONNX
 dfine bench   --model m --batches 1,2,4,8                                       # latency/throughput
+dfine doctor                                                                    # environment diagnostics
 ```
 
 `dfine export --precision fp16` produces the production surgical/slim tier (the hero-table numbers);
@@ -456,9 +465,8 @@ ops, and TensorRT 10.13 miscompiles that decomposition in FP16 (mAP collapses to
 ONNXRuntime stays healthy — a TRT-side bug; minimal repro archived, NVIDIA report in preparation).
 The converter hard-errors on opset < 19.
 
-**Export sliders** — accuracy you can trade back for speed at export time (numbers: m, full-val,
-b8; gains relative to the surgical b8 median of 526 img/s; all five sizes and every
-hyperparameter point in [docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md)):
+**Export sliders** — accuracy traded back for speed at export time (m, full-val, gains vs
+surgical b8 = 526 img/s; every point in [docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md)):
 
 | slider | cost | gain | note |
 |---|---|---|---|
@@ -484,20 +492,25 @@ lossless on all five sizes, export sliders, cascade pruning; FP8/INT8/deform-plu
 measurements — [docs/RESEARCH_MATRIX.md](docs/RESEARCH_MATRIX.md)).
 M3 instance segmentation is shelved. A browser demo is under investigation (the explicit-gather export
 removes the GridSample blocker, but operator coverage on browser runtimes is unproven — no promise until
-a feasibility spike passes); near-term focus is hardening, packaging, and external hardware validation —
+a feasibility spike passes). Hardware validation now spans Ampere/Ada/Blackwell
+([docs/VALIDATION.md](docs/VALIDATION.md)); near-term focus is distribution and a real-time video demo —
 see **[docs/ROADMAP.md](docs/ROADMAP.md)**. [docs/HANDOFF.md](docs/HANDOFF.md) is the historical lab
 journal behind these decisions.
 
 ## Troubleshooting
+
+First command: **`dfine doctor`** — environment facts, every library-discovery path with its
+verdict, and exactly what to attach to a bug report. The two most common trips:
 
 - **`libnvinfer.so.10: cannot open shared object file`** — TensorRT libs are not on `LD_LIBRARY_PATH`;
   any TRT 10.x works, e.g. a `pip install "tensorrt-cu12==10.13.*"` venv's `tensorrt_libs` dir (Quickstart
   step 3).
 - **Engine fails to deserialize** — `.engine` files are GPU-arch- and TRT-version-specific; rebuild from
   the ONNX on the target machine (`build_engine.py`).
-- **mAP collapses after "fixing" preprocessing** — D-FINE is `/255` only, no ImageNet mean/std.
-- **CMake error on `CUDA_ARCHITECTURES=native`** — needs CMake ≥ 3.24; pass an explicit arch
-  (`CUDA_ARCH=89 ./build.sh`) on older CMake.
+
+Everything else — the `tensorrt` pip package resolving to CUDA-13, missing TensorRT headers,
+conda toolchain clashes, driver recovery on hosted boxes, export reproducibility:
+**[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)**.
 
 Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md) — the validation bar (warning-clean,
 sanitizer-clean, mAP-neutral) is spelled out there.

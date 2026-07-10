@@ -415,21 +415,26 @@ class Detector:
 
 
 # --------------------------------------------------------------------------- #
-# Module-level log callback (process-wide). Keep a ref so it isn't GC'd.
+# Module-level log callback (process-wide). Every installed CFUNCTYPE stays
+# alive for the life of the process: the C side swaps the pointer atomically
+# but does NOT wait for in-flight invocations (see c_api.h), so a trampoline
+# may still be executing on a TensorRT thread after the swap — freeing it
+# would crash that thread. A few dozen leaked bytes per swap is the safe trade.
 # --------------------------------------------------------------------------- #
 
-_LOG_HOLDER: Optional[ctypes._CFuncPtr] = None
+_LOG_HOLDERS: list = []
 
 
 def set_log_callback(callback: Optional[Callable[[int, str], None]]) -> None:
     """Route libdfine log messages to a Python callable ``(severity, message)``,
     where severity is 0=FATAL 1=ERROR 2=WARN 3=INFO 4=VERBOSE. Pass None to
-    restore the default stderr logger."""
-    global _LOG_HOLDER
+    restore the default stderr logger.
+
+    The callable may be invoked from any thread, including TensorRT's internal
+    threads: keep it fast, don't block, and don't call dfine APIs from inside."""
     lib = get_lib()
     if callback is None:
         lib.dfine_set_log_callback(_ffi.LOG_FN())  # null callback
-        _LOG_HOLDER = None
         return
 
     def _trampoline(severity: int, message: bytes) -> None:
@@ -438,8 +443,8 @@ def set_log_callback(callback: Optional[Callable[[int, str], None]]) -> None:
         except Exception:
             pass  # never let a Python exception unwind into C
 
-    # Install the new callback C-side BEFORE dropping the previous holder, so the
-    # old CFUNCTYPE can't be freed while the C side still points at it.
+    # Keep the holder alive BEFORE installing: the C side must never hold the
+    # only reference to a freeable trampoline.
     holder = _ffi.LOG_FN(_trampoline)
+    _LOG_HOLDERS.append(holder)
     lib.dfine_set_log_callback(holder)
-    _LOG_HOLDER = holder

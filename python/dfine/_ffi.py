@@ -151,6 +151,14 @@ def _preload_tensorrt() -> None:
 
 
 def _load_library() -> ctypes.CDLL:
+    env = os.environ.get("DFINE_LIBRARY")
+    if env and not Path(env).exists():
+        # An explicitly requested library must never be silently substituted
+        # with a fallback — fail here, not after loading some other copy.
+        raise RuntimeError(
+            f"DFINE_LIBRARY points at a missing file: {env}\n"
+            "Fix the path or unset DFINE_LIBRARY to use automatic discovery."
+        )
     _preload_tensorrt()
     tried: list[str] = []
     for cand in _candidate_paths():
@@ -167,15 +175,20 @@ def _load_library() -> ctypes.CDLL:
                     f"TensorRT/CUDA lib dirs to {libpath} (see docs/HANDOFF.md)."
                 ) from e
 
-    # Last resort: let the loader search standard paths.
+    # Last resort: let the loader search standard paths. Keep each dlerror —
+    # "not found" and "found but missing a dependency" need different fixes,
+    # and only the loader's own text distinguishes them.
+    errors: list[str] = []
     for name in _LIBNAMES:
         try:
             return ctypes.CDLL(name)
-        except OSError:
-            pass
+        except OSError as e:
+            errors.append(f"{name}: {e}")
     searched = "\n  ".join(tried)
+    loader_said = "\n  ".join(errors)
     raise RuntimeError(
         f"Could not locate {_LIBNAMES[0]}. Searched:\n  {searched}\n"
+        f"System loader said:\n  {loader_said}\n"
         "Set DFINE_LIBRARY to the full path of the built library, or build it "
         "with ./build.sh (produces build/libdfine.so)."
     )

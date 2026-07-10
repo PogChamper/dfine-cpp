@@ -210,9 +210,18 @@ DFINE_API const char* dfine_last_error(void);
 typedef void (*dfine_log_fn_t)(int severity, const char* message);
 
 /*
- * Override the default stderr logger. Pass NULL to restore the default. The
- * callback receives a null-terminated UTF-8 string and may be called from any
- * thread (including TensorRT's internal threads).
+ * Override the default stderr logger. Pass NULL to restore the default.
+ *
+ * Contract:
+ *  - message is null-terminated UTF-8, valid ONLY for the duration of the
+ *    call — copy it to retain.
+ *  - The callback may fire on ANY thread, including TensorRT's internal
+ *    threads and threads inside dfine_detector_create/destroy. It must be
+ *    thread-safe, must not block, and must not call back into the dfine API.
+ *  - The swap is atomic but does NOT wait for in-flight invocations: a call
+ *    to the PREVIOUS callback may still be executing when this function
+ *    returns. Keep every callback you ever install (and everything it
+ *    references) valid for the process lifetime — install once, early.
  */
 DFINE_API void dfine_set_log_callback(dfine_log_fn_t callback);
 

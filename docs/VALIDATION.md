@@ -16,9 +16,9 @@ useful report with the build marked "skipped".
 
 ```sh
 git clone https://github.com/PogChamper/dfine-cpp && cd dfine-cpp
-curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.1/dfine_m_slim.onnx \
-     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.1/dfine_m_slim.json \
-     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.1/SHA256SUMS
+curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.2/dfine_m_slim.onnx \
+     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.2/dfine_m_slim.json \
+     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.2/SHA256SUMS
 python trt-files/scripts/validation_report.py --onnx dfine_m_slim.onnx \
     --check-sums SHA256SUMS --out validation
 ```

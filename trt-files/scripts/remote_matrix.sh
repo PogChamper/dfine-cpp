@@ -28,8 +28,10 @@
 #     "libnvonnxparsers10=$V" "libnvonnxparsers-dev=$V"
 #       # apt does not down-resolve dependencies to a pinned version — every
 #       # package in the chain must carry =$V explicitly.
-#   # Only for the export stage (SKIP_EXPORT=0) — the seg source imports both:
+#   # Only for the export stage (SKIP_EXPORT=0). The seg source's model-build
+#   # chain imports torch, torchvision, loguru and scipy:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+#   pip install loguru scipy
 #   git clone https://github.com/ArgoHA/D-FINE-seg "$HOME/D-FINE-seg"
 #
 # Then:  bash trt-files/scripts/remote_matrix.sh

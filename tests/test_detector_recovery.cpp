@@ -174,8 +174,9 @@ int main() {
             DFINE_CHECK(det.full_graph_replays() == replays + 1);
             DFINE_CHECK(equal(replayed, base));
         } else {
-            std::fprintf(stderr, "note: full graph inactive on DFINE_TEST_ENGINE_G0 — "
-                                 "section not exercised\n");
+            std::fprintf(stderr, "full graph inactive on DFINE_TEST_ENGINE_G0 — "
+                                 "configured release-gate coverage was not exercised\n");
+            DFINE_CHECK(det.full_pipeline_graph_active());
         }
     } else {
         std::fprintf(stderr, "note: DFINE_TEST_ENGINE_G0 unset — full-graph section skipped\n");

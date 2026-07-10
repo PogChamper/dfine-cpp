@@ -95,7 +95,7 @@ if { [ "$SKIP_EVAL" != 1 ] || [ "$SKIP_INT8" != 1 ]; } && [ "$COCO_LIMIT" -gt 0 
     rm "$COCO/ann.zip"
   fi
   python - "$ANN" "$COCO/val2017" "$COCO_LIMIT" <<'EOF'
-import json, sys, urllib.request
+import json, sys, time, urllib.request
 from pathlib import Path
 ann, out, n = sys.argv[1], Path(sys.argv[2]), int(sys.argv[3])
 out.mkdir(exist_ok=True)
@@ -103,7 +103,16 @@ imgs = sorted(json.load(open(ann))["images"], key=lambda i: i["id"])[:n]
 for i, im in enumerate(imgs):
     p = out / im["file_name"]
     if not p.exists():
-        urllib.request.urlretrieve(f"http://images.cocodataset.org/val2017/{im['file_name']}", p)
+        # Rented-box DNS flaps mid-run; one refusal must not kill a 2 h matrix.
+        for attempt in range(5):
+            try:
+                urllib.request.urlretrieve(
+                    f"http://images.cocodataset.org/val2017/{im['file_name']}", p)
+                break
+            except OSError:
+                if attempt == 4:
+                    raise
+                time.sleep(2 * (attempt + 1))
     if (i + 1) % 100 == 0:
         print(f"  {i+1}/{n}")
 EOF

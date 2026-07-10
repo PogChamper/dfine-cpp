@@ -73,7 +73,9 @@ and ships a lean, dependency-light C++ runtime:
 Two paths to the same runtime. Both start from the release assets: prebuilt ONNX for all five
 sizes — the FP32 opset-19 base (`dfine_<size>_op19`) and the surgical-FP16 production build
 (`dfine_<size>_slim`), each with its `.json` sidecar, plus `SHA256SUMS` — attached to
-[GitHub Releases](https://github.com/PogChamper/dfine-cpp/releases).
+[GitHub Releases](https://github.com/PogChamper/dfine-cpp/releases). What the names and
+sidecars mean — and which one is the source of truth — is spelled out in
+[docs/NAMING.md](docs/NAMING.md).
 
 ### Python — three commands, no checkout
 

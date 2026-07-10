@@ -26,12 +26,16 @@ from typing import Optional
 
 MODELS = ("n", "s", "m", "l", "x")
 _ENGINE_SUFFIX = {"fp32": "fp32", "fp16": "fp16_st"}
+# The recipe-suffix vocabulary (docs/NAMING.md). These two constants are the only
+# spellings — discovery, export defaults and stem-stripping all reference them.
+_SLIM_SUFFIX = "_slim"        # v0.3 production surgical FP16
+_LEGACY_SUFFIX = "_fp16_st"   # v0.2 legacy decoder-FP32 tier
 # ONNX stem suffixes tried per precision, in preference order. `_slim` first: it is
 # both the v0.3 release surgical FP16 asset name AND what `dfine export --precision
 # fp16` writes since v0.3.1, so the production tier always wins. `_fp16_st` (the
 # legacy decoder-FP32 tier, still produced by --precision fp16-legacy) is found when
 # it is the only candidate; _find_onnx warns whenever several names match.
-_ONNX_SUFFIXES = {"fp32": ("", "_op19"), "fp16": ("_slim", "_fp16_st")}
+_ONNX_SUFFIXES = {"fp32": ("", "_op19"), "fp16": (_SLIM_SUFFIX, _LEGACY_SUFFIX)}
 # Known D-FINE-seg checkpoints (relative to the seg source dir).
 _CHECKPOINTS = {
     "n": "dfine_n_coco.pt",
@@ -119,9 +123,10 @@ def _artifact_fingerprint(onnx: Path) -> str:
     sidecar (class names / normalization travel into the engine sidecar). Two
     different fine-tunes of the same size can never share a cache entry, and a
     stale engine can never shadow a fresh export. The batch profile is NOT part
-    of the identity — it only shapes performance, lives in the filename, and a
-    same-artifact engine with a different profile is still the right model
-    (12 hex chars — enough to never collide within one cache dir)."""
+    of the identity — it only shapes performance and is recorded in the engine
+    sidecar (_engine_meta); a same-artifact engine with a different profile is
+    still the right model (12 hex chars — enough to never collide within one
+    cache dir)."""
     h = hashlib.sha256()
     h.update(onnx.read_bytes())
     sidecar = onnx.with_suffix(".json")
@@ -130,22 +135,42 @@ def _artifact_fingerprint(onnx: Path) -> str:
     return h.hexdigest()[:12]
 
 
+def _cache_engine_name(model: str, precision: str, fingerprint: str, profile: str) -> str:
+    """The one cache-name grammar — the path builder and every cache glob derive
+    from it. The name is a human label and a glob pre-filter, not the source of
+    truth: identity is the fingerprint, build facts live in the engine sidecar."""
+    return (f"dfine_{model}_{precision}-{fingerprint}-{profile}"
+            f"-sm{_gpu_arch()}-trt{_trt_version()}.engine")
+
+
 def _cache_engine_path(model: str, precision: str, fingerprint: str,
                        opt_batch: int, max_batch: int) -> Path:
-    return _cache_dir() / (f"dfine_{model}_{precision}-{fingerprint}-b1-{opt_batch}-{max_batch}"
-                           f"-sm{_gpu_arch()}-trt{_trt_version()}.engine")
+    return _cache_dir() / _cache_engine_name(model, precision, fingerprint,
+                                             f"b1-{opt_batch}-{max_batch}")
 
 
 def _same_artifact_engines(model: str, precision: str, fingerprint: str) -> list:
     """Every cached engine built from exactly this artifact, any batch profile."""
-    pattern = (f"dfine_{model}_{precision}-{fingerprint}-b*"
-               f"-sm{_gpu_arch()}-trt{_trt_version()}.engine")
-    return sorted(_cache_dir().glob(pattern))
+    return sorted(_cache_dir().glob(_cache_engine_name(model, precision, fingerprint, "b*")))
 
 
 def _legacy_cache_engine_path(model: str, precision: str) -> Path:
     """Pre-v0.3.1 cache name: not bound to any ONNX — a fallback of last resort."""
     return _cache_dir() / f"dfine_{model}_{precision}-sm{_gpu_arch()}-trt{_trt_version()}.engine"
+
+
+def _engine_meta(engine: Path) -> dict:
+    """The engine's own sidecar: build facts (batch profile, source-ONNX hash)
+    recorded by build_engine.py. Probes the appended name first, then the stem
+    name — the same order as the C++ runtime. Missing or unreadable means
+    'no facts', never an error: engines may predate the sidecar."""
+    for cand in (Path(str(engine) + ".json"), engine.with_suffix(".json")):
+        try:
+            if cand.exists():
+                return json.loads(cand.read_text())
+        except (OSError, ValueError):
+            pass
+    return {}
 
 
 def _find_onnx(model: str, precision: str, onnx_arg: Optional[str]) -> Optional[Path]:
@@ -201,17 +226,32 @@ def _resolve_engine(
     onnx = _find_onnx(model, precision, onnx_arg)
     if onnx is not None:
         fp = _artifact_fingerprint(onnx)
+        onnx_sha = hashlib.sha256(onnx.read_bytes()).hexdigest()
+
+        def foreign(e: Path) -> bool:
+            """A sidecar-recorded source hash that contradicts the resolved ONNX
+            beats a matching filename (hand-copied or renamed engines)."""
+            recorded = _engine_meta(e).get("onnx_sha256")
+            if recorded and recorded != onnx_sha:
+                _log(f"[dfine] ignoring {e.name}: its sidecar records a different source ONNX")
+                return True
+            return False
+
+        others = [e for e in _same_artifact_engines(model, precision, fp) if not foreign(e)]
         cached = _cache_engine_path(model, precision, fp, opt_batch, max_batch)
-        if cached.exists():
+        if cached in others:
             return cached
         # Same artifact, different batch profile (e.g. the user ran
         # `dfine build --opt-batch 8`): still the right model — the profile only
         # shapes performance. Prefer the largest max-batch entry deterministically.
-        others = _same_artifact_engines(model, precision, fp)
         if others:
-            # Largest max-batch profile serves every smaller request; the name
-            # embeds ...-b1-<opt>-<max>-..., so sort numerically, not by path.
+            # Largest max-batch profile serves every smaller request. The engine
+            # sidecar records the profile; the filename is only a fallback for
+            # engines that predate it.
             def profile_max(p: Path) -> int:
+                mb = _engine_meta(p).get("max_batch")
+                if isinstance(mb, int) and mb > 0:
+                    return mb
                 m = re.search(r"-b1-\d+-(\d+)-sm", p.name)
                 return int(m.group(1)) if m else 0
             others.sort(key=profile_max)
@@ -231,8 +271,7 @@ def _resolve_engine(
                          "run `dfine build` first or pass --engine")
 
     # No ONNX anywhere: fall back to engines whose provenance we cannot verify.
-    pattern = f"dfine_{model}_{precision}-*-b*-sm{_gpu_arch()}-trt{_trt_version()}.engine"
-    hashed = sorted(_cache_dir().glob(pattern))
+    hashed = sorted(_cache_dir().glob(_cache_engine_name(model, precision, "*", "b*")))
     if len(hashed) == 1:
         _log(f"[dfine] using cached {hashed[0].name} — its source ONNX is gone, "
              "so its provenance cannot be re-verified")
@@ -549,7 +588,7 @@ def cmd_export(args) -> int:
             # research base can never masquerade as (or clobber) the production
             # opset-19 asset.
             stem = out_path.stem
-            for suffix in ("_slim", "_fp16_st"):
+            for suffix in _ONNX_SUFFIXES["fp16"]:
                 if stem.endswith(suffix):
                     stem = stem[: -len(suffix)]
                     break
@@ -563,11 +602,15 @@ def cmd_export(args) -> int:
     if args.precision == "fp32":
         print(f"exported {fp32_out}")
         return 0
+    recipe_suffix = _SLIM_SUFFIX if args.precision == "fp16" else _LEGACY_SUFFIX
+    if args.output:
+        out = Path(args.output)
+    else:
+        out = _cache_dir() / f"dfine_{model}{recipe_suffix}.onnx"
+        _warn_if_replacing_different_checkpoint(out)
     if args.precision == "fp16":
-        out = Path(args.output) if args.output else _cache_dir() / f"dfine_{model}_slim.onnx"
         _convert_fp16_surgical(fp32_out, out)
     else:  # fp16-legacy
-        out = Path(args.output) if args.output else _cache_dir() / f"dfine_{model}_fp16_st.onnx"
         _convert_fp16(fp32_out, out)
     print(f"exported {out}")
     return 0

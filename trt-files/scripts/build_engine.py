@@ -28,9 +28,24 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import tensorrt as trt
+
+
+def _sm_arch() -> str:
+    """Compute capability of the build GPU ('89' for Ada). Engines are
+    arch-specific, and nothing but the CLI cache filename recorded which arch a
+    dev-tree engine was built for — the sidecar must."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return out.stdout.strip().splitlines()[0].strip().replace(".", "") or "unknown"
+    except Exception:
+        return "unknown"
 
 # Layer types that never carry float activations to pin — shape/constant plumbing.
 # We still may pin a CONSTANT's *output type* (to keep a decoder weight FP32) but
@@ -275,9 +290,13 @@ def build(args: argparse.Namespace) -> None:
             meta.setdefault("precision_mode",
                             "fp32" if meta["precision"] == "fp32" else "strongly_typed_unknown")
     meta.update({
+        "schema_version": 1,
         "network_typing": "strong" if args.strongly_typed else "weak",
         "cuda_graph_compat": bool(args.cuda_graph),
         "trt_version": trt.__version__,
+        "sm_arch": _sm_arch(),
+        "tf32": not args.no_tf32,
+        "max_aux_streams": args.max_aux_streams,  # null = TRT default (aux allowed)
         "opt_batch": args.opt_batch,
         "min_batch": args.min_batch,
         "max_batch": args.max_batch,
@@ -292,6 +311,15 @@ def build(args: argparse.Namespace) -> None:
         engine_sidecar = Path(str(out_path) + ".json")
         print(f"[build] NOTE: engine and ONNX share a stem — engine sidecar goes to "
               f"{engine_sidecar.name} (the ONNX's own sidecar stays untouched)")
+    else:
+        # Readers (the CLI resolver and the C++ runtime) probe the appended name
+        # FIRST: a leftover <engine>.json from a previous build (dfine_build's
+        # default) would shadow the sidecar published below on every future read.
+        stale_twin = Path(str(out_path) + ".json")
+        if stale_twin.exists():
+            stale_twin.unlink()
+            print(f"[build] removed stale sidecar {stale_twin.name} "
+                  "(it would shadow the fresh one)")
     _publish_pair(tmp_path, out_path, json.dumps(meta, indent=2) + "\n",
                   engine_sidecar, "build")
     print(f"[build] wrote {out_path} ({plan.nbytes / 1e6:.1f} MB)")

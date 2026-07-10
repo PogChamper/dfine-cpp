@@ -1,12 +1,14 @@
 """Engine-cache identity: an engine is bound to the exact ONNX + sidecar bytes
-it was built from (the batch profile lives in the filename but is NOT identity),
-an explicit --onnx can never lose to a cache entry built from something else,
-and provenance-less fallbacks are never picked silently among several
-candidates. Regression for the v0.3.0 shadowing bug (a stale COCO engine
-silently served a fresh custom export)."""
+it was built from (the batch profile is recorded in the engine sidecar and is
+NOT identity), an explicit --onnx can never lose to a cache entry built from
+something else, and provenance-less fallbacks are never picked silently among
+several candidates. Regression for the v0.3.0 shadowing bug (a stale COCO
+engine silently served a fresh custom export)."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,16 @@ def env(monkeypatch, tmp_path):
     def fake_build(onnx, output, precision, max_batch, opt_batch=1):
         builds.append((onnx, output))
         output.write_bytes(b"engine")
+        # Mimic build_engine.py's publish contract: the sidecar lands at the
+        # stem name and a stale appended-name twin is removed (readers probe
+        # the appended name first, so a leftover would shadow the fresh one).
+        twin = Path(str(output) + ".json")
+        if twin.exists():
+            twin.unlink()
+        output.with_suffix(".json").write_text(json.dumps({
+            "onnx_sha256": hashlib.sha256(Path(onnx).read_bytes()).hexdigest(),
+            "max_batch": max_batch,
+        }))
         return output
 
     monkeypatch.setattr(cli, "_build_engine", fake_build)
@@ -123,6 +135,53 @@ def test_legacy_cache_entry_is_a_warned_fallback(env, capsys):
     legacy.write_bytes(b"e")
     assert cli._resolve_engine("m", None, "fp16", None, allow_build=False) == legacy
     assert "pre-v0.3.1" in capsys.readouterr().err
+
+
+def engine_with_sidecar(path: Path, meta: dict) -> Path:
+    path.write_bytes(b"engine")
+    Path(str(path) + ".json").write_text(json.dumps(meta))
+    return path
+
+
+def test_profile_pick_trusts_the_sidecar_over_the_name(env):
+    d, _ = env
+    a = onnx_file(d, "dfine_m_slim.onnx", b"graph")
+    fp = cli._artifact_fingerprint(a)
+    # Names and sidecars disagree on max_batch; the sidecar wins — the filename
+    # is a label, consulted only for engines that predate the sidecar.
+    engine_with_sidecar(cli._cache_engine_path("m", "fp16", fp, 1, 16), {"max_batch": 4})
+    big = engine_with_sidecar(cli._cache_engine_path("m", "fp16", fp, 2, 4), {"max_batch": 32})
+    assert cli._resolve_engine("m", None, "fp16", None, allow_build=False) == big
+
+
+def test_engine_recorded_from_another_source_is_refused(env, capsys):
+    d, builds = env
+    a = onnx_file(d, "dfine_m_slim.onnx", b"graph")
+    fp = cli._artifact_fingerprint(a)
+    fake = engine_with_sidecar(cli._cache_engine_path("m", "fp16", fp, 1, 8),
+                               {"onnx_sha256": "0" * 64, "max_batch": 8})
+    # The filename matches the artifact, the recorded source does not: never served...
+    with pytest.raises(SystemExit, match="no engine built from"):
+        cli._resolve_engine("m", None, "fp16", None, allow_build=False)
+    assert "different source ONNX" in capsys.readouterr().err
+    # ...and with building allowed it is rebuilt in place, not trusted.
+    out = cli._resolve_engine("m", None, "fp16", None, allow_build=True)
+    assert builds[-1] == (a, fake) and out == fake
+    # The rebuild replaced the poisoned sidecar, so resolution CONVERGES:
+    # the next resolve serves the cache without another build.
+    assert cli._resolve_engine("m", None, "fp16", None, allow_build=False) == fake
+    assert len(builds) == 1
+
+
+def test_engine_meta_probes_the_appended_name_first(env):
+    d, _ = env
+    e = d / "x.engine"
+    e.write_bytes(b"engine")
+    e.with_suffix(".json").write_text('{"max_batch": 4}')
+    assert cli._engine_meta(e) == {"max_batch": 4}
+    # The appended name wins, matching the C++ runtime's probe order.
+    Path(str(e) + ".json").write_text('{"max_batch": 16}')
+    assert cli._engine_meta(e) == {"max_batch": 16}
 
 
 def test_info_and_bench_have_no_dead_onnx_flag():

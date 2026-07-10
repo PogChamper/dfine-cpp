@@ -38,7 +38,7 @@ namespace {
 
 struct Args {
     std::filesystem::path onnx;
-    std::filesystem::path engine;    // default: <onnx-stem>-<precision>.engine
+    std::filesystem::path engine;    // default: <onnx-stem>_<precision>.engine
     std::filesystem::path meta_in;   // default: <onnx>.json
     std::filesystem::path meta_out;  // default: <engine>.json
     std::string precision{"fp32"};
@@ -54,7 +54,7 @@ struct Args {
 void usage(const char* argv0) {
     std::fprintf(stderr,
                  "usage: %s --onnx PATH [options]\n"
-                 "  --engine PATH        Output .engine  (default <onnx-stem>-<precision>.engine)\n"
+                 "  --engine PATH        Output .engine  (default <onnx-stem>_<precision>.engine)\n"
                  "  --meta PATH          Input meta JSON (default <onnx>.json)\n"
                  "  --meta-out PATH      Output meta JSON (default <engine>.json)\n"
                  "  --precision fp32     Only fp32 is supported (D-FINE decoder needs FP32).\n"
@@ -112,7 +112,9 @@ Args parse_args(int argc, char** argv) {
             "For fp16/int8 use the mAP-validated Python pipeline (build_engine.py).");
     }
     if (a.engine.empty()) {
-        a.engine = a.onnx.parent_path() / (a.onnx.stem().string() + "-" + a.precision + ".engine");
+        // Underscore, matching the naming grammar everywhere else (docs/NAMING.md);
+        // the pre-v0.3.2 default was a hyphen no other tool's discovery recognized.
+        a.engine = a.onnx.parent_path() / (a.onnx.stem().string() + "_" + a.precision + ".engine");
     }
     if (a.meta_in.empty()) {
         a.meta_in = a.onnx;
@@ -151,6 +153,29 @@ int main(int argc, char** argv) {
     if (!std::filesystem::is_regular_file(args.onnx)) {
         std::fprintf(stderr, "error: onnx not found: %s\n", args.onnx.c_str());
         return 1;
+    }
+    // dfine_build builds FP32 engines only. A converter-declared FP16/INT8 graph is
+    // refused up front (the same gate the CLI applies) — before v0.3.2 the sidecar
+    // copy-through stamped "precision: fp32" over the converter's recipe instead,
+    // producing self-contradictory metadata after a minutes-long build.
+    if (std::filesystem::is_regular_file(args.meta_in)) {
+        try {
+            nlohmann::json m;
+            std::ifstream mi(args.meta_in);
+            mi >> m;
+            const std::string declared = m.value("precision", "fp32");
+            if (declared != "fp32") {
+                std::fprintf(stderr,
+                             "error: %s is a %s export per its sidecar %s; dfine_build builds "
+                             "fp32 only — use the Python pipeline (build_engine.py)\n",
+                             args.onnx.c_str(), declared.c_str(), args.meta_in.c_str());
+                return 1;
+            }
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "error: cannot parse sidecar %s (%s); fix or remove it\n",
+                         args.meta_in.c_str(), e.what());
+            return 1;
+        }
     }
 
     dfine::TrtLogger logger{args.verbose ? nvinfer1::ILogger::Severity::kVERBOSE
@@ -291,7 +316,11 @@ int main(int argc, char** argv) {
         }
         j["input_h"] = in_h;
         j["input_w"] = in_w;
+        j["schema_version"] = 1;
         j["precision"] = args.precision;
+        j["network_typing"] = "weak";
+        // No onnx_sha256: this fallback builder carries no hash dependency, so the
+        // CLI resolver treats its engines as provenance-unverified (docs/NAMING.md).
         j["dynamic_batch"] = need_profile;
         j["min_batch"] = args.min_batch;
         j["opt_batch"] = args.opt_batch;

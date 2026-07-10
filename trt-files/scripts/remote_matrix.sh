@@ -72,12 +72,14 @@ note "TensorRT: $(python -c 'import tensorrt; print(tensorrt.__version__)')  nvc
 # --------------------------------------------------------------------------- #
 say "fetch release assets ($RELEASE_TAG)"
 DL="https://github.com/PogChamper/dfine-cpp/releases/download/$RELEASE_TAG"
+# Every download is guarded: pre-place files into $ASSETS (e.g. scp from a
+# machine that can reach GitHub) and only the sha256 verification runs.
 ( cd "$ASSETS"
-  curl -fsSLO "$DL/SHA256SUMS"
+  [ -f SHA256SUMS ] || curl -fsSL --retry 3 --retry-all-errors -O "$DL/SHA256SUMS"
   for s in $SIZES; do
     for f in "dfine_${s}_op19.onnx" "dfine_${s}_op19.json" \
              "dfine_${s}_slim.onnx" "dfine_${s}_slim.json"; do
-      [ -f "$f" ] || curl -fsSLO "$DL/$f"
+      [ -f "$f" ] || curl -fsSL --retry 3 --retry-all-errors -O "$DL/$f"
       grep " $f\$" SHA256SUMS | sha256sum -c - >/dev/null
     done
   done )
@@ -145,7 +147,7 @@ if [ "$SKIP_EXPORT" != 1 ]; then
     for s in $SIZES; do
       ck="$WORK/ckpt/${CKPT[$s]}"
       mkdir -p "$WORK/ckpt"
-      [ -f "$ck" ] || curl -fsSL -o "$ck" \
+      [ -f "$ck" ] || curl -fsSL --retry 3 --retry-all-errors -o "$ck" \
         "https://github.com/Peterande/storage/releases/download/dfinev1.0/${CKPT[$s]}"
       python "$SCRIPTS/export_dfine_onnx.py" --model-name "$s" --checkpoint "$ck" \
         --dfine-src "$DFINE_SEG_DIR" --opset 19 \

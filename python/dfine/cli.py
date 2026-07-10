@@ -15,6 +15,7 @@ includes both.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -106,7 +107,29 @@ def _have_tensorrt() -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def _cache_engine_path(model: str, precision: str) -> Path:
+def _artifact_fingerprint(onnx: Path, opt_batch: int, max_batch: int) -> str:
+    """Identity of everything that determines an engine's behavior: the ONNX
+    bytes, its sidecar (class names / normalization travel into the engine
+    sidecar), and the batch profile. Two different fine-tunes of the same size
+    can never share a cache entry, and a stale engine can never shadow a fresh
+    export. 12 hex chars — enough to never collide within one cache dir."""
+    h = hashlib.sha256()
+    h.update(onnx.read_bytes())
+    sidecar = onnx.with_suffix(".json")
+    if sidecar.exists():
+        h.update(sidecar.read_bytes())
+    h.update(f"b1-{opt_batch}-{max_batch}".encode())
+    return h.hexdigest()[:12]
+
+
+def _cache_engine_path(model: str, precision: str, fingerprint: str,
+                       opt_batch: int, max_batch: int) -> Path:
+    return _cache_dir() / (f"dfine_{model}_{precision}-{fingerprint}-b1-{opt_batch}-{max_batch}"
+                           f"-sm{_gpu_arch()}-trt{_trt_version()}.engine")
+
+
+def _legacy_cache_engine_path(model: str, precision: str) -> Path:
+    """Pre-v0.3.1 cache name: not bound to any ONNX — a fallback of last resort."""
     return _cache_dir() / f"dfine_{model}_{precision}-sm{_gpu_arch()}-trt{_trt_version()}.engine"
 
 
@@ -136,7 +159,20 @@ def _resolve_engine(
     precision: str,
     onnx_arg: Optional[str],
     allow_build: bool,
+    opt_batch: int = 1,
+    max_batch: int = 8,
 ) -> Path:
+    """Engine resolution, bound to artifact identity.
+
+    Precedence: an explicit --engine wins; otherwise the resolved ONNX (explicit
+    --onnx or discovery) defines the identity and ONLY an engine built from
+    exactly that ONNX (fingerprint in the filename) is used — an explicit --onnx
+    can never lose to a cache entry built from something else (the v0.3.0
+    shadowing bug: a stale COCO engine silently served a fresh custom export).
+    Engines whose provenance cannot be verified (source ONNX gone, pre-v0.3.1
+    cache names, dev-tree builds) are last resorts, used with a warning and
+    never picked silently among several candidates.
+    """
     if engine_arg:
         p = Path(engine_arg)
         if not p.exists():
@@ -147,26 +183,46 @@ def _resolve_engine(
     if model not in MODELS:
         raise SystemExit(f"unknown model '{model}' (choose from {', '.join(MODELS)})")
 
-    # 1) cache
-    cached = _cache_engine_path(model, precision)
-    if cached.exists():
-        return cached
-    # 2) dev tree
+    onnx = _find_onnx(model, precision, onnx_arg)
+    if onnx is not None:
+        fp = _artifact_fingerprint(onnx, opt_batch, max_batch)
+        cached = _cache_engine_path(model, precision, fp, opt_batch, max_batch)
+        if cached.exists():
+            return cached
+        if allow_build:
+            print(f"[dfine] no cached engine for {onnx.name} ({fp}) — "
+                  f"building {model} ({precision}) ...")
+            return _build_engine(onnx, cached, precision, max_batch=max_batch,
+                                 opt_batch=opt_batch)
+        raise SystemExit(f"no engine built from {onnx.name} (fingerprint {fp}); "
+                         "run `dfine build` first or pass --engine")
+
+    # No ONNX anywhere: fall back to engines whose provenance we cannot verify.
+    pattern = f"dfine_{model}_{precision}-*-b*-sm{_gpu_arch()}-trt{_trt_version()}.engine"
+    hashed = sorted(_cache_dir().glob(pattern))
+    if len(hashed) == 1:
+        print(f"[dfine] using cached {hashed[0].name} — its source ONNX is gone, "
+              "so its provenance cannot be re-verified")
+        return hashed[0]
+    if len(hashed) > 1:
+        names = "\n  ".join(h.name for h in hashed)
+        raise SystemExit(f"several cached engines for '{model}' ({precision}) and no ONNX "
+                         f"to disambiguate:\n  {names}\npass --engine (or --onnx to rebuild)")
+    legacy = _legacy_cache_engine_path(model, precision)
+    if legacy.exists():
+        print(f"[dfine] using pre-v0.3.1 cache entry {legacy.name} — not bound to an ONNX; "
+              "re-run `dfine build` to bind it")
+        return legacy
     repo = _repo_root()
     if repo:
         dev = repo / "trt-files" / "engines" / f"dfine_{model}_{_ENGINE_SUFFIX[precision]}.engine"
         if dev.exists():
             return dev
-    # 3) build on demand
     if allow_build:
-        onnx = _find_onnx(model, precision, onnx_arg)
-        if onnx is None:
-            raise SystemExit(
-                f"no engine or ONNX for model '{model}' ({precision}). Provide --onnx, or run "
-                "`dfine export` first (needs the D-FINE-seg source), or pass --engine."
-            )
-        print(f"[dfine] no cached engine — building {model} ({precision}) from {onnx.name} ...")
-        return _build_engine(onnx, cached, precision, max_batch=8)
+        raise SystemExit(
+            f"no engine or ONNX for model '{model}' ({precision}). Provide --onnx, or run "
+            "`dfine export` first (needs the D-FINE-seg source), or pass --engine."
+        )
     raise SystemExit(f"no engine found for model '{model}' ({precision}); pass --engine or build one")
 
 
@@ -371,7 +427,7 @@ def cmd_predict(args) -> int:
 def cmd_info(args) -> int:
     from .detector import Detector
 
-    engine = _resolve_engine(args.model, args.engine, args.precision, args.onnx, allow_build=False)
+    engine = _resolve_engine(args.model, args.engine, args.precision, None, allow_build=False)
     with Detector(str(engine)) as det:
         print(f"engine      : {engine}")
         print(f"variant     : {det.variant}")
@@ -397,7 +453,11 @@ def cmd_build(args) -> int:
         raise SystemExit(
             f"no ONNX for model '{args.model}' ({args.precision}); pass --onnx or run `dfine export`"
         )
-    out = Path(args.output) if args.output else _cache_engine_path(args.model, args.precision)
+    if args.output:
+        out = Path(args.output)
+    else:
+        fp = _artifact_fingerprint(onnx, args.opt_batch, args.max_batch)
+        out = _cache_engine_path(args.model, args.precision, fp, args.opt_batch, args.max_batch)
     _build_engine(onnx, out, args.precision, args.max_batch, args.opt_batch)
     print(f"built {out}")
     return 0
@@ -444,7 +504,7 @@ def cmd_export(args) -> int:
 
 
 def cmd_bench(args) -> int:
-    engine = _resolve_engine(args.model, args.engine, args.precision, args.onnx, allow_build=False)
+    engine = _resolve_engine(args.model, args.engine, args.precision, None, allow_build=False)
     repo = _repo_root()
     bench_bin = repo / "build" / "dfine_bench" if repo else None
     if bench_bin and bench_bin.exists():
@@ -459,13 +519,14 @@ def cmd_bench(args) -> int:
 # --------------------------------------------------------------------------- #
 
 
-def _add_common(sp, *, engine=True, precision=True):
+def _add_common(sp, *, engine=True, precision=True, onnx=True):
     sp.add_argument("--model", choices=MODELS, help="model size (resolves a cached/dev engine)")
     if engine:
         sp.add_argument("--engine", help="explicit .engine path (overrides --model)")
     if precision:
         sp.add_argument("--precision", choices=("fp32", "fp16"), default="fp16")
-    sp.add_argument("--onnx", help="explicit ONNX path (for build / on-demand build)")
+    if onnx:
+        sp.add_argument("--onnx", help="explicit ONNX path (for build / on-demand build)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -483,8 +544,10 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--json", action="store_true", help="print detections as JSON")
     pr.set_defaults(func=cmd_predict)
 
+    # info/bench are engine-only: they never build, so an --onnx flag would be
+    # dead weight (it was silently ignored before v0.3.1).
     pi = sub.add_parser("info", help="print engine introspection")
-    _add_common(pi)
+    _add_common(pi, onnx=False)
     pi.set_defaults(func=cmd_info)
 
     pb = sub.add_parser("build", help="build a .engine from an ONNX (into the cache)")
@@ -516,7 +579,7 @@ def build_parser() -> argparse.ArgumentParser:
     pe.set_defaults(func=cmd_export)
 
     pbe = sub.add_parser("bench", help="benchmark latency/throughput (C++ dfine_bench)")
-    _add_common(pbe)
+    _add_common(pbe, onnx=False)
     pbe.add_argument("--batches", default="1,2,4,8")
     pbe.set_defaults(func=cmd_bench)
     return p

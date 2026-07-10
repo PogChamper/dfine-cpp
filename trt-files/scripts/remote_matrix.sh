@@ -22,7 +22,12 @@
 #   curl -LO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
 #   sudo dpkg -i cuda-keyring_1.1-1_all.deb && sudo apt-get update
 #   V="$(apt-cache madison libnvinfer-dev | grep -oPm1 '10\.13\.[0-9.]+-1\+cuda12\.[0-9]+')"
-#   sudo apt-get install -y "libnvinfer-dev=$V" "libnvinfer-plugin-dev=$V" "libnvonnxparsers-dev=$V"
+#   sudo apt-get install -y \
+#     "libnvinfer10=$V" "libnvinfer-headers-dev=$V" "libnvinfer-dev=$V" \
+#     "libnvinfer-plugin10=$V" "libnvinfer-headers-plugin-dev=$V" "libnvinfer-plugin-dev=$V" \
+#     "libnvonnxparsers10=$V" "libnvonnxparsers-dev=$V"
+#       # apt does not down-resolve dependencies to a pinned version — every
+#       # package in the chain must carry =$V explicitly.
 #   # Only for the export stage (SKIP_EXPORT=0):
 #   pip install torch --index-url https://download.pytorch.org/whl/cu128
 #   git clone https://github.com/ArgoHA/D-FINE-seg "$HOME/D-FINE-seg"

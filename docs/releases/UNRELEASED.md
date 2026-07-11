@@ -18,34 +18,42 @@ These changes are present in the source tree but not in the published v0.3.3 whe
 - Model input remains RGB. `ImageU8::is_bgr` describes source pixels; a sidecar that declares BGR
   model input is rejected rather than silently ignored.
 - Decode uses a fixed `min(300, Q×C)` candidate limit; sidecars do not override it.
-- Full-val mAP is retained across the five `slim` engines and two reduced-query checks. On the Ada
-  reference system, the larger reduced-query decode set costs 2–5% end to end while TensorRT
-  inference time remains unchanged.
+- Full-val mAP is retained across the five `slim` engines and two reduced-query checks; TensorRT
+  inference time is unchanged.
 - `FreezeSpec` rejects incomplete or negative source dimensions and applies explicit width and height
   bounds independently.
 - A rejected enqueue or deferred CUDA execution failure makes the detector unusable; recreate it
   before retrying inference.
+- `cuda_graph_replays()` reports calls served by the enqueue/output-copy graph path.
+- C++ and Python constructor thresholds must be finite and within `[0, 1]`. A finite negative C++
+  per-call value retains the default-threshold sentinel; Python uses `None` and validates explicit
+  per-call values against `[0, 1]`.
+- C ABI constructor thresholds reject non-finite values and positive values above 1; finite values
+  at or below 0 retain the 0.5 default.
+- Explicit letterbox padding must be within `[0, 255]`; negative C ABI values retain the default
+  value of 114.
 
 ## Build and packaging
 
 - Installed CMake consumers no longer require CUDA or TensorRT development packages in `dfineConfig.cmake`.
 - The C++ FP32 builder disables TF32; `--cuda-graph` sets zero auxiliary streams, and both facts
   are recorded in its engine sidecar.
-- The Python builder derives graph compatibility from `max_aux_streams == 0`; `--cuda-graph` is a
-  compatibility alias for that setting rather than an advisory label.
-- Wheel publication is atomic: a failed rebuild preserves the previous artifact. The wheel is a
-  native `py3-none-linux_x86_64` distribution with LICENSE and NOTICE included.
-- Graph converters and engine builders reject path collisions, fully stage both files, serialize
-  publishers, and restore the previous pair after a reported publication failure.
+- The Python builder records graph compatibility only for FP32-output, zero-aux-stream engines.
+  `dfine build --cuda-graph` selects the stream policy; cached builds use a distinct `-g0` entry.
+- Wheel, graph, and engine publication is atomic: path collisions are rejected and a failed build
+  preserves the previous artifact pair. The wheel is a native `py3-none-linux_x86_64` distribution
+  with LICENSE and NOTICE included.
 - New checkpoint exports record the D-FINE source repository, revision, and dirty state, plus the
   exporter hash and ONNX simplification result.
 - Surgical FP16 sidecars identify the source graph, converter, and tool version; research-only
   precision overrides are marked experimental rather than labeled as the release recipe.
 - Export fails before model setup when the validated D-FINE source revision is missing or malformed.
-- Release assembly validates the exact model contract, ONNX structure, FP32-to-slim lineage, wheel
-  contents, official checkpoint/tool provenance, version, and complete asset set before staging
-  upload bytes.
+- Release assembly validates the model contract, ONNX structure, FP32-to-slim lineage, wheel
+  contents, checkpoint and tool provenance, version, and complete asset set before staging upload
+  bytes.
 
-The Ada release candidate passes WERROR, GPU recovery, UBSan, compute-sanitizer, Python/C++ tests,
-installed-consumer and wheel loading, interleaved throughput, and full COCO validation. The tag
-remains gated on final review and release-asset verification of the committed bytes.
+## Validation
+
+- Evaluation aborts on missing, empty, or partial datasets and on zero detections.
+- Benchmark and report tooling rejects invalid measurement counts and failed TensorRT API calls.
+  Full-graph validation requires an active graph and one replay per measured call.

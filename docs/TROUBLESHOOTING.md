@@ -61,6 +61,12 @@ export DFINE_LIBRARY=/absolute/path/to/libdfine.so
 `dfine doctor` lists the candidate paths and reports the selected load failure, including a missing
 transitive TensorRT or CUDA library.
 
+### The driver or `nvidia-smi` fails
+
+Fix the host driver before debugging D-FINE-cpp. RTX 50-series systems require an R570+ NVIDIA
+driver; native `sm_120` builds require CUDA 12.8 or newer. Driver replacement is host-specific;
+preserve package-manager and kernel logs instead of applying an unconditional purge recipe.
+
 ## Building from source
 
 ### `Could NOT find TensorRT (missing: TENSORRT_INCLUDE_DIR ...)`
@@ -85,6 +91,13 @@ sudo apt-get install -y \
 
 The parser package is plural: `libnvonnxparsers-dev`. It is required by the C++ engine builder;
 `libdfine` itself links only the TensorRT runtime.
+
+To build the library without the parser or command-line applications:
+
+```sh
+cmake -B build -S . -DDFINE_BUILD_APPS=OFF -DDFINE_BUILD_TESTS=OFF
+cmake --build build -j
+```
 
 For a tarball:
 
@@ -185,7 +198,7 @@ Full-pipeline capture requires all of the following:
   engine input dimensions;
 - successful warmup and capture.
 
-The detector remains usable through split GPU decode. Check the warning log and rebuild the engine with `--max-aux-streams 0` when graph capture is required.
+The detector remains usable: FP32 outputs use split GPU decode, while FP16 outputs use CPU decode. Check the warning log and rebuild the engine with `--max-aux-streams 0` when graph capture is required.
 
 ### A frame fails after `freeze()`
 
@@ -233,12 +246,5 @@ export DFINE_SEG_DIR=/path/to/D-FINE-seg
 ### Checkpoint tensors are missing or shape-mismatched
 
 The exporter is strict. Select the correct `--model-name`, `--num-classes`, and class names. Do not use `--allow-partial-checkpoint` for deployment; it leaves unmatched tensors initialized outside the checkpoint and records the artifact as partial.
-
-## Driver
-
-If `nvidia-smi` fails, fix the host driver before debugging D-FINE-cpp. RTX 50-series systems require
-an R570+ NVIDIA driver; native `sm_120` builds require CUDA 12.8 or newer. Driver replacement is
-host-specific; preserve the package-manager and kernel error logs rather than applying an
-unconditional purge recipe.
 
 If the problem remains, open an issue with `dfine doctor`, the failing command, the complete error, and the ONNX/engine sidecar where relevant.

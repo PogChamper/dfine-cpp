@@ -1,8 +1,5 @@
 # Getting started
 
-D-FINE-cpp has two installation paths. Both consume the same ONNX artifacts and produce target-local
-TensorRT engines with the same runtime contract.
-
 | Path | Use it when | Requirements |
 |---|---|---|
 | Release wheel | Python or CLI on Ada or Blackwell Linux x86_64 GPUs | CUDA 12, TensorRT 10.13 |
@@ -54,7 +51,11 @@ Verify the downloaded pair against the release manifest when the artifacts enter
 
 ```sh
 curl -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/SHA256SUMS
-grep -E '  dfine_m_slim\.(onnx|json)$' SHA256SUMS | sha256sum -c -
+awk '
+  $2 == "dfine_m_slim.onnx" { graph++; print }
+  $2 == "dfine_m_slim.json" { sidecar++; print }
+  END { exit !(graph == 1 && sidecar == 1) }
+' SHA256SUMS > dfine_m_slim.sha256 && sha256sum -c dfine_m_slim.sha256
 ```
 
 ## Source build
@@ -98,7 +99,8 @@ Set `TENSORRT_DIR` when TensorRT is outside the system paths:
 TENSORRT_DIR=/opt/tensorrt ./build.sh
 ```
 
-The lookup order is explicit `TENSORRT_DIR`, `third_party/tensorrt`, then system installations.
+`build.sh` checks explicit `TENSORRT_DIR`, a populated `third_party/tensorrt`, then CMake's system
+hints. Plain CMake does not promote `third_party/tensorrt`; pass `-DTENSORRT_DIR=...` explicitly.
 
 ### Build an engine
 
@@ -152,7 +154,8 @@ export DFINE_LIBRARY="$PWD/build/libdfine.so"
 dfine doctor
 ```
 
-The loader checks, in order, `DFINE_LIBRARY`, the library bundled with an installed wheel, and `<repo>/build/libdfine.so`. An explicit invalid `DFINE_LIBRARY` is an error; it never silently selects another library.
+An explicit invalid `DFINE_LIBRARY` is an error; it never selects another library. The complete
+discovery order is defined in the [Python package reference](../python/README.md#library-discovery).
 
 ```python
 from dfine import Detector
@@ -174,7 +177,7 @@ with Detector("dfine_m_slim.engine", threshold=0.5) as detector:
 | `dfine bench` | Engine | Run the native benchmark binary |
 | `dfine export` | Checkpoint + D-FINE source | Export an ONNX artifact from a source checkout |
 
-`predict` may build from an explicit `--onnx` when no matching engine exists. `info` and `bench` never build. `predict --json` reserves stdout for JSON and sends diagnostics to stderr. Engines cached under `~/.cache/dfine` (or `DFINE_CACHE`) are keyed by artifact fingerprint, profile, GPU architecture, and TensorRT version. Exporting a checkpoint requires a repository checkout and a compatible D-FINE source tree; see [Conversion](CONVERSION.md).
+`predict` may build from an explicit `--onnx` when no matching engine exists. `info` and `bench` never build. `predict --json` reserves stdout for JSON and sends diagnostics to stderr. Engines cached under `~/.cache/dfine` (or `DFINE_CACHE`) are keyed by artifact fingerprint, profile, CUDA Graph build policy, GPU architecture, and TensorRT version. Exporting a checkpoint requires a repository checkout and a compatible D-FINE source tree; see [Conversion](CONVERSION.md).
 
 Native source builds also provide:
 

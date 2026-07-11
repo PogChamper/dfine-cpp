@@ -73,7 +73,7 @@ for (const auto& detection : detector.detect(image, 0.5f)) {
 }
 ```
 
-The default path is synchronous and uses CPU decode. Optional GPU decode reduces device-to-host traffic. `freeze()` locks warmed engine and decode buffers; explicit source bounds complete the steady-state device-allocation contract. An engine built with `--max-aux-streams 0` can capture the full frozen pipeline in one CUDA Graph launch. These modes are runtime choices, not model presets.
+The default path is synchronous and uses CPU decode. Optional GPU decode reduces device-to-host traffic. `freeze()` locks warmed engine and decode buffers; explicit source bounds complete the steady-state device-allocation contract. With FP32 outputs, an engine built by `dfine build --cuda-graph` can capture the full frozen pipeline in one CUDA Graph launch. These modes are runtime choices, not model presets.
 
 The library also exposes a struct-size-versioned C ABI and Python bindings over that ABI. See [Runtime](docs/RUNTIME.md), the [C header](include/dfine/c_api.h), and the [Python package](python/README.md).
 
@@ -90,7 +90,7 @@ Correctness is gated at each boundary:
 | Release | Asset grammar, SHA-256 manifest, clean-machine install |
 | Hardware | Reproducible validation report |
 
-The default `slim` recipe is full-val lossless on all five published sizes: N 0.4272, S 0.5060, M 0.5500, L 0.5723, X 0.5926. The released D-FINE-M graph measured 279.5 img/s at batch 1 and 506.1 img/s at batch 8 on the reference RTX 4070 Ti SUPER system. Accuracy-traded presets and closed FP8, INT8, BF16, and plugin experiments remain in the [research matrix](docs/RESEARCH_MATRIX.md).
+The default `slim` recipe is full-val lossless on all five published sizes: N 0.4272, S 0.5060, M 0.5500, L 0.5723, and X 0.5926 AP. The released D-FINE-M graph measured 279.5 img/s at batch 1 and 506.1 img/s at batch 8 on the reference RTX 4070 Ti SUPER system. Accuracy-traded presets and closed FP8, INT8, BF16, and plugin experiments remain in the [research matrix](docs/RESEARCH_MATRIX.md).
 
 Ampere, Ada, and Blackwell results and exact methodology are in [Validation](docs/VALIDATION.md).
 
@@ -122,15 +122,11 @@ The release wheel contains an `sm_89` native build with forward PTX and was vali
 | Inspect precision research and rejected paths | [Research matrix](docs/RESEARCH_MATRIX.md) |
 | See current priorities | [Roadmap](docs/ROADMAP.md) |
 | Diagnose an installation | [Troubleshooting](docs/TROUBLESHOOTING.md) |
+| Contribute a change | [Contributing](CONTRIBUTING.md) |
 
-[Release notes](docs/releases/) describe historical changes. [`docs/HANDOFF.md`](docs/HANDOFF.md)
-and [`docs/impl/`](docs/impl/) are historical engineering records, not current contracts.
-
-## Status
-
-D-FINE-cpp is a production-oriented SDK with correctness and performance gates on the maintained paths. Hosted CI covers build, CMake consumption, CPU tests, and packaging; GPU inference, COCO mAP, and sanitizer gates currently run on maintainer hardware. The runtime is intentionally a synchronous in-process library, not a video or serving framework.
-
-Contributions follow the validation requirements in [CONTRIBUTING.md](CONTRIBUTING.md).
+[Release notes](docs/releases/) describe versioned changes. [`docs/HANDOFF.md`](docs/HANDOFF.md)
+and [`docs/impl/`](docs/impl/) preserve the engineering record; the documents above define the
+current contract.
 
 ## Credits and license
 

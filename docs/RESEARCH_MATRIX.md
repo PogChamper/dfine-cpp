@@ -12,6 +12,9 @@ All engines strongly-typed, `--no-tf32`. Benchmarks: `dfine_bench` (the C++ runt
 medians of 3 interleaved rounds on an idle GPU. References (m): PyTorch subset base 0.5672,
 full-val FP32 0.5506, production FP16-ST 0.5500.
 
+Reduced-query throughput rows report the measured `K=Q` decode configuration. [Validation](VALIDATION.md)
+records the current runtime regression gate for the same artifacts.
+
 Engine configs referenced throughout:
 
 | name | what it is | how to build it |
@@ -279,21 +282,36 @@ CPU-side preprocessing of 1810×1080 frames — that is what `full_pipeline_grap
 ## 10. Reproduce
 
 ```sh
-# opset-19 export (REQUIRED for the surgical converter), optional sliders:
-python trt-files/scripts/export_dfine_onnx.py --model-name m --checkpoint dfine_m_obj2coco.pt \
-    --opset 19 [--num-queries 200] [--eval-idx 2] [--cascade 1:150] --output dfine_m_op19.onnx
+: "${DFINE_SEG_DIR:?set DFINE_SEG_DIR to the pinned D-FINE-seg checkout}"
+: "${COCO_IMAGES:?set COCO_IMAGES to COCO val2017}"
+: "${COCO_ANN:?set COCO_ANN to instances_val2017.json}"
+export DFINE_CHECKPOINT="${DFINE_CHECKPOINT:-$DFINE_SEG_DIR/pretrained/dfine_m_obj2coco.pt}"
 
-# surgical FP16 (--slim = the release default):
-python trt-files/scripts/convert_fp16_surgical.py --onnx dfine_m_op19.onnx \
+uv sync --frozen --extra gpu --extra torch
+./build.sh
+
+# Opset-19 export required by the surgical converter.
+uv run python trt-files/scripts/export_dfine_onnx.py \
+    --model-name m --checkpoint "$DFINE_CHECKPOINT" --dfine-src "$DFINE_SEG_DIR" \
+    --opset 19 --output dfine_m_op19.onnx
+
+# Fast adds --num-queries 200 --cascade 1:100.
+# Max adds those flags plus --eval-idx 2, then builds with --opt-batch 8.
+
+# Surgical FP16; --slim is the release recipe.
+uv run python trt-files/scripts/convert_fp16_surgical.py --onnx dfine_m_op19.onnx \
     --output dfine_m_slim.onnx --slim
 
-# engine (opt-batch 8 for serving, default opt 1 for latency):
-python trt-files/scripts/build_engine.py --strongly-typed --no-tf32 --max-batch 8 \
-    [--opt-batch 8] --onnx dfine_m_slim.onnx --output dfine_m_slim.engine
+# Default latency-profile engine. Use --opt-batch 8 for the measured serving profile.
+uv run python trt-files/scripts/build_engine.py --strongly-typed --no-tf32 --max-batch 8 \
+    --onnx dfine_m_slim.onnx --output dfine_m_slim.engine
 
-# gates and numbers:
-python trt-files/scripts/coco_eval.py --backends engine --engine dfine_m_slim.engine --limit 0
-./build/dfine_bench --engine dfine_m_slim.engine --batches 1,2,4,8 --iters 500
+# Full-val accuracy and native runtime throughput.
+uv run python trt-files/scripts/coco_eval.py --backends engine \
+    --engine dfine_m_slim.engine --images "$COCO_IMAGES" --ann "$COCO_ANN" --limit 0
+TRTLIB="$(uv run python -c 'import os, tensorrt_libs; print(os.path.dirname(tensorrt_libs.__file__))')"
+LD_LIBRARY_PATH="$TRTLIB:${LD_LIBRARY_PATH:-}" \
+    ./build/dfine_bench --engine dfine_m_slim.engine --batches 1,2,4,8 --iters 500
 ```
 
 The flag-based export was verified to reproduce the gated research artifacts **bit-exactly**

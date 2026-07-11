@@ -28,8 +28,8 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    // 1. Construct the detector from an engine path (+ optional explicit
-    //    sidecar path; defaults to `<engine_path>.json` if omitted).
+    // 1. Construct from an engine path and optional explicit sidecar. Without
+    //    one, discovery checks `<engine>.json`, then the same-stem JSON.
     dfine::DetectorOptions opts;
     opts.threshold = 0.5f;
     dfine::DFineDetector detector = argc > 2 ? dfine::DFineDetector(argv[1], argv[2], opts)

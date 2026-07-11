@@ -46,20 +46,23 @@ conda-`ld` workaround is applied only for conda toolchains. Plain CMake works to
 
 Fast tests run everywhere; accuracy validation is empirical against the model:
 
-- **`ctest` green.** `tests/` holds CPU-only tests (image-layout validation, sidecar parsing) that run
-  anywhere, and GPU tests (shape-transition recovery, detector error recovery) that skip without a GPU —
-  set `DFINE_TEST_ENGINE` (and optionally `DFINE_TEST_ENGINE_G0`) to run them. Python-side:
-  `pytest python/tests` (CPU subset needs no GPU).
+- **`ctest` green.** CPU coverage includes image layout, decode limits, sidecar parsing, constructor
+  options, and the no-engine C ABI smoke. GPU tests cover shape transitions and detector recovery;
+  they skip without a GPU. Set `DFINE_TEST_ENGINE` and optionally `DFINE_TEST_ENGINE_G0` to run
+  them. For Python, run `python -m pip install -e "python[dev]"`, then
+  `python -m pytest python/tests` (the CPU subset needs no GPU).
 - **Build clean** with `WERROR=ON`.
 - **Default-path mAP unchanged** for changes to export, build, or decode:
-  `trt-files/scripts/profile.py --backends trt cpp --subset 2000` (or `--full`) must hold the
-  reference AP for the affected size. Accuracy-traded presets require measured before/after results.
+  `uv run --frozen --extra gpu --extra torch python trt-files/scripts/profile.py --backends trt cpp
+  --engine "$ENGINE" --images "$COCO_IMAGES" --ann "$COCO_ANN" --subset 2000` (or `--full`) must
+  hold the reference AP for the affected size.
+  Accuracy-traded presets require measured before/after results.
 - **Sanitizers clean** for C++ changes on the exercised paths (UBSAN build; `compute-sanitizer` for new kernels).
 - Engine-graph changes: `dfine_bench --graph-compare` must keep the raw-output path byte-identical
   to ordinary enqueue; it requires a `--max-aux-streams 0` engine.
 - GPU-decode or full-pipeline-graph changes: use box-aware tolerances and dataset mAP against CPU
   decode. A one-ULP score difference is allowed; bitwise identity is not the contract. Require an
-  active full graph when validating `dfine_coco_eval --full-graph`.
+  active graph with `cpp_coco_eval.py --full-graph --filter-res WxH`.
 
 ## PRs
 

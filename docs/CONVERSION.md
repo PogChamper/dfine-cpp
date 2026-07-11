@@ -43,7 +43,10 @@ python trt-files/scripts/build_engine.py \
 
 Use `--opt-batch 8` for a batch-serving engine. It improves batch-8 throughput by approximately 6–10% in the measured D-FINE-M runs and increases batch-1 latency by 8–19%.
 
-Add `--max-aux-streams 0` when either CUDA Graph mode will be used. The ordinary runtime and GPU decode do not require it.
+Add `--cuda-graph` to `dfine build` when either CUDA Graph mode will be used. It sets
+`max_aux_streams=0`; the default cache output uses a separate `-g0` entry. With the direct builder,
+use `--max-aux-streams 0` or its `--cuda-graph` alias. The flag does not change output types; active
+capture also requires FP32 logits and boxes. The ordinary runtime and GPU decode do not require it.
 
 Do not add `--fp16` to a typed FP16 artifact. That flag selects the measured weakly typed anti-example. The FP16 compute types are already encoded in `dfine_m_slim.onnx`; `--strongly-typed` tells TensorRT to preserve them.
 
@@ -147,27 +150,14 @@ The raw ONNX interface is deliberately small:
 
 Sigmoid, global top-k, thresholding, `cxcywh → xyxy`, and source-image scaling remain outside the engine. D-FINE's FDR/Integral/LQE box computation and deformable attention remain inside it. No NMS is applied.
 
-The current exporter records:
+The ONNX sidecar owns the model, preprocessing, export recipe, checkpoint hash, tool versions, and
+source provenance. Engine builders carry that contract forward and add compiled IO/profile facts,
+TensorRT settings, auxiliary streams, and source-ONNX identity. The runtime trusts the compiled
+profile, validates compatible sidecar fields, and uses documented preprocessing defaults when no
+sidecar is found. Explicit sidecar paths are strict.
 
-- model size, input geometry, query count, class count, and labels;
-- input layout, `/255` normalization, resize geometry, and output semantics;
-- checkpoint hash and strict/partial load status;
-- ONNX opset, deform core, precision recipe, simplification result, tool versions, and exporter
-  source hash;
-- D-FINE source repository, commit, and dirty state when exported from a Git checkout.
-
-The exporter marks its sidecar `artifact_kind: "onnx"`. The production Python builder carries the
-model contract forward, changes the kind to `engine`, and adds the TensorRT version, GPU architecture,
-network typing, TF32 mode, auxiliary-stream setting, optimization profile, and source ONNX hash. The
-FP32-only C++ builder records engine tensor/profile facts, weak network typing, disabled TF32, and its
-auxiliary-stream setting; it omits GPU architecture and the source ONNX hash.
-
-The runtime validates engine IO, cross-checks model facts in either sidecar kind, and cross-checks
-batch fields only when they describe the compiled engine. TensorRT profile data is authoritative. An
-explicit sidecar path must exist. Without a discovered sidecar, dimensions and names come from the
-engine and preprocessing uses the documented defaults.
-
-Names are discovery labels, not identity. The exact rules and cache fingerprint are defined in [Artifact naming and identity](NAMING.md).
+Names remain discovery labels, not identity. [Artifact naming and identity](NAMING.md) defines field
+ownership, discovery precedence, cache fingerprints, and schema evolution.
 
 ## Why the ordinary paths fail
 
@@ -199,13 +189,11 @@ There is no `--preset fast` CLI alias. Apply the required export flags explicitl
 
 `uv.lock` pins the Python toolchain; `trt-files/DFINE_SEG_REVISION` pins the tested model source. Byte comparison is meaningful only when tool versions, checkpoint hash, model-source state, export flags, and simplification path match. A dirty model-source checkout is not a release input. Runtime correctness does not rely on byte identity alone: validate the produced engine against the expected detections and dataset metric.
 
-For a release candidate:
+Release gates cover three boundaries:
 
-1. Verify the ONNX artifact at batch 1 and 2.
-2. Build with the production flags on the target TensorRT stack.
-3. Run engine smoke tests at batches 1, 2, and 8 for the default profile.
-4. Compare boxes and scores against the reference path.
-5. Run full COCO validation for any graph or precision change.
-6. Publish graph and sidecar together with SHA-256 coverage.
+1. ONNX behavior at batches 1 and 2.
+2. Engine smoke at batches 1, 2, and 8 plus box/score parity.
+3. Full COCO validation for graph or precision changes, followed by atomic graph/sidecar publication
+   with SHA-256 coverage.
 
 The executable release procedure is in [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md); benchmark methodology is in [Validation](VALIDATION.md).

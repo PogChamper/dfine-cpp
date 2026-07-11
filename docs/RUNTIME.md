@@ -20,7 +20,7 @@ The detector validates the TensorRT interface when it loads an engine:
 
 | Tensor | Required contract |
 |---|---|
-| Input | Device, linear FP32 `[B,3,H,W]`; static `B=1` or dynamic `B` |
+| Exactly one input | Device, linear FP32 `[B,3,H,W]`; static `B=1` or dynamic `B` |
 | Logits | Device, linear FP32 or FP16 `[B,Q,C]` |
 | Boxes | Device, linear FP32 or FP16 `[B,Q,4]` with the same `Q` |
 | Profile | Exactly one profile; a dynamic engine may vary only input batch |
@@ -79,6 +79,9 @@ auto results = detector.detect_batch(images, 0.4f);
 ```
 
 `results[i]` corresponds to `images[i]`. Batch size must be within the engine profile and the frozen bound, when set. Images in one batch may have different source dimensions; each is transformed to the fixed engine canvas.
+
+Constructor thresholds must be finite and within `[0,1]`. A per-call finite value in `[0,1]`
+overrides it; a finite negative value uses the constructor default.
 
 The detector is move-only and not thread-safe. One instance owns one TensorRT execution context, one CUDA stream, and its working buffers. Use one detector per concurrently executing thread.
 
@@ -151,7 +154,7 @@ dfine::DetectorOptions options;
 options.use_cuda_graph = true;
 ```
 
-The detector warms and captures a graph per encountered batch size. Input packing and preprocessing remain outside the graph. Capture requires FP32 outputs and an engine built with `--max-aux-streams 0`; failure safely retains ordinary `enqueueV3` execution.
+Before `freeze()`, the detector warms and captures a graph per encountered batch size. After `freeze()`, uncaptured batches use ordinary `enqueueV3` execution. Input packing and preprocessing remain outside the graph. Capture requires FP32 outputs and a zero-aux-stream engine; failure safely retains ordinary execution. `cuda_graph_replays()` reports calls that actually used the captured path.
 
 ### GPU decode
 
@@ -164,6 +167,8 @@ CUDA performs sigmoid, segmented ordering, thresholding, and box mapping against
 
 GPU scores may differ from CPU scores by one ULP because CUDA and host sigmoid implementations differ. Dataset metrics are equivalent; bitwise equality is not the contract for this mode.
 
+GPU decode takes precedence when both it and engine graph replay are enabled.
+
 ### Full pipeline graph
 
 ```cpp
@@ -175,7 +180,7 @@ dfine::DFineDetector detector("dfine_m_slim_g0.engine", options);
 detector.freeze(dfine::FreezeSpec{1, 1920, 1080, false});
 
 if (!detector.full_pipeline_graph_active()) {
-    // The detector remains usable through split GPU decode.
+    // FP32 outputs use split GPU decode; FP16 outputs use CPU decode.
 }
 ```
 
@@ -188,7 +193,7 @@ if (!detector.full_pipeline_graph_active()) {
 
 Matching steady-state calls replay the graph. A supported shape transition uses split GPU decode while the TensorRT context is restored; later matching calls resume replay. A batch above the frozen bound, or a source frame above an explicit source bound, is rejected instead of allocating on the hot path. The score threshold remains a per-call value and is not baked into the graph.
 
-`full_pipeline_graph_active()` reports whether capture succeeded. `full_graph_replays()` counts calls served by the captured path.
+`full_pipeline_graph_active()` reports whether capture succeeded. On a recoverable capture failure, FP32 outputs use split GPU decode and FP16 outputs use CPU decode. CUDA execution failures still throw. `full_graph_replays()` counts calls served by the captured path.
 
 ## Frozen memory
 
@@ -266,17 +271,9 @@ Initialize option structs to zero and set `struct_size = sizeof(...)` before cal
 
 ## Python
 
-The Python package is a `ctypes` wrapper over the C ABI, not a separate inference implementation. It validates NumPy shape/dtype/stride, transfers the same host image view, and materializes immutable `Detection` objects.
-
-```python
-from dfine import Detector
-
-with Detector("model.engine", threshold=0.5) as detector:
-    detections = detector.detect(rgb_hwc_uint8)
-    batch = detector.detect_batch([first, second])
-```
-
-Use a context manager or call `close()` explicitly. The native result set is freed after every call. Python options for GPU decode, letterbox, frozen memory, full-pipeline graph, and timings map directly to the C ABI; see the [Python reference](../python/README.md).
+The Python package is a `ctypes` wrapper over the C ABI. It validates NumPy shape, dtype, and stride;
+frees native result sets after each call; and maps runtime options directly to the C ABI. Usage and
+lifetime rules are in the [Python reference](../python/README.md).
 
 ## Current boundaries
 

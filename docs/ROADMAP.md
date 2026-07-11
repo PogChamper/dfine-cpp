@@ -1,37 +1,9 @@
 # Roadmap
 
-D-FINE-cpp has one maintained product path: convert a D-FINE checkpoint without silent accuracy loss, build a target-local TensorRT engine, and run it through a native in-process SDK. Near-term work strengthens that path and collects deployment evidence before the project expands into a video or serving stack.
-
-## Current boundary
-
-| Included | Outside the current runtime |
-|---|---|
-| Detection checkpoint export | Video decoding and camera capture |
-| FP32 and lossless surgical-FP16 ONNX artifacts | Tracking and analytics |
-| Target-local TensorRT engine build | Request scheduling and dynamic request batching |
-| Synchronous C++, C, Python, and CLI inference | Device-pointer/NV12 input |
-| CPU decode, GPU decode, and frozen CUDA Graph execution | Multi-GPU routing and telemetry |
-| Artifact provenance and reproducible validation | Instance-mask output |
-
-The excluded items are possible integration lanes, not promises.
-
-## v0.4.0 hardening
-
-The source branch contains the following changes beyond v0.3.3:
-
-| Change | State |
-|---|---|
-| Runtime teardown, engine IO validation, and profile-derived batch limits | Implemented; local RC gates passed |
-| Source revision, dirty state, checkpoint hash, and tool versions in exported metadata | Implemented; final artifact gate pending |
-| Native wheel metadata, LICENSE/NOTICE, and outside-checkout loading | Implemented; local wheel gate passed |
-| One quickstart with separate conversion, runtime, validation, and research references | Implemented; final review pending |
-
-The local Ada release candidate passes runtime, sanitizer, wheel, throughput, and full-COCO gates.
-The release remains pending until final review and release-asset verification pass on the committed
-bytes. See [Unreleased changes](releases/UNRELEASED.md) for the branch contract.
-
-No model re-export is required when the graph recipe is unchanged. A fresh export adds the new
-provenance fields to its sidecar.
+D-FINE-cpp maintains one path: accurate checkpoint conversion, target-local TensorRT compilation,
+and native in-process inference. [Runtime](RUNTIME.md) defines its current boundary;
+[Unreleased](releases/UNRELEASED.md) tracks work awaiting the next release. This roadmap covers
+adoption and scope beyond that boundary.
 
 ## Adoption work
 
@@ -44,7 +16,7 @@ Technical distribution now has higher value than adding model variants.
 - Coordinate the maintained recipe with D-FINE and D-FINE-seg rather than maintaining incompatible deployment guidance.
 - Submit the isolated TensorRT divergence to NVIDIA with exact graph, versions, inputs, and output deltas.
 
-The goal is a reviewable upstream fix and an independently reproducible report, not a broad performance claim.
+The goal is a reviewable upstream fix backed by independently reproducible evidence.
 
 ### Reduce time to first verified engine
 
@@ -121,4 +93,5 @@ Version 1.0 should describe stability, not feature count:
 - GPU correctness and recovery tests run routinely;
 - at least one external deployment exercises the maintained runtime contract.
 
-Completed milestones and superseded decisions belong in [release notes](releases/) and the [historical lab journal](HANDOFF.md). Current measurements remain in [Validation](VALIDATION.md) and the [research matrix](RESEARCH_MATRIX.md).
+Released work is recorded in [release notes](releases/). Current measurements remain in
+[Validation](VALIDATION.md) and the [research matrix](RESEARCH_MATRIX.md).

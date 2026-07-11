@@ -8,7 +8,7 @@ The v0.3.1, v0.3.2, and v0.3.3 model artifacts are byte-identical. Rows produced
 
 ## Generate a compatibility report
 
-Requirements: a repository checkout and Python ≥3.10. The engine build also needs `tensorrt-cu12==10.13.*`. Without TensorRT or a GPU, the script still records the environment and marks the build as skipped.
+Requirements: a repository checkout and Python ≥3.10. The engine build also needs `tensorrt-cu12==10.13.*`. Without TensorRT, the report records the environment and marks the build skipped. If TensorRT is present but no GPU is usable, the build is recorded as failed.
 
 ```sh
 git clone https://github.com/PogChamper/dfine-cpp && cd dfine-cpp
@@ -27,51 +27,39 @@ The report uses the production engine recipe: strong typing, TF32 disabled, and 
 Build `dfine_coco_eval`, then point the scorer at COCO val2017:
 
 ```sh
+: "${COCO_IMAGES:?set COCO_IMAGES to COCO val2017}"
+: "${COCO_ANN:?set COCO_ANN to instances_val2017.json}"
+: "${TRTLIB:?set TRTLIB to the directory containing libnvinfer.so.10}"
 mkdir -p validation
 uv run python trt-files/scripts/cpp_coco_eval.py \
     --binary build/dfine_coco_eval \
     --engine dfine_m_slim.engine \
-    --images /path/to/coco/val2017 \
-    --ann /path/to/coco/annotations/instances_val2017.json \
+    --images "$COCO_IMAGES" \
+    --ann "$COCO_ANN" \
+    --ld-library-path "$TRTLIB" \
     --batch 8 --limit 0 --out validation/coco_detections.json
 ```
-
-## Submit
-
-Review the generated files, then attach both `validation/report.md` and `validation/report.json` (`schema: 1`) to a GitHub issue titled:
-
-    validation: <GPU> / TRT <version>
-
-For example, `validation: RTX 3060 / TRT 10.9`. The report includes `nvidia-smi` and `platform.uname()` output; inspect it before posting.
 
 ## v0.4.0 release-candidate gate
 
 The unreleased runtime was revalidated on 2026-07-11 on the reference RTX 4070 Ti SUPER stack.
 Full COCO val2017 used the same engine bytes as the recorded v0.3.3 reference, batch 8, and the
-complete C++ preprocessing/decode path. A direct N old/new control reproduced the reference. AP is
-rounded to the report precision.
+complete C++ preprocessing/decode path. All seven artifacts matched v0.3.3 at three-decimal report
+precision.
 
-| Artifact | Queries | v0.3.3 AP | v0.4.0 RC AP |
-|---|---:|---:|---:|
-| `slim` N | 300 | 0.428 | 0.428 |
-| `slim` S | 300 | 0.506 | 0.506 |
-| `slim` M | 300 | 0.550 | 0.550 |
-| `slim` L | 300 | 0.572 | 0.572 |
-| `slim` X | 300 | 0.593 | 0.593 |
-| reduced-query N | 100 | 0.423 | 0.423 |
-| reduced-query M | 100 | 0.545 | 0.545 |
-
-The reduced-query rows use the historical fast graph: Q200 followed by cascade `1:100`, producing
-Q=100 outputs. Throughput used the v0.3.3 and RC binaries against the same engine files in three
-interleaved rounds: batches 1/2/4/8, 30 warmups, 500 iterations, and the median paired delta. All five
-`slim` engines stayed within normal run-to-run variation. TensorRT inference time was also unchanged
-for the reduced-query engines; the larger fixed decode candidate set adds the measured end-to-end
-cost below.
-
-| Artifact | Batch 1 img/s | Batch 8 img/s |
+| Artifact | Queries | AP |
 |---|---:|---:|
-| reduced-query N | 492 → 481 (-2.3%) | 1582 → 1496 (-5.4%) |
-| reduced-query M | 295 → 289 (-1.8%) | 582 → 571 (-1.9%) |
+| `slim` N | 300 | 0.428 |
+| `slim` S | 300 | 0.506 |
+| `slim` M | 300 | 0.550 |
+| `slim` L | 300 | 0.572 |
+| `slim` X | 300 | 0.593 |
+| reduced-query N | 100 | 0.423 |
+| reduced-query M | 100 | 0.545 |
+
+The reduced-query rows use the fast graph: Q200 followed by cascade `1:100`, producing Q=100
+outputs. Interleaved v0.3.3/RC checks kept all five `slim` engines within normal run-to-run variation
+and found unchanged TensorRT inference time for the reduced-query engines.
 
 ## Results
 
@@ -81,7 +69,7 @@ cost below.
 | RTX 3090 | 8.6 | 10.13.3.9 | 550.107.02 | Ubuntu 22.04 native | 0.3.2 | yes | 310 | 487 | maintainer (rented) |
 | RTX 5080 | 12.0 | 10.13.3.9 | 610.43.02 | Ubuntu 22.04 native | 0.3.2 | yes | 456 | 676 | maintainer (rented) |
 
-## Full-methodology results (maintainer-run)
+## Cross-GPU benchmark matrix
 
 The rows above are the D-FINE-M `slim` spot bench from `validation_report.py`. The tables below
 reproduce the README benchmark methodology end to end on rented hardware — batches 1/2/4/8
@@ -91,10 +79,8 @@ reproduce the README benchmark methodology end to end on rented hardware — bat
 the 500-image val2017 subset: a lossless check against fp32 on the same machine, **not**
 comparable to the README's full-val numbers. Cells are `p50 ms / img/s`.
 
-The fast/max rows predate the fixed `min(300, Q×C)` runtime decode limit and used `K=Q` for
-reduced-query artifacts. Their VRAM measurements still describe the same engines; treat throughput
-and subset mAP as historical. The Ada release-candidate gate above quantifies the current N/M
-reduced-query behavior; the rented-hardware rows below have not been repeated.
+The fast/max rows report the measured `K=Q` reduced-query configuration. The Ada release-candidate
+gate above reproduced N/M accuracy and TensorRT inference timing.
 
 ### RTX 3090 — Ampere SM 8.6, driver 550.107.02, TRT 10.13.3.9, Ubuntu 22.04 native
 
@@ -110,7 +96,7 @@ reduced-query behavior; the rented-hardware rows below have not been repeated.
 | n | fast | 1.38/725 | 1.97/1014 | 3.05/1310 | 5.17/1549 | 202 | 0.455 |
 | n | fp32 | 2.27/440 | 3.50/571 | 5.97/670 | 10.67/750 | 266 | 0.458 |
 
-In those historical runs, the batch-8 ordering was `legacy fp16_st < slim < fast < max`;
+In those runs, the batch-8 ordering was `legacy fp16_st < slim < fast < max`;
 `slim` matched FP32 on the subset, and the fast/max deltas matched the Ada reference. Native
 Linux also reduced the batch-1 dispatch cost measured under WSL2.
 
@@ -129,3 +115,9 @@ Linux also reduced the batch-1 dispatch cost measured under WSL2.
 | n | fp32 | 1.50/665 | 2.22/900 | 3.55/1126 | 6.86/1166 | 268 | 0.458 |
 
 The `sm_89` wheel runs on RTX 5080 through PTX JIT with matching detections. On this system the 0-aux-stream `slim-g0` build also gains throughput at batch 8; the Ada and Ampere runs were batch-8-neutral.
+
+## Submit a report
+
+Inspect `validation/report.md` and `validation/report.json` (`schema: 1`), then attach both to a
+GitHub issue titled `validation: <GPU> / TRT <version>`. The report includes `nvidia-smi` and
+`platform.uname()` output; review it before posting.

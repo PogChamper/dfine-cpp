@@ -52,10 +52,11 @@ The active release model pack contains the `op19` and `slim` pairs. Legacy asset
 CLI cache entries use:
 
 ```text
-dfine_<size>_<precision>-<fingerprint>-b1-<opt>-<max>-sm<arch>-trt<version>.engine
+dfine_<size>_<precision>-<fingerprint>-b1-<opt>-<max>[-g0]-sm<arch>-trt<version>.engine
 ```
 
-The CLI assembles this spelling in one function. It is useful for discovery and inspection, but the
+`-g0` marks an engine built by `dfine build --cuda-graph`, with TensorRT auxiliary streams
+disabled. The separate cache entry prevents one build policy from overwriting the other. The
 runtime obtains the real batch profile from the engine and cross-checks engine-owned profile facts.
 
 The maintained Python producers require `.onnx` graph inputs/outputs and `.engine` engine outputs;

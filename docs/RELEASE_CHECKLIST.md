@@ -311,6 +311,10 @@ cmp "$RELEASE_DIR/native-detections.json" "$RELEASE_DIR/wheel-detections.json"
 - [ ] `assemble` requires a new or empty output directory, accepts exactly 20 model files, validates
       graph/sidecar pairing, canonical model facts, provenance, precision, opset 19, and each slim
       graph's FP32 source hash, then writes `SHA256SUMS` for the 20 model files and wheel.
+- [ ] **Republishing the frozen v0.3.1 model pack** (byte-identical models, only the wheel is new):
+      add `--frozen-model-pack`. Those artifacts predate the provenance schema and are admitted by
+      their pinned published SHA-256 instead; the wheel is still fully validated, and any byte drift
+      fails. Use the canonical form above only for a freshly exported pack.
 - [ ] Tag the release commit and upload the contents of `$RELEASE_DIR/upload` without rebuilding.
 
 ```sh

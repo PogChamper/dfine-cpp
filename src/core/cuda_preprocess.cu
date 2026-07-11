@@ -75,7 +75,7 @@ __global__ void stretchResizeNormalizeKernel(const std::uint8_t* __restrict__ sr
 
 // Letterbox counterpart: the source occupies [x0,x1)x[y0,y1) of the canvas
 // (mapped with its own scale); everything outside is the pre-normalized padding
-// color. Bilinear taps clamp to the SOURCE bounds, matching the stretch kernel.
+// color. Bilinear taps clamp to the source bounds, matching the stretch kernel.
 // Deliberately a separate kernel: stretchResizeNormalizeKernel is on the
 // byte-identical default path and must not change.
 __global__ void letterboxResizeNormalizeKernel(const std::uint8_t* __restrict__ src, int src_h,

@@ -31,20 +31,29 @@ struct BindingInfo {
     std::string name;
     nvinfer1::DataType dtype;
     nvinfer1::Dims shape;  // resolved shape; dims may be -1 if dynamic and not yet set
+    nvinfer1::TensorLocation location{nvinfer1::TensorLocation::kDEVICE};
+    nvinfer1::TensorFormat format{nvinfer1::TensorFormat::kLINEAR};
+    std::string format_desc;
+    int vectorized_dim{-1};
     bool is_input{false};
     int64_t element_count{0};  // 0 = shape has unresolved dim(s)
     std::size_t bytes{0};      // element_count * sizeof(dtype)
 };
 
+struct InputProfileInfo {
+    nvinfer1::Dims min{};
+    nvinfer1::Dims opt{};
+    nvinfer1::Dims max{};
+};
+
 // Owns a TRT runtime, engine, execution context, per-binding device + pinned-host
-// buffers, and a CUDA stream. Does sync inference (H2D -> enqueueV3 -> D2H + sync).
-// Name-driven and model-agnostic: callers pass the D-FINE tensor names
-// ("images", "logits", "boxes"); nothing here is hardcoded.
+// buffers, and a CUDA stream. Supports device-resident, linear IO tensors; the
+// task layer validates the narrower D-FINE tensor contract.
 class TrtSession {
  public:
     // Shape-transition state. set_input_shape is transactional: it either
     // commits (context, buffers, and the bindings_ cache all agree) or leaves
-    // the OLD buffers live and the cache untouched.
+    // the previous buffers live and the cache untouched.
     //   kClean:    bindings_ mirrors the execution context; the de-dup fast
     //              path may trust the cache and infer may run.
     //   kDirty:    a transition failed after the context was touched; cache and
@@ -57,7 +66,7 @@ class TrtSession {
     enum class ShapeState : std::uint8_t { kClean, kDirty, kPoisoned };
 
     // user_managed_memory: create the execution context with kUSER_MANAGED so TRT
-    // allocates NO activation memory; the caller must then supply it once via
+    // does not allocate activation memory; the caller must supply it once via
     // set_device_memory() before the first infer (see device_memory_size()).
     explicit TrtSession(
         const std::filesystem::path& engine_path,
@@ -89,9 +98,18 @@ class TrtSession {
     void set_input_shape(std::string_view name, const nvinfer1::Dims& dims);
 
     [[nodiscard]] ShapeState shape_state() const noexcept { return shape_state_; }
+    void require_ready(const char* operation) const { require_clean_(operation); }
+
+    [[nodiscard]] int num_optimization_profiles() const noexcept;
+    [[nodiscard]] InputProfileInfo input_profile(std::string_view name,
+                                                 int profile_index = 0) const;
 
     // Copy host bytes -> pinned staging -> device. host_bytes must equal binding.bytes.
     void set_input(std::string_view name, const void* host_data, std::size_t bytes);
+
+    // Enqueue inference without waiting. A rejected enqueue makes the execution
+    // context unusable; subsequent operations fail until the session is recreated.
+    void enqueue(const char* operation);
 
     // Sync infer: enqueueV3 on the stream and wait. H2D copies are already on the
     // stream from set_input.
@@ -112,14 +130,16 @@ class TrtSession {
     const void* device_buffer(std::string_view name) const;
 
     cudaStream_t stream() const noexcept { return stream_.get(); }
+    void synchronize(const char* operation);
+    [[nodiscard]] bool drain_noexcept() noexcept;
 
-    // --- Frozen-memory contract (intensive-core P2) --------------------------------
+    // --- Frozen-memory contract -----------------------------------------------------
     // Device-memory size TRT needs for activation across all profiles (upper bound).
     [[nodiscard]] int64_t device_memory_size() const noexcept;
     // Supply user-managed activation memory (kUSER_MANAGED contexts only). `ptr` must
     // stay alive for the context's lifetime; `size` >= device_memory_size().
     void set_device_memory(void* ptr, int64_t size);
-    // Freeze: after this, a shape change that would GROW a binding buffer throws
+    // Freeze: after this, a shape change that would grow a binding buffer throws
     // instead of reallocating — so device addresses never move (needed for CUDA-graph
     // capture) and no allocation happens on the steady-state path. Warm up at the max
     // shape first so every buffer has already reached peak capacity.
@@ -127,7 +147,10 @@ class TrtSession {
     [[nodiscard]] bool frozen() const noexcept { return frozen_; }
 
     // Internal use — CUDA Graph capture hook.
-    nvinfer1::IExecutionContext* context() const noexcept { return context_.get(); }
+    nvinfer1::IExecutionContext* context() const {
+        require_clean_("context");
+        return context_.get();
+    }
 
     // Number of auxiliary streams the engine may launch kernels on. CUDA-graph
     // capture is only safe when this is 0 (or when those streams are wired as
@@ -152,6 +175,7 @@ class TrtSession {
     // Throws unless kClean: infer-path entry points must not run against a
     // context whose shape/addresses may not match the cached bindings.
     void require_clean_(const char* what) const;
+    void poison_(std::string reason);
     [[noreturn]] void throw_frozen_grow_(const std::string& binding, std::size_t bytes) const;
 
     TrtLogger logger_;

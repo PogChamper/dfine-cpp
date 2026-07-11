@@ -5,13 +5,21 @@
 namespace dfine {
 
 // Parameters for D-FINE detection decoding. The raw engine emits a focal-style
-// class head with NO background slot: `logits [N, num_queries, num_classes]` and
+// class head with no background slot: `logits [N, num_queries, num_classes]` and
 // `boxes [N, num_queries, 4]` (cxcywh, normalized to [0,1]). Decode has no NMS.
+inline constexpr int kDetectionLimit = 300;
+
+[[nodiscard]] constexpr int detection_limit(int num_queries, int num_classes) noexcept {
+    if (num_queries <= 0 || num_classes <= 0) return 0;
+    const long long candidates = static_cast<long long>(num_queries) * num_classes;
+    return static_cast<int>(candidates < kDetectionLimit ? candidates : kDetectionLimit);
+}
+
 struct PostprocessParams {
-    int num_queries{300};   // logits/boxes dim 1
-    int num_classes{80};    // logits dim 2 (contiguous class ids, no background)
-    int topk{300};          // top-k over (query × class); default = num_queries
-    float threshold{0.5f};  // score threshold applied after top-k selection
+    int num_queries{300};       // logits/boxes dim 1
+    int num_classes{80};        // logits dim 2 (contiguous class ids, no background)
+    int topk{kDetectionLimit};  // top-k over (query × class)
+    float threshold{0.5f};      // score threshold applied after top-k selection
 };
 
 // Per-image mapping from normalized canvas coordinates to original pixels:
@@ -34,7 +42,7 @@ struct DecodeMap {
 //
 // Reproduces trt-files/scripts/coco_eval.py `decode()` exactly:
 //   sigmoid -> top-k over (query × class) -> label = idx % C, query = idx // C
-//   -> cxcywh -> xyxy scaled by (img_w, img_h). Boxes are NOT clamped to the
+//   -> cxcywh -> xyxy scaled by (img_w, img_h). Boxes are not clamped to the
 //   image (matching the reference); class_id is the contiguous index 0..C-1.
 [[nodiscard]] Detections decode_detections(const float* logits, const float* boxes, int img_w,
                                            int img_h, const PostprocessParams& params);

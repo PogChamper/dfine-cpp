@@ -1,7 +1,7 @@
 // DFineDetector error-recovery contract through the public API: a rejected or
 // failed call leaves the detector fully serviceable at its previous
 // configuration, with results bit-identical to before the error. Covers the
-// plain, gpu_decode, and full-pipeline-graph paths (v0.3.1 regression).
+// plain, gpu_decode, and full-pipeline-graph paths.
 //
 // Needs a GPU and DFINE_TEST_ENGINE pointing at a dynamic-batch D-FINE engine.
 // The full-graph section additionally uses DFINE_TEST_ENGINE_G0 (an engine
@@ -131,6 +131,47 @@ int main() {
         DFINE_CHECK(equal(det.detect(packed.view, kThr), det.detect(padded.view, kThr)));
     }
 
+    // --- FreezeSpec validation is side-effect free ------------------------------
+    {
+        DFineDetector det(engine);
+        Frame f = make_frame(512, 384);
+        const Detections base = det.detect(f.view, kThr);
+
+        DFINE_EXPECT_THROW(det.freeze(FreezeSpec{-1, 0, 0, false}), "non-negative");
+        DFINE_EXPECT_THROW(det.freeze(FreezeSpec{1, -1, 384, false}), "non-negative");
+        DFINE_EXPECT_THROW(det.freeze(FreezeSpec{1, 512, 0, false}), "both zero");
+        DFINE_EXPECT_THROW(det.freeze(FreezeSpec{1, 0, 384, false}), "both zero");
+        DFINE_EXPECT_THROW(det.freeze(FreezeSpec{det.max_batch() + 1, 0, 0, false}),
+                           "outside engine profile");
+        DFINE_CHECK(equal(det.detect(f.view, kThr), base));
+    }
+
+    // --- explicit source bounds are enforced per dimension ----------------------
+    {
+        DFineDetector det(engine);
+        Frame exact = make_frame(512, 384);
+        const Detections base = det.detect(exact.view, kThr);
+        det.freeze(FreezeSpec{1, exact.view.width, exact.view.height, false});
+
+        // Each rejected frame has fewer pixels than the frozen frame. A byte-capacity
+        // check alone would accept it; the width/height contract must reject it.
+        Frame too_wide = make_frame(513, 383);
+        Frame too_tall = make_frame(510, 385);
+        DFINE_EXPECT_THROW((void)det.detect(too_wide.view, kThr), "exceeds frozen bound");
+        DFINE_EXPECT_THROW((void)det.detect(too_tall.view, kThr), "exceeds frozen bound");
+        DFINE_CHECK(equal(det.detect(exact.view, kThr), base));
+    }
+
+    // An unbounded legacy freeze may be tightened at the already warmed source
+    // size; the stricter per-dimension contract then takes effect.
+    {
+        DFineDetector det(engine);
+        det.freeze(1);
+        det.freeze(FreezeSpec{1, det.input_w(), det.input_h(), false});
+        Frame too_wide = make_frame(det.input_w() + 1, det.input_h() - 1);
+        DFINE_EXPECT_THROW((void)det.detect(too_wide.view, kThr), "exceeds frozen bound");
+    }
+
     // --- non-frozen: B1 -> B8 -> B1 round trip is loss-free --------------------
     {
         DFineDetector det(engine);
@@ -165,25 +206,82 @@ int main() {
         fs::create_directories(dir);
         const fs::path eng = dir / "stale.engine";
         fs::copy_file(engine, eng, fs::copy_options::overwrite_existing);
+        const int engine_max = DFineDetector(engine).max_batch();
+        DFINE_CHECK(engine_max > 1);
+
+        // Profile facts come from the engine even without a sidecar. An explicit
+        // sidecar path is never replaced by an auto-discovered neighbor.
+        DFINE_CHECK(DFineDetector(eng).max_batch() == engine_max);
+        DFINE_EXPECT_THROW((void)DFineDetector(eng, dir / "missing.json"), "explicit");
+
         std::ofstream(dir / "stale.json")
             << R"({"num_classes": 81, "class_names": []})";  // engine has 80
         DFINE_EXPECT_THROW((void)DFineDetector(eng), "contradicts");
-        // A facts-only sidecar asserts nothing and must load fine.
-        std::ofstream(dir / "stale.json") << R"({"trt_version": "10.13", "max_batch": 8})";
+
+        // A labels-only sidecar is valid, but its count must agree with the
+        // resolved engine output rather than the parser's default class count.
+        std::ofstream(dir / "stale.json") << R"({"class_names": ["a", "b", "c"]})";
+        DFINE_EXPECT_THROW((void)DFineDetector(eng), "class_names");
+
+        std::ofstream(dir / "stale.json") << "{\"max_batch\": " << engine_max + 1 << "}";
+        DFINE_EXPECT_THROW((void)DFineDetector(eng), "max_batch");
+
+        std::ofstream(dir / "stale.json")
+            << R"({"input_names": ["missing"], "max_batch": )" << engine_max << "}";
+        DFINE_EXPECT_THROW((void)DFineDetector(eng), "missing input");
+
+        std::ofstream(dir / "stale.json")
+            << R"({"output_names": ["missing", "boxes"], "max_batch": )" << engine_max << "}";
+        DFINE_EXPECT_THROW((void)DFineDetector(eng), "missing logits");
+
+        // A partial sidecar asserts only the fields it contains.
+        std::ofstream(dir / "stale.json") << "{\"max_batch\": " << engine_max << "}";
         {
             DFineDetector ok(eng);
-            (void)ok;
+            DFINE_CHECK(ok.max_batch() == engine_max);
         }
         fs::remove_all(dir);
     }
 
     // --- full-pipeline graph: rejected call neither replays nor corrupts -------
     if (const char* g0 = std::getenv("DFINE_TEST_ENGINE_G0"); g0 && *g0) {
+        Frame f = make_frame(512, 384);
+        {
+            DetectorOptions o;
+            o.full_pipeline_graph = true;
+            o.own_device_memory = true;
+            DFineDetector det(g0, o);
+            arm_failpoint("detector.full_graph_sequence", 1);
+            det.freeze(FreezeSpec{1, f.view.width, f.view.height, false});
+            arm_failpoint("detector.full_graph_sequence", 0);
+            DFINE_CHECK(!det.full_pipeline_graph_active());
+            const Detections first = det.detect(f.view, kThr);
+            DFINE_CHECK(equal(first, det.detect(f.view, kThr)));
+        }
+
+        // A fatal replay synchronization error poisons the detector. No later
+        // call may enqueue the captured graph again.
+        {
+            DetectorOptions o;
+            o.full_pipeline_graph = true;
+            o.own_device_memory = true;
+            DFineDetector det(g0, o);
+            det.freeze(FreezeSpec{1, f.view.width, f.view.height, false});
+            DFINE_CHECK(det.full_pipeline_graph_active());
+            if (det.full_pipeline_graph_active()) {
+                const std::uint64_t replays = det.full_graph_replays();
+                arm_failpoint("trt_session.sync_poison", 1);
+                DFINE_EXPECT_THROW((void)det.detect(f.view, kThr), "unusable");
+                DFINE_CHECK(det.full_graph_replays() == replays);
+                DFINE_EXPECT_THROW((void)det.detect(f.view, kThr), "recreate");
+                DFINE_CHECK(det.full_graph_replays() == replays);
+            }
+        }
+
         DetectorOptions o;
         o.full_pipeline_graph = true;
         o.own_device_memory = true;
         DFineDetector det(g0, o);
-        Frame f = make_frame(512, 384);
         det.freeze(FreezeSpec{1, f.view.width, f.view.height, false});
         if (det.full_pipeline_graph_active()) {
             const Detections base = det.detect(f.view, kThr);

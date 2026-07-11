@@ -1,5 +1,7 @@
 #include "dfine/core/engine_meta.hpp"
 
+#include "internal/engine_meta_detail.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <cmath>
@@ -33,7 +35,7 @@ std::vector<std::string> read_string_array(const json& j, const char* key,
 // PRESENT value that would silently corrupt inference — a zero std dividing to
 // inf, a typo'd resize mode falling back to stretch, an inverted batch range —
 // must be a load-time error, not garbage detections an hour later.
-void validate_meta(const EngineMeta& m, const std::filesystem::path& path) {
+void validate_meta(const EngineMeta& m, bool has_num_classes, const std::filesystem::path& path) {
     if (m.schema_version > kEngineMetaSchemaVersion) {
         bad_meta(path, "schema_version " + std::to_string(m.schema_version) +
                            " is newer than this runtime supports (" +
@@ -71,7 +73,8 @@ void validate_meta(const EngineMeta& m, const std::filesystem::path& path) {
                            std::to_string(m.min_batch) + "/" + std::to_string(m.opt_batch) + "/" +
                            std::to_string(m.max_batch) + ")");
     }
-    if (!m.class_names.empty() && m.class_names.size() != static_cast<std::size_t>(m.num_classes)) {
+    if (has_num_classes && !m.class_names.empty() &&
+        m.class_names.size() != static_cast<std::size_t>(m.num_classes)) {
         bad_meta(path, std::to_string(m.class_names.size()) + " class_names for " +
                            std::to_string(m.num_classes) + " classes");
     }
@@ -79,7 +82,7 @@ void validate_meta(const EngineMeta& m, const std::filesystem::path& path) {
 
 }  // namespace
 
-EngineMeta EngineMeta::from_json_file(const std::filesystem::path& path) {
+detail::EngineMetaDocument detail::load_engine_meta(const std::filesystem::path& path) {
     std::ifstream in(path);
     if (!in) {
         throw std::runtime_error("dfine: cannot open meta sidecar: " + path.string());
@@ -87,7 +90,8 @@ EngineMeta EngineMeta::from_json_file(const std::filesystem::path& path) {
     json j;
     in >> j;
 
-    EngineMeta m;
+    EngineMetaDocument doc;
+    EngineMeta& m = doc.meta;
     m.schema_version = j.value("schema_version", kEngineMetaSchemaVersion);
     m.variant = j.value("variant", std::string{});
     m.task = j.value("task", std::string{"detect"});
@@ -95,9 +99,15 @@ EngineMeta EngineMeta::from_json_file(const std::filesystem::path& path) {
     m.input_w = j.value("input_w", 640);
     m.num_classes = j.value("num_classes", 80);
     m.num_queries = j.value("num_queries", 300);
-    m.has_input_hw = j.contains("input_h") || j.contains("input_w");
-    m.has_num_classes = j.contains("num_classes");
-    m.has_num_queries = j.contains("num_queries");
+    if (j.contains("input_h") != j.contains("input_w")) {
+        bad_meta(path, "input_h and input_w must be specified together");
+    }
+    doc.has_input_hw = j.contains("input_h");
+    doc.has_num_classes = j.contains("num_classes");
+    doc.has_num_queries = j.contains("num_queries");
+    m.has_input_hw = doc.has_input_hw;
+    m.has_num_classes = doc.has_num_classes;
+    m.has_num_queries = doc.has_num_queries;
 
     // A PRESENT mean/std that is not a 3-element numeric array must be an error,
     // not a silent fall-through to the defaults — the value the author wrote
@@ -119,15 +129,49 @@ EngineMeta EngineMeta::from_json_file(const std::filesystem::path& path) {
     m.precision = j.value("precision", std::string{"fp32"});
     m.dynamic_batch = j.value("dynamic_batch", false);
     m.min_batch = j.value("min_batch", 1);
-    m.opt_batch = j.value("opt_batch", 1);
-    m.max_batch = j.value("max_batch", 1);
+    m.opt_batch = j.value("opt_batch", m.min_batch);
+    m.max_batch = j.value("max_batch", m.opt_batch);
+    doc.has_dynamic_batch = j.contains("dynamic_batch");
+    doc.has_min_batch = j.contains("min_batch");
+    doc.has_opt_batch = j.contains("opt_batch");
+    doc.has_max_batch = j.contains("max_batch");
     m.cuda_graph_compat = j.value("cuda_graph_compat", false);
 
+    for (const char* key : {"input_names", "output_names"}) {
+        if (!j.contains(key)) continue;
+        if (!j[key].is_array() || j[key].empty()) {
+            bad_meta(path, std::string(key) + " must be a non-empty string array");
+        }
+        for (const auto& value : j[key]) {
+            if (!value.is_string() || value.get_ref<const std::string&>().empty()) {
+                bad_meta(path, std::string(key) + " must contain non-empty strings");
+            }
+        }
+    }
     m.input_names = read_string_array(j, "input_names", {"images"});
     m.output_names = read_string_array(j, "output_names", {"logits", "boxes"});
+    doc.has_input_names = j.contains("input_names");
+    doc.has_output_names = j.contains("output_names");
+    if (j.contains("class_names")) {
+        if (!j["class_names"].is_array()) {
+            bad_meta(path, "class_names must be a string array");
+        }
+        for (const auto& value : j["class_names"]) {
+            if (!value.is_string() || value.get_ref<const std::string&>().empty()) {
+                bad_meta(path, "class_names must contain non-empty strings");
+            }
+        }
+    }
     m.class_names = read_string_array(j, "class_names", {});
-    validate_meta(m, path);
-    return m;
+    if (!doc.has_num_classes && !m.class_names.empty()) {
+        m.num_classes = static_cast<int>(m.class_names.size());
+    }
+    validate_meta(m, doc.has_num_classes, path);
+    return doc;
+}
+
+EngineMeta EngineMeta::from_json_file(const std::filesystem::path& path) {
+    return detail::load_engine_meta(path).meta;
 }
 
 void EngineMeta::to_json_file(const std::filesystem::path& path) const {

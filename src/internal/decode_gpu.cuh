@@ -1,6 +1,6 @@
 #pragma once
 
-// GPU-side D-FINE decode (Zero-D2H): replaces the CPU postprocess with a device
+// GPU-side D-FINE decode: replaces CPU postprocessing with a device
 // pipeline so only the survivors cross PCIe. Bit-faithful to postprocess.cpp:
 //   sort candidates by RAW logit (descending) -> take top-k over (query x class)
 //   -> score = sigmoid(logit), keep score >= threshold -> cxcywh->xyxy scaled by
@@ -10,8 +10,8 @@
 // avoids float-saturation ties, so the RANKING is bit-identical to the CPU path;
 // only the sigmoid score differs by <=1 ULP (GPU expf vs libm). Validate by mAP.
 //
-// This TU is allocation-free: the caller owns all buffers (a DevPtr set for M1,
-// the arena in P2) and passes raw pointers, so it composes with CUDA-graph
+// This translation unit is allocation-free: the caller owns all buffers and
+// passes raw pointers, so it composes with CUDA Graph
 // capture and the frozen-memory arena.
 
 #include <cstddef>
@@ -76,7 +76,7 @@ void gpu_decode_fill_segoff(int* seg_off, int max_batch, int n_cand, cudaStream_
 //   threshold_dev : optional device-readable float overriding `threshold` at kernel
 //     EXECUTION time (nullptr = use `threshold`). Point it at mapped pinned memory
 //     and the score threshold stays a live per-call knob even inside a captured
-//     CUDA graph, where a by-value argument would be baked at capture (P3).
+//     CUDA graph, where a by-value argument would be baked at capture.
 void gpu_decode_enqueue(const float* logits, const float* boxes, int B, int Q, int C, int topk,
                         float threshold, const float* threshold_dev, const GpuDecodeScratch& s,
                         cudaStream_t stream);

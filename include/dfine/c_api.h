@@ -116,10 +116,10 @@ typedef struct dfine_image_s {
 /*
  * Construction options (dfine_detector_create_ex), ABI v2.
  *
- * Versioning contract: set struct_size = sizeof(dfine_options_t) at your
- * compile time. The library reads AT MOST struct_size bytes and treats the
- * rest as defaults, so binaries built against an OLDER header keep working
- * when the struct grows — new fields are only ever APPENDED. Zero-initialize
+ * Versioning contract: set struct_size = sizeof(dfine_options_t) at compile
+ * time. The library reads at most struct_size bytes and treats the rest as
+ * defaults, so binaries built against an older header keep working when the
+ * struct grows. New fields are appended. Zero-initialize
  * ({0} / memset), set struct_size, then set what you need; a NULL pointer
  * means "all defaults". struct_size == 0 is rejected (create returns NULL,
  * catching a forgotten assignment). Binaries built against the pre-0.2.0
@@ -137,8 +137,8 @@ typedef struct dfine_options_s {
                             /*   no-op (falls back to enqueueV3) otherwise.   */
     int graph_warmup_iters; /* enqueue cycles before capture (<=0 => 3)      */
 
-    /* --- intensive-core (see include/dfine/tasks/detector.hpp for detail) --- */
-    int gpu_decode;          /* 0/1: Zero-D2H decode on device (FP32 outputs) */
+    /* --- device execution -------------------------------------------------- */
+    int gpu_decode;          /* 0/1: decode on device (FP32 outputs)          */
     int own_device_memory;   /* 0/1: detector-owned TRT activation block      */
     int full_pipeline_graph; /* 0/1: one cudaGraphLaunch per frame; implies   */
                              /*   gpu_decode; capture happens inside          */
@@ -156,11 +156,12 @@ typedef struct dfine_options_s {
 
 /*
  * Steady-state configuration for dfine_detector_freeze(). Zeros mean engine
- * defaults (batch = engine max, src = engine input size). NOTE: only an
- * EXPLICIT src_w/src_h locks the preprocessor staging; with zero src the
+ * defaults (batch = engine max, src = engine input size). Only explicit,
+ * positive src_w/src_h locks the preprocessor staging; both must be
+ * zero or both positive, and negative values are rejected. With zero src the
  * source size stays unbounded and an oversized frame may still allocate on
- * the hot path (the one documented exception to the zero-allocation
- * contract). Same struct_size contract as dfine_options_t.
+ * the hot path (the one documented exception to the zero-allocation contract).
+ * Same struct_size contract as dfine_options_t.
  */
 typedef struct dfine_freeze_spec_s {
     size_t struct_size; /* = sizeof(dfine_freeze_spec_t)                     */
@@ -233,9 +234,9 @@ DFINE_API void dfine_set_log_callback(dfine_log_fn_t callback);
  * Create a detector from a TensorRT engine file.
  *
  * engine_path : path to the .engine file (UTF-8, null-terminated).
- * meta_path   : path to the .json sidecar, or NULL to use "<engine_path>.json"
- *               automatically (the runtime also trusts engine bindings over the
- *               sidecar for shape facts, so a missing sidecar is non-fatal).
+ * meta_path   : path to the .json sidecar, or NULL to probe "<engine>.json"
+ *               and then the same-stem JSON. A missing discovered sidecar is
+ *               allowed; a present sidecar is checked against engine facts.
  *
  * Returns a non-NULL handle on success, NULL on failure (see dfine_last_error).
  */
@@ -262,11 +263,11 @@ DFINE_API int dfine_detector_input_width(const dfine_detector_t* det);
 DFINE_API int dfine_detector_input_height(const dfine_detector_t* det);
 DFINE_API int dfine_detector_num_queries(const dfine_detector_t* det);
 DFINE_API int dfine_detector_num_classes(const dfine_detector_t* det);
-/* 1 for a static engine; the profile max for a dynamic engine; 0 if unknown. */
+/* 1 for a static engine; profile 0 max for a dynamic engine; 0 for NULL. */
 DFINE_API int dfine_detector_max_batch(const dfine_detector_t* det);
 
 /* -------------------------------------------------------------------------
- * Frozen pipeline (intensive-core; see include/dfine/tasks/detector.hpp)
+ * Frozen pipeline (see include/dfine/tasks/detector.hpp)
  * ---------------------------------------------------------------------- */
 
 /*

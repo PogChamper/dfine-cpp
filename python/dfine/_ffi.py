@@ -1,8 +1,7 @@
-"""Private ctypes layer for the D-FINE C ABI (dfine/c_api.h).
+"""Private ctypes bindings and native-library discovery.
 
-Nothing in here is part of the public Python API — use :class:`dfine.Detector`.
-This module locates and loads ``libdfine.so``, best-effort preloads the TensorRT
-runtime, mirrors the C structs, and pins argtypes/restypes exactly once.
+Applications should use :class:`dfine.Detector`. This module mirrors the C ABI,
+loads ``libdfine``, and configures function signatures once.
 """
 
 from __future__ import annotations
@@ -171,8 +170,9 @@ def _load_library() -> ctypes.CDLL:
                 raise RuntimeError(
                     f"Found {cand} but could not load it ({e}).\n"
                     "The TensorRT 10.x + CUDA 12 runtime must be importable. Either "
-                    "`pip install tensorrt==10.13.*` into this environment, or add the "
-                    f"TensorRT/CUDA lib dirs to {libpath} (see docs/HANDOFF.md)."
+                    "`pip install tensorrt-cu12==10.13.*` into this environment, or add the "
+                    f"TensorRT/CUDA lib dirs to {libpath}. Run `dfine doctor`; see "
+                    "https://github.com/PogChamper/dfine-cpp/blob/main/docs/TROUBLESHOOTING.md."
                 ) from e
 
     # Last resort: let the loader search standard paths. Keep each dlerror —

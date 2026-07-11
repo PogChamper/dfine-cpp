@@ -154,5 +154,37 @@ int main() {
         arm_failpoint("trt_session.rebind_restore", 0);
     }
 
+    // --- asynchronous execution failure poisons the session -------------------
+    {
+        auto s = make_session(engine);
+        const Io io = resolve_io(*s);
+        (void)run(*s, io, 1);
+
+        const auto* in = s->find(io.input);
+        std::vector<float> pixels(static_cast<std::size_t>(in->element_count), 0.5f);
+        s->set_input(io.input, pixels.data(), in->bytes);
+        arm_failpoint("trt_session.sync_poison", 1);
+        DFINE_EXPECT_THROW(s->infer(), "unusable");
+        DFINE_CHECK(s->shape_state() == ShapeState::kPoisoned);
+        DFINE_EXPECT_THROW(s->infer(), "recreate");
+        DFINE_EXPECT_THROW((void)s->context(), "recreate");
+    }
+
+    // --- a rejected enqueue poisons the execution context ---------------------
+    {
+        auto s = make_session(engine);
+        const Io io = resolve_io(*s);
+        s->set_input_shape(io.input, nvinfer1::Dims4{1, 3, io.h, io.w});
+
+        const auto* in = s->find(io.input);
+        std::vector<float> pixels(static_cast<std::size_t>(in->element_count), 0.5f);
+        s->set_input(io.input, pixels.data(), in->bytes);
+        arm_failpoint("trt_session.enqueue_poison", 1);
+        DFINE_EXPECT_THROW(s->infer(), "unusable");
+        DFINE_CHECK(s->shape_state() == ShapeState::kPoisoned);
+        DFINE_EXPECT_THROW(s->infer(), "recreate");
+        DFINE_EXPECT_THROW((void)s->context(), "recreate");
+    }
+
     return dfine::testing::finish("test_shape_transitions");
 }

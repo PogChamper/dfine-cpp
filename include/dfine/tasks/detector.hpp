@@ -38,28 +38,23 @@ struct DetectorOptions {
     bool use_cuda_graph{false};
     int graph_warmup_iters{3};  // full enqueue cycles before capture (TRT needs >=2)
 
-    // Opt-in GPU-side decode (Zero-D2H): run sigmoid/top-k/threshold/box-decode as
-    // CUDA kernels reading the engine outputs on-device, so only the survivors cross
-    // PCIe instead of the full logits, and the CPU does no per-frame decode work.
-    // Requires FP32 engine outputs (falls back to the CPU decode otherwise). Results
-    // are mAP-equivalent to the CPU decode (the score differs by <=1 ULP: GPU expf
-    // vs libm), not byte-identical. Takes precedence over use_cuda_graph for now.
+    // Decode on the GPU so only the retained detections are copied to the host.
+    // Requires FP32 outputs; otherwise the detector uses CPU decode. Scores can
+    // differ from CPU decode by one ULP. Takes precedence over use_cuda_graph.
     bool gpu_decode{false};
 
-    // Own TRT's activation memory in a single detector-allocated block (kUSER_MANAGED
-    // + setDeviceMemoryV2) instead of letting TRT self-manage it — part of the
-    // frozen-memory contract (see freeze()). No accuracy or mean-latency effect.
+    // Own TRT's activation memory in one detector-allocated block (kUSER_MANAGED
+    // + setDeviceMemoryV2). See freeze() for the fixed-memory contract.
     bool own_device_memory{false};
 
-    // Opt-in single-launch steady state (intensive-core P3): capture the ENTIRE
-    // per-frame pipeline — input H2D, preprocess, enqueueV3, GPU decode, survivor
-    // D2H — into one CUDA graph, replayed with a single cudaGraphLaunch per call.
+    // Capture input transfer, preprocessing, inference, GPU decode, and result
+    // transfer in one CUDA graph, replayed with one cudaGraphLaunch per call.
     // Implies gpu_decode. The capture happens inside freeze(FreezeSpec) (before the
     // allocation lock) and requires a 0-aux-stream engine with FP32 outputs. After
     // freeze, calls whose batch/source-resolution/channel-order match the FreezeSpec
-    // replay the graph; anything else falls back (no-throw) to the split gpu_decode
-    // path. The score threshold stays a live per-call knob (read by the captured
-    // decode kernel through mapped pinned memory, not baked into the graph).
+    // replay the graph; other valid calls use the split gpu_decode path. Unsupported
+    // capture configurations also use the split path. Runtime failures still throw.
+    // The score threshold remains configurable per call.
     bool full_pipeline_graph{false};
 
     // Preprocessing geometry (stretch by default; see PreprocessSpec).
@@ -68,8 +63,9 @@ struct DetectorOptions {
 
 // Steady-state configuration freeze() warms, captures, and locks for. Zeros mean
 // "engine defaults": batch = the engine's max batch, src_w/src_h = the engine input
-// size. src_w/src_h bound the LARGEST source frame the frozen detector will accept —
-// a larger frame after freeze() throws instead of allocating on the hot path.
+// size. src_w/src_h must be both zero or both positive. Positive dimensions bound
+// the largest source frame the frozen detector will accept — a larger frame after
+// freeze() throws instead of allocating on the hot path. Negative values are invalid.
 struct FreezeSpec {
     int batch{0};
     int src_w{0};
@@ -87,7 +83,8 @@ struct FreezeSpec {
 // Thread safety: not thread-safe. Use one instance per thread.
 class DFineDetector {
  public:
-    // Load engine + sidecar `<engine_path>.json`.
+    // Load an engine and auto-discover an optional sidecar: `<engine>.json`, then
+    // the same-stem JSON.
     explicit DFineDetector(const std::filesystem::path& engine_path,
                            const DetectorOptions& opts = {});
 
@@ -114,26 +111,20 @@ class DFineDetector {
     // Freeze the memory footprint: warm every grow-only buffer to peak (at `batch`,
     // default the engine max), then lock so the steady-state path performs no device
     // allocation and device addresses never move. A subsequent detect with a larger
-    // batch than the frozen peak throws. (Intensive-core P2.)
+    // batch than the frozen peak throws.
     //
-    // A spec with explicit src_w/src_h additionally bounds the steady-state SOURCE
-    // frame: the preprocessor staging is warmed to that peak and locked (a larger
-    // frame afterwards throws instead of allocating on the hot path), and it is the
-    // configuration DetectorOptions.full_pipeline_graph captures its graph for
-    // (intensive-core P3). freeze(batch) leaves the source size unbounded — the
-    // legacy P2 behavior, where an oversized frame still grows the preprocessor
-    // staging on the hot path (the one documented exception to the zero-allocation
-    // contract).
+    // Explicit src_w/src_h also bound and lock the preprocessing staging buffer and
+    // define the configuration captured by full_pipeline_graph. freeze(batch) leaves
+    // source dimensions unbounded, so a larger source may grow preprocessing staging.
     //
-    // Re-freezing with the same resolved configuration is a no-op; a DIFFERENT
+    // Re-freezing with the same resolved configuration is a no-op; a different
     // configuration throws (locked buffers cannot be re-sized — create a new
     // detector to reconfigure).
     void freeze(int batch = 0);
     void freeze(const FreezeSpec& spec);
 
-    // True once freeze(FreezeSpec) captured the full-pipeline graph (P3): matching
-    // calls now run as one cudaGraphLaunch. False = not requested / not capturable
-    // (aux streams, non-FP32 outputs) / capture failed — split path in effect.
+    // True once freeze(FreezeSpec) captured the full-pipeline graph. Matching calls
+    // then run as one cudaGraphLaunch; other calls use the split path.
     [[nodiscard]] bool full_pipeline_graph_active() const noexcept;
     // Number of calls served by full-graph replay so far (observability: a frozen
     // fixed-resolution pipeline should show this equal to its frame count).
@@ -147,8 +138,7 @@ class DFineDetector {
     // Display name for a class id: the sidecar's class_names entry when present,
     // else the COCO-80 table when the engine has 80 classes, else "class_<id>".
     [[nodiscard]] std::string class_name(int class_id) const;
-    // 1 for a static engine; the profile max for a dynamic engine; 0 if dynamic
-    // but the max is unknown (no/partial sidecar).
+    // 1 for a static engine; profile 0 max for a dynamic engine.
     [[nodiscard]] int max_batch() const noexcept;
 
     struct Timings {
@@ -177,7 +167,7 @@ class DFineDetector {
     std::unique_ptr<Impl> impl_;
 
     void init_(const std::filesystem::path& engine_path, const std::filesystem::path& meta_path,
-               const DetectorOptions& opts);
+               bool explicit_meta, const DetectorOptions& opts);
 };
 
 }  // namespace dfine

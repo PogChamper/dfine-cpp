@@ -7,6 +7,7 @@
 #include "testing.hpp"
 
 #include "dfine/core/engine_meta.hpp"
+#include "internal/engine_meta_detail.hpp"
 
 #include <cstdio>
 #include <filesystem>
@@ -57,13 +58,17 @@ int main(int argc, char** argv) {
     }
     // A realistic exporter sidecar parses and keeps its values.
     {
-        const EngineMeta m = EngineMeta::from_json_file(write_json(dir, R"({
+        const auto doc = dfine::detail::load_engine_meta(write_json(dir, R"({
             "variant": "s", "num_classes": 3, "num_queries": 300,
             "class_names": ["a", "b", "c"], "resize": "letterbox",
             "letterbox_anchor": "topleft", "letterbox_pad": 114,
-            "dynamic_batch": true, "min_batch": 1, "opt_batch": 1, "max_batch": 8})"));
+            "dynamic_batch": true, "min_batch": 1, "opt_batch": 1,
+            "max_batch": 8})"));
+        const EngineMeta& m = doc.meta;
         DFINE_CHECK(m.num_classes == 3 && m.class_names.size() == 3);
         DFINE_CHECK(m.resize == "letterbox" && m.letterbox_anchor == "topleft");
+        DFINE_CHECK(doc.has_dynamic_batch && doc.has_min_batch && doc.has_opt_batch &&
+                    doc.has_max_batch);
     }
 
     // Malformed JSON and unopenable files are errors (not silent defaults).
@@ -91,6 +96,8 @@ int main(int argc, char** argv) {
                        "task");
     DFINE_EXPECT_THROW((void)EngineMeta::from_json_file(write_json(dir, R"({"num_queries": 0})")),
                        "num_queries");
+    DFINE_EXPECT_THROW((void)EngineMeta::from_json_file(write_json(dir, R"({"input_h": 640})")),
+                       "together");
     DFINE_EXPECT_THROW(
         (void)EngineMeta::from_json_file(write_json(dir, R"({"color_order": "BRG"})")),
         "color_order");
@@ -99,16 +106,65 @@ int main(int argc, char** argv) {
                        "3-element");
     DFINE_EXPECT_THROW((void)EngineMeta::from_json_file(write_json(dir, R"({"std": 255})")),
                        "3-element");
+    DFINE_EXPECT_THROW((void)EngineMeta::from_json_file(write_json(dir, R"({"input_names": []})")),
+                       "input_names");
+    DFINE_EXPECT_THROW(
+        (void)EngineMeta::from_json_file(write_json(dir, R"({"output_names": ["logits", 3]})")),
+        "output_names");
+    DFINE_EXPECT_THROW(
+        (void)EngineMeta::from_json_file(write_json(dir, R"({"class_names": ["person", 3]})")),
+        "class_names");
+    DFINE_EXPECT_THROW(
+        (void)EngineMeta::from_json_file(write_json(dir, R"({"class_names": [""]})")),
+        "class_names");
+
+    // Labels may be supplied without duplicating num_classes. Their count is
+    // reconciled with the engine after its output shape has been resolved.
+    {
+        const auto labels_only =
+            dfine::detail::load_engine_meta(write_json(dir, R"({"class_names": ["a", "b", "c"]})"));
+        DFINE_CHECK(labels_only.meta.num_classes == 3 && labels_only.meta.class_names.size() == 3);
+        DFINE_CHECK(!labels_only.has_num_classes);
+        const fs::path roundtrip = write_json(dir, "{}");
+        labels_only.meta.to_json_file(roundtrip);
+        DFINE_CHECK(EngineMeta::from_json_file(roundtrip).class_names.size() == 3);
+    }
+
+    // Partial batch declarations stay coherent without asserting absent fields.
+    {
+        const auto min_only =
+            dfine::detail::load_engine_meta(write_json(dir, R"({"min_batch": 2})"));
+        DFINE_CHECK(min_only.meta.min_batch == 2 && min_only.meta.opt_batch == 2 &&
+                    min_only.meta.max_batch == 2);
+        DFINE_CHECK(min_only.has_min_batch && !min_only.has_opt_batch && !min_only.has_max_batch);
+
+        const auto opt_only =
+            dfine::detail::load_engine_meta(write_json(dir, R"({"opt_batch": 4})"));
+        DFINE_CHECK(opt_only.meta.min_batch == 1 && opt_only.meta.opt_batch == 4 &&
+                    opt_only.meta.max_batch == 4);
+        DFINE_CHECK(!opt_only.has_min_batch && opt_only.has_opt_batch && !opt_only.has_max_batch);
+
+        const auto max_only =
+            dfine::detail::load_engine_meta(write_json(dir, R"({"max_batch": 8})"));
+        DFINE_CHECK(max_only.meta.min_batch == 1 && max_only.meta.opt_batch == 1 &&
+                    max_only.meta.max_batch == 8);
+        DFINE_CHECK(!max_only.has_min_batch && !max_only.has_opt_batch && max_only.has_max_batch);
+    }
 
     // Presence tracking: a facts-only sidecar (no contract fields) loads and
     // asserts nothing, so the detector's cross-check must not invent defaults.
     {
-        const EngineMeta m = EngineMeta::from_json_file(
+        const auto partial = dfine::detail::load_engine_meta(
             write_json(dir, R"({"trt_version": "10.13", "max_batch": 8})"));
-        DFINE_CHECK(!m.has_input_hw && !m.has_num_classes && !m.has_num_queries);
-        const EngineMeta full = EngineMeta::from_json_file(
+        DFINE_CHECK(!partial.has_input_hw && !partial.has_num_classes && !partial.has_num_queries);
+        DFINE_CHECK(!partial.meta.has_input_hw && !partial.meta.has_num_classes &&
+                    !partial.meta.has_num_queries);
+        const auto full = dfine::detail::load_engine_meta(
             write_json(dir, R"({"num_classes": 3, "class_names": ["a","b","c"]})"));
         DFINE_CHECK(full.has_num_classes && !full.has_num_queries);
+        DFINE_CHECK(full.meta.has_num_classes && !full.meta.has_num_queries);
+        const auto doc = dfine::detail::load_engine_meta(write_json(dir, "{}"));
+        DFINE_CHECK(!doc.has_dynamic_batch && !doc.has_max_batch);
     }
 
     fs::remove_all(dir);

@@ -6,7 +6,7 @@
 // usage:
 //   dfine_bench --engine E.engine [--meta E.json] [--image img.jpg]
 //               [--src-size WxH] [--batches 1,2,4,8] [--warmup 20] [--iters 200]
-//               [--json out.json] [--threshold 0.001]
+//               [--json out.json] [--threshold 0.001] [execution mode]
 
 #include "cli_helpers.hpp"
 #include "image_io.hpp"
@@ -117,7 +117,7 @@ bool detections_equal(const std::vector<dfine::Detections>& a,
     return true;
 }
 
-// --pipeline-compare: the split gpu_decode path vs the P3 full-pipeline graph,
+// --pipeline-compare: the split gpu_decode path vs the full-pipeline graph,
 // measured through the public DFineDetector API. Two detector instances on the
 // same engine (one frozen with full_pipeline_graph), interleaved per iteration so
 // GPU clock drift cancels. Per-stage CPU columns come from Timings; every
@@ -232,7 +232,7 @@ int run_pipeline_compare(const std::filesystem::path& engine, const std::filesys
                     gt.p50 - st.p50, st.p50 > 0 ? (gt.p50 / st.p50 - 1) * 100 : 0);
         std::printf("  parity: %lld/%d iterations mismatched (%zu detections/frame)%s\n",
                     mismatches, iters, n_dets,
-                    mismatches == 0 ? " — byte-identical" : "  ** CAPTURE BUG **");
+                    mismatches == 0 ? " — byte-identical" : " — capture mismatch");
         if (mismatches != 0) return 1;
 
         // Live-threshold probe: a per-call override differing from the frozen
@@ -244,7 +244,7 @@ int run_pipeline_compare(const std::filesystem::path& engine, const std::filesys
         const auto pb = graph.detect_batch(frames, probe);
         const bool ok = detections_equal(pa, pb);
         std::printf("  threshold probe (%.4f vs frozen %.4f): %s\n", probe, threshold,
-                    ok ? "byte-identical" : "** MISMATCH — threshold baked into graph **");
+                    ok ? "byte-identical" : "mismatch (threshold was captured)");
         if (!ok) return 1;
     }
     return 0;
@@ -268,9 +268,14 @@ int main(int argc, char** argv) {
             if (a == "-h" || a == "--help") {
                 std::printf(
                     "usage: %s --engine E [--meta M] [--image img] [--src-size WxH] "
-                    "[--batches 1,2,4,8] [--warmup 20] [--iters 200] [--json out] [--cuda-graph]\n"
+                    "[--batches 1,2,4,8] [--warmup 20] [--iters 200] [--threshold 0.001] "
+                    "[--json out]\n"
                     "  --cuda-graph  replay enqueueV3+D2H from a captured CUDA graph "
-                    "(infer col then includes D2H)\n  dfine v%s\n",
+                    "(infer col then includes D2H)\n"
+                    "  --graph-compare  compare enqueue and graph replay in one run\n"
+                    "  --gpu-decode  benchmark device-side decode and compact result transfer\n"
+                    "  --pipeline-compare  compare split decode with the full-pipeline graph\n"
+                    "  dfine v%s\n",
                     argv[0], dfine::version());
                 return 0;
             } else if (starts_with(a, "--engine"))
@@ -312,7 +317,7 @@ int main(int argc, char** argv) {
             return 2;
         }
 
-        // Detector-level split-vs-full-graph comparison (P3); self-contained mode.
+        // Detector-level split-vs-full-graph comparison; self-contained mode.
         if (pipeline_compare) {
             return run_pipeline_compare(engine, meta, parse_batches(batches_arg), image, src_w,
                                         src_h, warmup, iters, threshold);
@@ -371,6 +376,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("dfine_bench: cannot resolve logits/boxes outputs");
         const int N = static_cast<int>(b_logits->shape.d[b_logits->shape.nbDims - 2]);
         const int C = static_cast<int>(b_logits->shape.d[b_logits->shape.nbDims - 1]);
+        const int K = dfine::detection_limit(N, C);
 
         cudaStream_t stream = session.stream();
         cudaEvent_t e0, e1, e2, e3;
@@ -427,10 +433,10 @@ int main(int argc, char** argv) {
             dfine::PostprocessParams pp;
             pp.num_queries = N;
             pp.num_classes = C;
-            pp.topk = N;
+            pp.topk = K;
             pp.threshold = threshold;
 
-            // GPU-decode scratch (Zero-D2H): replaces the full-logits D2H + CPU decode
+            // GPU-decode scratch replaces the full-logits D2H and CPU decode
             // with on-device kernels + a compact survivor D2H, folded into the d2h stage.
             dfine::DevPtr g_keys, g_vals, g_ko, g_vo, g_seg, g_temp, g_out, g_counts, g_scale;
             dfine::GpuDecodeScratch gdec;
@@ -452,7 +458,7 @@ int main(int argc, char** argv) {
                 gdec.seg_off =
                     static_cast<int*>(da(g_seg, static_cast<std::size_t>(B + 1) * sizeof(int)));
                 gdec.out = static_cast<dfine::DetectionGPU*>(
-                    da(g_out, static_cast<std::size_t>(B) * N * sizeof(dfine::DetectionGPU)));
+                    da(g_out, static_cast<std::size_t>(B) * K * sizeof(dfine::DetectionGPU)));
                 gdec.counts = static_cast<uint32_t*>(
                     da(g_counts, static_cast<std::size_t>(B) * sizeof(uint32_t)));
                 gdec.maps = static_cast<dfine::DecodeMapGPU*>(
@@ -468,7 +474,7 @@ int main(int argc, char** argv) {
                     gdec.maps, hs.data(), static_cast<std::size_t>(B) * sizeof(dfine::DecodeMapGPU),
                     cudaMemcpyHostToDevice, stream));
                 DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
-                gh_out.resize(static_cast<std::size_t>(B) * N);
+                gh_out.resize(static_cast<std::size_t>(B) * K);
                 gh_counts.resize(static_cast<std::size_t>(B));
             }
 
@@ -482,7 +488,7 @@ int main(int argc, char** argv) {
                         throw std::runtime_error("enqueueV3 failed");
                     DFINE_CUDA_CHECK(cudaEventRecord(e2, stream));
                     dfine::gpu_decode_enqueue(static_cast<const float*>(d_logits),
-                                              static_cast<const float*>(d_boxes), B, N, C, N,
+                                              static_cast<const float*>(d_boxes), B, N, C, K,
                                               threshold,
                                               /*threshold_dev=*/nullptr, gdec, stream);
                     DFINE_CUDA_CHECK(cudaMemcpyAsync(gh_out.data(), gdec.out,

@@ -11,6 +11,7 @@
 #include <ios>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace dfine {
 
@@ -55,15 +56,13 @@ TrtSession::~TrtSession() {
     //      pinned allocator is tied to the CUDA context.
     //   3) Destroy context, engine, runtime in that order (reset() makes the
     //      intent explicit and decouples it from field ordering).
-    //   4) Destroy the stream last.
-    if (stream_) {
-        cudaStreamSynchronize(stream_.get());
-    }
+    //   4) Return from the destructor body; stream_ then releases the drained stream.
+    (void)drain_noexcept();
     free_buffers_();
     context_.reset();
     engine_.reset();
     runtime_.reset();
-    // stream_ (CudaStream) destroys the stream last, after this body returns.
+    // stream_ is released after the explicit cleanup above, when member destruction begins.
 }
 
 void TrtSession::load_engine_(const std::filesystem::path& path) {
@@ -110,16 +109,45 @@ void TrtSession::set_device_memory(void* ptr, int64_t size) {
 
 void TrtSession::parse_bindings_() {
     const int n = engine_->getNbIOTensors();
+    if (n <= 0) throw std::runtime_error("dfine: TensorRT engine has no IO tensors");
     bindings_.reserve(n);
     for (int i = 0; i < n; ++i) {
         const char* name = engine_->getIOTensorName(i);
+        if (!name || !*name) {
+            throw std::runtime_error("dfine: TensorRT engine has an unnamed IO tensor");
+        }
         BindingInfo b;
         b.name = name;
         b.dtype = engine_->getTensorDataType(name);
-        b.is_input = engine_->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT;
-        // Context shape: fully resolved for static engines; dynamic inputs carry
-        // -1 dims until set_input_shape is called.
-        b.shape = context_->getTensorShape(name);
+        const auto mode = engine_->getTensorIOMode(name);
+        if (mode == nvinfer1::TensorIOMode::kNONE) {
+            throw std::runtime_error("dfine: tensor '" + b.name + "' has no IO mode");
+        }
+        b.is_input = mode == nvinfer1::TensorIOMode::kINPUT;
+        b.location = engine_->getTensorLocation(name);
+        b.format = engine_->getTensorFormat(name, 0);
+        const char* format_desc = engine_->getTensorFormatDesc(name, 0);
+        b.format_desc = format_desc ? format_desc : "";
+        b.vectorized_dim = engine_->getTensorVectorizedDim(name, 0);
+        if (b.location != nvinfer1::TensorLocation::kDEVICE) {
+            throw std::runtime_error("dfine: tensor '" + b.name +
+                                     "' is host-resident; the runtime requires device IO");
+        }
+        if (b.format != nvinfer1::TensorFormat::kLINEAR || b.vectorized_dim != -1) {
+            throw std::runtime_error("dfine: tensor '" + b.name +
+                                     "' is not linear and unvectorized (" + b.format_desc + ")");
+        }
+        if (engine_->isShapeInferenceIO(name)) {
+            throw std::runtime_error("dfine: tensor '" + b.name +
+                                     "' is shape-inference IO; the runtime supports execution "
+                                     "tensors only");
+        }
+        if (dtype_bytes(b.dtype) == 0) {
+            throw std::runtime_error("dfine: tensor '" + b.name + "' has unsupported dtype");
+        }
+        // Engine shape preserves declared dynamic axes while keeping fixed D-FINE
+        // output dimensions available before the first input shape is selected.
+        b.shape = engine_->getTensorShape(name);
         b.element_count = volume(b.shape);
         b.bytes = (b.element_count > 0)
                       ? static_cast<std::size_t>(b.element_count) * dtype_bytes(b.dtype)
@@ -130,6 +158,37 @@ void TrtSession::parse_bindings_() {
         else
             output_indices_.push_back(i);
     }
+}
+
+int TrtSession::num_optimization_profiles() const noexcept {
+    return engine_ ? engine_->getNbOptimizationProfiles() : 0;
+}
+
+InputProfileInfo TrtSession::input_profile(std::string_view name, int profile_index) const {
+    const int idx = find_index(name);
+    if (idx < 0) throw std::runtime_error("dfine: no such binding: " + std::string(name));
+    if (!bindings_[idx].is_input) {
+        throw std::runtime_error("dfine: not an input: " + bindings_[idx].name);
+    }
+    const int count = num_optimization_profiles();
+    if (profile_index < 0 || profile_index >= count) {
+        throw std::runtime_error("dfine: optimization profile index " +
+                                 std::to_string(profile_index) + " is outside [0, " +
+                                 std::to_string(count) + ")");
+    }
+    InputProfileInfo out;
+    out.min = engine_->getProfileShape(bindings_[idx].name.c_str(), profile_index,
+                                       nvinfer1::OptProfileSelector::kMIN);
+    out.opt = engine_->getProfileShape(bindings_[idx].name.c_str(), profile_index,
+                                       nvinfer1::OptProfileSelector::kOPT);
+    out.max = engine_->getProfileShape(bindings_[idx].name.c_str(), profile_index,
+                                       nvinfer1::OptProfileSelector::kMAX);
+    if (out.min.nbDims < 0 || out.opt.nbDims < 0 || out.max.nbDims < 0) {
+        throw std::runtime_error("dfine: cannot read optimization profile " +
+                                 std::to_string(profile_index) + " for input '" +
+                                 bindings_[idx].name + "'");
+    }
+    return out;
 }
 
 void TrtSession::allocate_buffers_() {
@@ -188,6 +247,41 @@ void TrtSession::require_clean_(const char* what) const {
         "again (a successful call restores service)");
 }
 
+void TrtSession::poison_(std::string reason) {
+    shape_state_ = ShapeState::kPoisoned;
+    poison_reason_ = std::move(reason);
+}
+
+void TrtSession::synchronize(const char* operation) {
+    if (shape_state_ == ShapeState::kPoisoned) require_clean_(operation);
+    cudaError_t err = cudaStreamSynchronize(stream_.get());
+    if (err == cudaSuccess && testing::failpoint("trt_session.sync_poison")) {
+        err = cudaErrorLaunchFailure;
+    }
+    if (err == cudaSuccess) return;
+
+    const std::string reason =
+        std::string{"CUDA stream failed during "} + operation + ": " + cudaGetErrorString(err);
+    poison_(reason);
+    throw std::runtime_error("dfine: TrtSession is unusable (" + reason +
+                             "); destroy and recreate the detector");
+}
+
+bool TrtSession::drain_noexcept() noexcept {
+    if (!stream_) return true;
+    const cudaError_t err = cudaStreamSynchronize(stream_.get());
+    if (err == cudaSuccess) return true;
+    if (shape_state_ != ShapeState::kPoisoned) {
+        shape_state_ = ShapeState::kPoisoned;
+        try {
+            poison_reason_ = std::string{"CUDA stream drain failed: "} + cudaGetErrorString(err);
+        } catch (...) {
+            poison_reason_.clear();
+        }
+    }
+    return false;
+}
+
 void TrtSession::throw_frozen_grow_(const std::string& binding, std::size_t bytes) const {
     throw std::runtime_error("dfine: TrtSession is frozen but binding '" + binding +
                              "' must grow to " + std::to_string(bytes) +
@@ -240,7 +334,7 @@ void TrtSession::set_input_shape(std::string_view name, const nvinfer1::Dims& di
     // Pending async work may still be reading the buffers a grow would replace.
     // Transitions are cold (steady state takes the fast path above), so a full
     // quiesce is cheap and removes the free-while-in-flight hazard.
-    DFINE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+    synchronize("shape transition");
 
     // From here until commit the context can diverge from bindings_. Mark dirty
     // FIRST: if anything below throws, the fast path must not trust the cache
@@ -360,12 +454,21 @@ void TrtSession::set_input(std::string_view name, const void* host_data, std::si
                                      cudaMemcpyHostToDevice, stream_.get()));
 }
 
+void TrtSession::enqueue(const char* operation) {
+    require_clean_(operation);
+    const bool accepted =
+        !testing::failpoint("trt_session.enqueue_poison") && context_->enqueueV3(stream_.get());
+    if (accepted) return;
+
+    const std::string reason = std::string{"TensorRT enqueueV3 failed during "} + operation;
+    poison_(reason);
+    throw std::runtime_error("dfine: TrtSession is unusable (" + reason +
+                             "); destroy and recreate the detector");
+}
+
 void TrtSession::infer() {
-    require_clean_("infer");
-    if (!context_->enqueueV3(stream_.get())) {
-        throw std::runtime_error("dfine: enqueueV3 failed");
-    }
-    DFINE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+    enqueue("inference");
+    synchronize("inference");
 }
 
 void* TrtSession::device_buffer(std::string_view name) {
@@ -404,7 +507,7 @@ void TrtSession::get_output(std::string_view name, void* host_data, std::size_t 
     }
     DFINE_CUDA_CHECK(cudaMemcpyAsync(host_buffers_[idx].get(), device_buffers_[idx].get(), bytes,
                                      cudaMemcpyDeviceToHost, stream_.get()));
-    DFINE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+    synchronize("output copy");
     std::memcpy(host_data, host_buffers_[idx].get(), bytes);
 }
 
@@ -426,13 +529,13 @@ void TrtSession::get_output_f32(std::string_view name, float* host_float32,
         // Native FP32 — D-FINE's hot path (the decoder is kept FP32).
         DFINE_CUDA_CHECK(cudaMemcpyAsync(host_buffers_[idx].get(), device_buffers_[idx].get(),
                                          b.bytes, cudaMemcpyDeviceToHost, stream_.get()));
-        DFINE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        synchronize("output copy");
         std::memcpy(host_float32, host_buffers_[idx].get(), b.bytes);
     } else if (b.dtype == nvinfer1::DataType::kHALF) {
         // FP16 — copy raw bytes then convert on CPU (portable IEEE-754 unpack).
         DFINE_CUDA_CHECK(cudaMemcpyAsync(host_buffers_[idx].get(), device_buffers_[idx].get(),
                                          b.bytes, cudaMemcpyDeviceToHost, stream_.get()));
-        DFINE_CUDA_CHECK(cudaStreamSynchronize(stream_.get()));
+        synchronize("output copy");
         const auto* src = static_cast<const std::uint16_t*>(host_buffers_[idx].get());
         for (std::size_t i = 0; i < element_count; ++i) {
             const std::uint16_t h = src[i];

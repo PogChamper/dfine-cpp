@@ -1,7 +1,7 @@
 // dfine_detect — run the D-FINE detector on a single image and print detections.
 //
 // usage: dfine_detect --engine E.engine --image img.jpg [--meta E.json]
-//                     [--threshold 0.5] [--topk 300]
+//                     [--threshold 0.5] [--cuda-graph] [--gpu-decode]
 
 #include "cli_helpers.hpp"
 #include "image_io.hpp"
@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
             if (a == "-h" || a == "--help") {
                 std::printf(
                     "usage: %s --engine E.engine --image img.jpg [--meta E.json] "
-                    "[--threshold 0.5] [--cuda-graph]\n  dfine v%s\n",
+                    "[--threshold 0.5] [--cuda-graph] [--gpu-decode]\n  dfine v%s\n",
                     argv[0], dfine::version());
                 return 0;
             } else if (starts_with(a, "--engine"))

@@ -60,7 +60,7 @@ __global__ void k_decode_topk(const float* __restrict__ keys_sorted,
 
     // threshold_dev (mapped pinned) is read at EXECUTION time — one zero-copy load
     // per block, broadcast through shared memory — so a captured graph replays with
-    // the caller's current threshold instead of the value baked at capture (P3).
+    // the caller's current threshold instead of the value baked at capture.
     __shared__ unsigned int s_count;
     __shared__ float s_thr;
     if (threadIdx.x == 0) {

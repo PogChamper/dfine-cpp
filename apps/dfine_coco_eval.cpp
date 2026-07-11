@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
                     "[--meta M] [--threshold 0.001] [--batch 1] [--cuda-graph] "
                     "[--gpu-decode] [--own-device-memory] [--freeze] "
                     "[--full-graph] [--filter-res WxH]\n"
-                    "  --full-graph  freeze + capture the full-pipeline CUDA graph (P3); "
+                    "  --full-graph  freeze + capture the full-pipeline CUDA graph; "
                     "requires a fixed source\n                resolution — pair with "
                     "--filter-res so every image matches the frozen size\n"
                     "  --filter-res  skip images whose size differs from WxH (also the "
@@ -112,10 +112,10 @@ int main(int argc, char** argv) {
 
         dfine::DetectorOptions opts;
         opts.threshold = threshold;
-        opts.use_cuda_graph = cuda_graph;       // validates the graph path produces == mAP
-        opts.gpu_decode = gpu_decode;           // validates the GPU-decode path == CPU-decode mAP
-        opts.own_device_memory = own_dev_mem;   // validates the kUSER_MANAGED activation path
-        opts.full_pipeline_graph = full_graph;  // validates the P3 single-launch path
+        opts.use_cuda_graph = cuda_graph;      // validates the graph path produces == mAP
+        opts.gpu_decode = gpu_decode;          // validates the GPU-decode path == CPU-decode mAP
+        opts.own_device_memory = own_dev_mem;  // validates the kUSER_MANAGED activation path
+        opts.full_pipeline_graph = full_graph;
         if (letterbox) {
             opts.preprocess.resize = dfine::PreprocessSpec::Resize::kLetterbox;
             opts.preprocess.anchor_topleft = lb_topleft;

@@ -3,7 +3,7 @@
     import numpy as np
     from dfine import Detector
 
-    with Detector("dfine_m_fp16_st.engine", threshold=0.4) as det:
+    with Detector("dfine_m_slim.engine", threshold=0.4) as det:
         for d in det.detect(rgb_hwc_uint8):
             print(d.class_name, d.score, d.box)
 
@@ -74,21 +74,22 @@ class Detector:
     engine_path : str
         Path to the ``.engine`` file.
     meta_path : str, optional
-        Path to the ``.json`` sidecar; defaults to ``<engine_path>.json``.
+        Explicit ``.json`` sidecar. When omitted, the runtime probes
+        ``<engine>.json`` and then the same-stem JSON.
     threshold : float
         Default score threshold (overridable per :meth:`detect` call).
     use_cuda_graph : bool
         Opt-in CUDA-graph replay (helps batch-1 latency on 0-aux-stream engines;
         a safe no-op otherwise).
     gpu_decode : bool
-        Zero-D2H decode on the GPU: only surviving detections cross PCIe.
+        GPU decode: only surviving detections cross PCIe.
         Requires FP32 engine outputs (falls back to the CPU decode otherwise).
     own_device_memory : bool
         Detector-owned TensorRT activation block (part of the frozen-memory
         contract; see :meth:`freeze`).
     full_pipeline_graph : bool
-        One ``cudaGraphLaunch`` per frame covering H2D -> preprocess -> infer ->
-        decode -> D2H. Implies ``gpu_decode``; the capture happens inside
+        One ``cudaGraphLaunch`` per matching call covering H2D -> preprocess ->
+        infer -> decode -> D2H. Implies ``gpu_decode``; capture happens inside
         :meth:`freeze` and needs a ``--max-aux-streams 0`` engine. Calls that do
         not match the frozen batch/source size/channel order fall back to the
         split path.
@@ -101,8 +102,7 @@ class Detector:
     letterbox_pad : int
         Padding value 0..255 (default 114, gray).
     letterbox_upscale : bool
-        False = paste 1:1 when the frame already fits (production smart_resize
-        semantics).
+        False = do not upscale an image that already fits the engine canvas.
     is_bgr : bool
         Default channel order of images passed to :meth:`detect` (False = RGB).
     class_names : sequence of str, optional

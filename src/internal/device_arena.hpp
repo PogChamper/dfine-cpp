@@ -1,13 +1,13 @@
 #pragma once
 
 // DeviceArena — a one-shot device/host memory arena for the frozen-pipeline
-// contract (intensive-core P2). Every buffer the detector needs at steady state
+// contract. Every buffer the detector needs at steady state
 // is sized up front (all maxima are computable without running: TRT's activation
 // size comes from getDeviceMemorySize, binding/scratch sizes from max_batch), so
 // the arena makes exactly ONE cudaMalloc and hands out slices of it. After lock()
 // any further reservation is a contract breach (policy: warn/throw) — this is what
 // guarantees no allocation on the hot path, no fragmentation, and stable addresses
-// for CUDA-graph capture (P3).
+// for CUDA Graph capture.
 //
 // Usage:
 //   DeviceArena a;                          // Kind::kDevice by default

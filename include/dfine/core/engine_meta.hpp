@@ -16,8 +16,8 @@ inline constexpr int kEngineMetaSchemaVersion = 1;
 // extra descriptive fields (reg_max, feat_strides, …) the scripts also emit.
 //
 // D-FINE defaults differ from ImageNet-style detectors on purpose:
-//   mean = {0,0,0}, std = {1,1,1}  → preprocessing is `/255` ONLY. Feeding
-//   ImageNet mean/std here collapses mAP (see docs/HANDOFF.md gotcha #3).
+//   mean = {0,0,0}, std = {1,1,1}  → preprocessing is `/255` only. ImageNet
+//   normalization is incompatible with the published weights (docs/RUNTIME.md).
 struct EngineMeta {
     int schema_version{kEngineMetaSchemaVersion};
     std::string variant;  // "n"/"s"/"m"/"l"/"x" (informational)
@@ -51,9 +51,8 @@ struct EngineMeta {
     // Empty = unknown; consumers fall back to COCO-80 when num_classes == 80.
     std::vector<std::string> class_names;
 
-    // Which contract fields the sidecar actually ASSERTED (vs defaulted): the
-    // detector's sidecar-vs-engine cross-check may only flag a conflict on a
-    // present value — an absent field is unknown, not a claim of the default.
+    // Distinguish fields declared by the sidecar from reader defaults. These
+    // members are part of the public v0.3.3 layout and must remain in place.
     bool has_input_hw{false};
     bool has_num_classes{false};
     bool has_num_queries{false};

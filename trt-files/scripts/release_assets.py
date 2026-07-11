@@ -27,6 +27,36 @@ from pathlib import Path
 
 SIZES = ("n", "s", "m", "l", "x")
 RECIPES = {"op19": "fp32", "slim": "fp16"}  # recipe suffix -> precision its sidecar must carry
+
+# The frozen model pack first published in v0.3.1: the ten ONNX graphs and their ten
+# sidecars, byte-identical through v0.3.3 (verified by every release's download-back
+# check). These artifacts predate the current sidecar provenance schema, so they cannot
+# — and must not — be validated against it: their exporter/converter hashes belong to the
+# tooling that actually produced them, which no longer exists in the tree. `assemble
+# --frozen-model-pack` republishes exactly this set, admitting it by its cryptographic
+# identity rather than by a schema it precedes. Any single-byte drift fails the build.
+FROZEN_MODEL_PACK = {
+    "dfine_l_op19.json": "9f982f3cb4b73364d92d48cc76bc861d6a4f015c281822ca7a645ed0d48f257a",
+    "dfine_l_op19.onnx": "c3d8f4b3fd71b4b54ae3edd3f80d6841b28c98125c9b848f2c648cd8e4b922d4",
+    "dfine_l_slim.json": "b9834387fdd3257fe1e555a4b9505301114b963052a46144d88a8931f81d4ff5",
+    "dfine_l_slim.onnx": "6d66358f2dff1ae313dfe31cae61cf9de0a0c0670d355d6cd2e963bd12b7b19a",
+    "dfine_m_op19.json": "83c60a44c5e6c9fe14d5c45149f5f43e4db5650c66b2204c9fbfebf3c0946b17",
+    "dfine_m_op19.onnx": "902bfdd825e804912d094f78a583753eea89caa14aa4b397775e2136538a87bb",
+    "dfine_m_slim.json": "be08d7ac7be7f4733ae87ae0f6de3f2d303ab294ac987f5880a8cb80561453c5",
+    "dfine_m_slim.onnx": "0f0b8e9ecafa3112d3f7d983e52809c92514836ee1328b519fe81fe25abc7419",
+    "dfine_n_op19.json": "72565d06749fca3c6b811d75372edbb573e98a6f00858708013f77d9b5672c76",
+    "dfine_n_op19.onnx": "464bd787ef55ad59a84a948b986152cf75e410e2cd463f2dd03f737a1540ae78",
+    "dfine_n_slim.json": "5d7e477e24b392863972961afa1220705a3fa5ed5a611af9228e22c15f2bbc7f",
+    "dfine_n_slim.onnx": "dec936afa120cbce3d9d3bd14eb06cdf6fccc3b92f2b44093e459ebbf2a41cbe",
+    "dfine_s_op19.json": "29ea4ac444094fed84baf7e2e636d02cf8fe99965dfe27d57065d443647d15df",
+    "dfine_s_op19.onnx": "300db0c870f3e7824317d090f4d9447cf619230ac1c3e6fce1b94b9ad25a4d2c",
+    "dfine_s_slim.json": "f1e53551596b5ae883cef4093ad2f765818fee82c65a92294a23e7fb9438fcee",
+    "dfine_s_slim.onnx": "66c28cb3c2fd700bd97680f4e58f02850fa81112bb85c353bf348806f2e09dc6",
+    "dfine_x_op19.json": "d42c28284432f5239904a0d578f0d0738d1148f210d1a07cad441108241d1def",
+    "dfine_x_op19.onnx": "2abac2d64e05e90f3d5225e1bf3762e0d1df0f36c059f5fc28f917ad6be405d6",
+    "dfine_x_slim.json": "8819a448fe4531fa6d066c65853ffe2f7eae587e73b7690c007cc72e28f9d35d",
+    "dfine_x_slim.onnx": "7f5e5d6648914139f54f6d8615fabc396274c402c7d8f2142266496bf8d3446e",
+}
 SHA256 = re.compile(r"[0-9a-f]{64}")
 GIT_COMMIT = re.compile(r"[0-9a-f]{40}")
 VERSION = re.compile(r"[0-9]+[.][0-9]+[.][0-9]+(?:[A-Za-z0-9.+-]*)")
@@ -515,6 +545,24 @@ def _compare_artifact_contracts(fp32: dict, slim: dict, slim_sidecar: Path) -> N
         raise SystemExit(f"{slim_sidecar.name}: base tool_versions differ from its FP32 source")
 
 
+def _verify_frozen_model_pack(staging: Path) -> None:
+    """Admit the previously published model pack by its pinned hashes. The set is
+    already complete (checked before staging); here every file must reproduce its
+    FROZEN_MODEL_PACK digest exactly, so no re-exported or drifted artifact can slip
+    into a frozen republish."""
+    mismatched = []
+    for name, expected in sorted(FROZEN_MODEL_PACK.items()):
+        actual = hashlib.sha256((staging / name).read_bytes()).hexdigest()
+        if actual != expected:
+            mismatched.append(name)
+    if mismatched:
+        raise SystemExit(
+            "--frozen-model-pack: these files do not match the published pack "
+            f"({', '.join(mismatched)}); a frozen republish must be byte-identical. "
+            "Omit --frozen-model-pack to assemble a freshly exported pack."
+        )
+
+
 def assemble(args: argparse.Namespace) -> None:
     if not VERSION.fullmatch(args.version):
         raise SystemExit(f"invalid --version {args.version!r}")
@@ -549,23 +597,27 @@ def assemble(args: argparse.Namespace) -> None:
         staged_wheel = staging / wheel.name
         shutil.copy2(wheel, staged_wheel)
         _validate_wheel(staged_wheel, args.version)
-        validated_revision = _validated_model_revision()
 
-        for size in SIZES:
-            fp32_sidecar = staging / f"dfine_{size}_op19.json"
-            slim_sidecar = staging / f"dfine_{size}_slim.json"
-            fp32_meta = _validate_sidecar(fp32_sidecar, size, "fp32", validated_revision)
-            slim_meta = _validate_sidecar(slim_sidecar, size, "fp16", validated_revision)
-            fp32_graph = staging / f"dfine_{size}_op19.onnx"
-            slim_graph = staging / f"dfine_{size}_slim.onnx"
-            _validate_onnx(fp32_graph, fp32_meta, "fp32")
-            _validate_onnx(slim_graph, slim_meta, "fp16")
-            source_hash = hashlib.sha256(fp32_graph.read_bytes()).hexdigest()
-            if slim_meta["source_onnx_sha256"] != source_hash:
-                raise SystemExit(
-                    f"{slim_sidecar.name}: source_onnx_sha256 does not match dfine_{size}_op19.onnx"
-                )
-            _compare_artifact_contracts(fp32_meta, slim_meta, slim_sidecar)
+        if args.frozen_model_pack:
+            _verify_frozen_model_pack(staging)
+        else:
+            validated_revision = _validated_model_revision()
+            for size in SIZES:
+                fp32_sidecar = staging / f"dfine_{size}_op19.json"
+                slim_sidecar = staging / f"dfine_{size}_slim.json"
+                fp32_meta = _validate_sidecar(fp32_sidecar, size, "fp32", validated_revision)
+                slim_meta = _validate_sidecar(slim_sidecar, size, "fp16", validated_revision)
+                fp32_graph = staging / f"dfine_{size}_op19.onnx"
+                slim_graph = staging / f"dfine_{size}_slim.onnx"
+                _validate_onnx(fp32_graph, fp32_meta, "fp32")
+                _validate_onnx(slim_graph, slim_meta, "fp16")
+                source_hash = hashlib.sha256(fp32_graph.read_bytes()).hexdigest()
+                if slim_meta["source_onnx_sha256"] != source_hash:
+                    raise SystemExit(
+                        f"{slim_sidecar.name}: source_onnx_sha256 does not match "
+                        f"dfine_{size}_op19.onnx"
+                    )
+                _compare_artifact_contracts(fp32_meta, slim_meta, slim_sidecar)
 
         names = sorted(expected | {wheel.name})
         lines = [
@@ -684,6 +736,13 @@ def parse_args() -> argparse.Namespace:
         "--version", required=True, help="release version without the v prefix, e.g. 0.4.0"
     )
     a.add_argument("--out", required=True, help="new or empty staging directory for the upload")
+    a.add_argument(
+        "--frozen-model-pack",
+        action="store_true",
+        help="republish the pinned v0.3.1 model pack: admit the 20 files by their "
+        "published SHA-256 instead of the current sidecar provenance schema (which they "
+        "predate). The wheel is still fully validated.",
+    )
     v = sub.add_parser("verify", help="download a published release and run sha256sum -c on it")
     v.add_argument("--tag", required=True, help="release tag, e.g. v0.3.1")
     v.add_argument("--repo", default=None, help="OWNER/NAME (default: `gh repo view` in the cwd)")

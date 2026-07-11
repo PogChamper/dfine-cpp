@@ -179,6 +179,7 @@ def release(tmp_path):
         wheel=str(tmp_path / WHEEL),
         out=str(tmp_path / "out"),
         version=VERSION,
+        frozen_model_pack=False,
     )
 
 
@@ -467,3 +468,27 @@ def test_unparseable_sidecar_refused(release):
     (Path(release.input) / "dfine_l_slim.json").write_text("{not json")
     with pytest.raises(SystemExit, match="parsed"):
         ra.assemble(release)
+
+
+def test_frozen_model_pack_manifest_is_complete():
+    # Exactly the 20-file release grammar, and every digest is a sha256.
+    assert set(ra.FROZEN_MODEL_PACK) == ra._model_asset_names()
+    assert all(ra.SHA256.fullmatch(d) for d in ra.FROZEN_MODEL_PACK.values())
+
+
+def test_frozen_model_pack_rejects_files_that_are_not_the_published_pack(release):
+    # The fixture builds freshly-exported sidecars, which by construction do not
+    # match the pinned published digests — a frozen republish must be byte-exact.
+    release.frozen_model_pack = True
+    with pytest.raises(SystemExit, match="do not match the published pack"):
+        ra.assemble(release)
+
+
+def test_verify_frozen_model_pack_reports_the_drifted_file(tmp_path):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    for name in ra.FROZEN_MODEL_PACK:
+        # Content that cannot hash to the pinned value: names the drifted file.
+        (staging / name).write_bytes(name.encode())
+    with pytest.raises(SystemExit, match="dfine_"):
+        ra._verify_frozen_model_pack(staging)

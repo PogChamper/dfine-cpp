@@ -20,7 +20,8 @@ REPO = Path(__file__).resolve().parents[2]
 @pytest.fixture(scope="module")
 def exporter():
     spec = importlib.util.spec_from_file_location(
-        "export_dfine_onnx", REPO / "trt-files/scripts/export_dfine_onnx.py")
+        "export_dfine_onnx", REPO / "trt-files/scripts/export_dfine_onnx.py"
+    )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -53,14 +54,24 @@ def test_select_state_prefers_ema(exporter):
     assert state is ema and name == "checkpoint root"
 
 
-def test_strict_exact_load(exporter, tmp_path):
+def test_strict_exact_load(exporter, tmp_path, monkeypatch):
     model = TinyHead()
     ckpt = save_ckpt(tmp_path, {"model": TinyHead().state_dict()})
+    reads = 0
+    read_bytes = Path.read_bytes
+
+    def counted_read(path):
+        nonlocal reads
+        reads += 1
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read)
     report = exporter.load_checkpoint_state(model, ckpt, allow_partial=False)
     assert report["mode"] == "strict"
     assert report["loaded"] == len(model.state_dict())
     assert report["missing"] == 0 and report["shape_mismatch"] == 0
     assert len(report["sha256"]) == 64
+    assert reads == 1
 
 
 def test_zero_matching_keys_aborts(exporter, tmp_path):
@@ -156,4 +167,10 @@ def test_dynamic_batch_check_requires_onnxruntime(exporter, monkeypatch):
     with pytest.raises(SystemExit, match="requires numpy and onnxruntime"):
         exporter._verify_dynamic_batch_runs(Path("unused.onnx"), {})
     with pytest.raises(SystemExit, match="requires numpy and onnxruntime"):
-        exporter.export(argparse.Namespace(trace_batch=2))
+        exporter.export(
+            argparse.Namespace(
+                trace_batch=2,
+                output="model.onnx",
+                checkpoint="model.pt",
+            )
+        )

@@ -27,9 +27,12 @@ native LayerNormalization node, which compiles correctly.
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
+import importlib.metadata
 import json
-import sys
-from collections import defaultdict
+import os
+import secrets
 from pathlib import Path
 
 import onnx
@@ -38,7 +41,6 @@ from onnxconverter_common import float16
 
 FLOAT_TYPES = (TensorProto.FLOAT, TensorProto.FLOAT16)
 STOP_OPS = {"MatMul", "Gemm", "Softmax", "Conv"}
-import os
 _EXTRA = tuple(x for x in os.environ.get("SURGICAL_EXTRA_SCOPES", "").split(",") if x)
 FDR_SCOPES = _EXTRA + (
     "/model/decoder/decoder/integral",
@@ -49,33 +51,276 @@ FDR_SCOPES = _EXTRA + (
 )
 
 
+def _adjacent_temp(target: str | Path, suffix: str = ".tmp") -> Path:
+    """Create a unique staging file on the target filesystem."""
+    target = Path(target)
+    try:
+        existing_mode = target.stat().st_mode & 0o777
+    except FileNotFoundError:
+        existing_mode = None
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    for _ in range(128):
+        path = target.parent / f".{target.name}.{secrets.token_hex(8)}{suffix}"
+        try:
+            mode = (existing_mode | 0o600) if existing_mode is not None else 0o666
+            fd = os.open(path, flags, mode)
+        except FileExistsError:
+            continue
+        try:
+            if existing_mode is not None:
+                os.fchmod(fd, existing_mode | 0o600)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        finally:
+            os.close(fd)
+        return path
+    raise FileExistsError(f"cannot allocate adjacent staging file for {target}")
 
-def _publish_pair(graph_tmp, graph_out, sidecar_text, sidecar_out, tag):
-    """Publish a staged graph and its (optional) sidecar with the smallest
-    possible inconsistency window: the sidecar is staged BEFORE either swap,
-    then both land via two adjacent atomic renames (each rename atomic; the
-    pair is not jointly transactional — the window is two syscalls).
-    sidecar_text=None means this producer has no contract to carry through;
-    a sidecar already sitting at sidecar_out would then describe the PREVIOUS
-    graph, so it is removed in the same publish step."""
+
+def _link_backup(path: Path) -> Path | None:
+    """Preserve an existing output without copying a potentially large artifact."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    backup = _adjacent_temp(path, ".previous")
+    backup.unlink()
+    try:
+        if path.is_symlink():
+            backup.symlink_to(os.readlink(path))
+        else:
+            os.link(path, backup)
+    except BaseException:
+        backup.unlink(missing_ok=True)
+        raise
+    return backup
+
+
+def _restore_output(path: Path, backup: Path | None) -> None:
+    if backup is None:
+        path.unlink(missing_ok=True)
+    else:
+        os.replace(backup, path)
+
+
+def _cleanup_publish_files(paths: tuple[Path | None, ...], tag: str) -> None:
+    for path in paths:
+        if path is None:
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"[{tag}] warning: cannot remove staging file {path}: {exc}")
+
+
+def _publish_pair(
+    graph_tmp,
+    graph_out,
+    sidecar_text,
+    sidecar_out,
+    tag,
+    stale_sidecar: Path | None = None,
+):
+    """Publish a staged artifact pair with rollback and writer serialization.
+
+    Cooperative producers are serialized, and ordinary publication failures
+    restore the complete previous pair. The filesystem updates are individually
+    atomic, not crash-transactional; interruption between them can leave a mixed
+    artifact.
+    """
     graph_tmp, graph_out = Path(graph_tmp), Path(graph_out)
     sidecar_out = Path(sidecar_out)
-    sc_tmp = None
+    stale_sidecar = Path(stale_sidecar) if stale_sidecar is not None else None
+    outputs = (graph_out, sidecar_out) + ((stale_sidecar,) if stale_sidecar else ())
+    parent = graph_out.parent.resolve()
+    if graph_tmp.parent.resolve() != parent or any(
+        path.parent.resolve() != parent for path in outputs
+    ):
+        raise ValueError("published artifacts and staging files must share one directory")
+    if len({os.path.abspath(path) for path in (graph_tmp, *outputs)}) != 1 + len(outputs):
+        raise ValueError("published artifact paths must be distinct")
+
+    sidecar_tmp = None
     if sidecar_text is not None:
-        sc_tmp = Path(str(sidecar_out) + ".tmp")
-        sc_tmp.write_text(sidecar_text)
-    os.replace(graph_tmp, graph_out)
-    if sc_tmp is not None:
-        os.replace(sc_tmp, sidecar_out)
-    elif sidecar_out.exists():
-        sidecar_out.unlink()
+        sidecar_tmp = _adjacent_temp(sidecar_out)
+        try:
+            sidecar_tmp.write_text(sidecar_text)
+        except BaseException:
+            _cleanup_publish_files((graph_tmp, sidecar_tmp), tag)
+            raise
+
+    lock_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        lock_fd = os.open(parent, lock_flags)
+    except BaseException:
+        _cleanup_publish_files((graph_tmp, sidecar_tmp), tag)
+        raise
+    backups: dict[Path, Path | None] = {}
+    changed: list[Path] = []
+    preserve_backups = False
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        for staged, target in ((graph_tmp, graph_out), (sidecar_tmp, sidecar_out)):
+            if staged is None:
+                continue
+            try:
+                output_mode = target.stat().st_mode & 0o777
+            except FileNotFoundError:
+                continue
+            staged.chmod(output_mode)
+        for path in outputs:
+            backups[path] = _link_backup(path)
+        try:
+            changed.append(graph_out)
+            os.replace(graph_tmp, graph_out)
+            changed.append(sidecar_out)
+            if sidecar_tmp is None:
+                sidecar_out.unlink(missing_ok=True)
+            else:
+                os.replace(sidecar_tmp, sidecar_out)
+            if stale_sidecar is not None:
+                changed.append(stale_sidecar)
+                stale_sidecar.unlink(missing_ok=True)
+        except BaseException as publish_error:
+            rollback_errors = []
+            for path in reversed(changed):
+                try:
+                    _restore_output(path, backups.get(path))
+                except OSError as exc:
+                    rollback_errors.append(f"{path}: {exc}")
+            if rollback_errors:
+                preserve_backups = True
+                raise RuntimeError(
+                    "artifact publication failed and rollback also failed: "
+                    + "; ".join(rollback_errors)
+                ) from publish_error
+            raise
+    finally:
+        _cleanup_publish_files(
+            (graph_tmp, sidecar_tmp, *(() if preserve_backups else backups.values())), tag
+        )
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+    if sidecar_text is None and backups.get(sidecar_out) is not None:
         print(f"[{tag}] removed stale sidecar {sidecar_out} (source has none)")
+
+
+def _validated_conversion_paths(source: str | Path, output: str | Path) -> tuple[Path, Path]:
+    """Reserve distinct graph, sidecar, and staging paths."""
+    source_path = Path(source).resolve()
+    output_path = Path(output).resolve()
+    if source_path.suffix.lower() != ".onnx":
+        raise SystemExit(f"[surgical] --onnx must end in .onnx (got {source_path})")
+    if output_path.suffix.lower() != ".onnx":
+        raise SystemExit(f"[surgical] --output must end in .onnx (got {output_path})")
+    paths = {
+        "source ONNX": source_path,
+        "source sidecar": source_path.with_suffix(".json").resolve(),
+        "output ONNX": output_path,
+        "output staging file": Path(str(output_path) + ".tmp").resolve(),
+        "output sidecar": output_path.with_suffix(".json").resolve(),
+        "sidecar staging file": Path(str(output_path.with_suffix(".json")) + ".tmp").resolve(),
+    }
+    seen: dict[Path, str] = {}
+    for label, path in paths.items():
+        if previous := seen.get(path):
+            raise SystemExit(
+                f"[surgical] artifact path collision: {previous} and {label} resolve to {path}"
+            )
+        seen[path] = label
+    return source_path, output_path
+
+
+def _conversion_overrides() -> dict:
+    overrides = {}
+    if _EXTRA:
+        overrides["extra_fp32_scopes"] = list(_EXTRA)
+    fp16_only = tuple(x for x in os.environ.get("SURGICAL_FP16_ONLY", "").split(",") if x)
+    if fp16_only:
+        overrides["fp16_only_scopes"] = list(fp16_only)
+    return overrides
+
+
+def _converted_sidecar(
+    meta: dict,
+    source_bytes: bytes,
+    slim: bool,
+    overrides: dict | None = None,
+) -> dict:
+    """Carry the export contract forward and fingerprint this conversion."""
+    tool_versions = meta.get("tool_versions", {})
+    if not isinstance(tool_versions, dict):
+        raise SystemExit("[surgical] source sidecar tool_versions must be an object")
+    converted = dict(meta)
+    overrides = overrides or {}
+    converted.update(
+        precision="fp16",
+        precision_mode=(
+            "strongly_typed_onnx_fp16_surgical_experimental"
+            if overrides
+            else (
+                "strongly_typed_onnx_fp16_surgical_slim"
+                if slim
+                else "strongly_typed_onnx_fp16_surgical_decoder"
+            )
+        ),
+        source_onnx_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        converter_sha256=hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest(),
+        tool_versions={
+            **tool_versions,
+            "onnxconverter-common": importlib.metadata.version("onnxconverter-common"),
+        },
+    )
+    if overrides:
+        converted["conversion_overrides"] = overrides
+    else:
+        converted.pop("conversion_overrides", None)
+    return converted
+
+
+def _load_source_onnx(source_path: Path) -> tuple[onnx.ModelProto, bytes]:
+    """Load and fingerprint one immutable snapshot of the source graph."""
+    source_bytes = source_path.read_bytes()
+    return onnx.load_model_from_string(source_bytes), source_bytes
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
+def _load_source_artifact(source_path: Path) -> tuple[onnx.ModelProto, bytes, dict | None]:
+    """Snapshot a source graph and sidecar before conversion starts."""
+    sidecar = source_path.with_suffix(".json")
+    before = _file_identity(source_path), _file_identity(sidecar)
+    model, source_bytes = _load_source_onnx(source_path)
+    sidecar_bytes = sidecar.read_bytes() if before[1] is not None else None
+    after = _file_identity(source_path), _file_identity(sidecar)
+    if before != after:
+        raise SystemExit("[surgical] source ONNX artifact changed while it was being read; retry")
+    if sidecar_bytes is None:
+        return model, source_bytes, None
+    try:
+        meta = json.loads(sidecar_bytes)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"[surgical] cannot parse source sidecar {sidecar}: {exc}") from exc
+    if not isinstance(meta, dict):
+        raise SystemExit("[surgical] source sidecar must contain a JSON object")
+    return model, source_bytes, meta
+
 
 def is_glue_leaf(name: str) -> bool:
     """Leaf op directly under /model/decoder/ or /model/decoder/decoder/."""
     for prefix in ("/model/decoder/decoder/", "/model/decoder/"):
         if name.startswith(prefix):
-            rest = name[len(prefix):]
+            rest = name[len(prefix) :]
             return "/" not in rest
     return False
 
@@ -120,8 +365,9 @@ def build_blocklist(model: onnx.ModelProto, slim: bool = False) -> list[str]:
         # coarse mode: EVERYTHING under the decoder is FP32 except the named
         # contiguous module scopes (minimizes fp16/fp32 boundary count)
         for n in g.node:
-            if ("/model/decoder" in n.name or "model.decoder" in n.name) and \
-                    not any(s in n.name for s in fp16_only):
+            if ("/model/decoder" in n.name or "model.decoder" in n.name) and not any(
+                s in n.name for s in fp16_only
+            ):
                 block.add(n.name)
                 n_scope += 1
         n_coord = 0
@@ -130,8 +376,10 @@ def build_blocklist(model: onnx.ModelProto, slim: bool = False) -> list[str]:
             cs = coord_slice(g, by_output)
             n_coord = len(cs - block)
             block |= cs
-        print(f"[surgical] coarse mode: decoder FP32 except {fp16_only}"
-              + (f" (+{n_coord} coord-slice nodes re-blocked FP32)" if n_coord else ""))
+        print(
+            f"[surgical] coarse mode: decoder FP32 except {fp16_only}"
+            + (f" (+{n_coord} coord-slice nodes re-blocked FP32)" if n_coord else "")
+        )
         return sorted(block)
     for n in g.node:
         if any(s in n.name for s in FDR_SCOPES):
@@ -146,10 +394,12 @@ def build_blocklist(model: onnx.ModelProto, slim: bool = False) -> list[str]:
     n_coord = len(cs - block)
     block |= cs
 
-    print(f"[surgical] blocklist{' (slim: glue leaves stay FP16)' if slim else ''}: "
-          f"{n_scope} FDR-scope + {n_glue} glue-leaf + "
-          f"{n_coord} deform-coordinate nodes = {len(block)} total "
-          f"(of {len(g.node)} graph nodes)")
+    print(
+        f"[surgical] blocklist{' (slim: glue leaves stay FP16)' if slim else ''}: "
+        f"{n_scope} FDR-scope + {n_glue} glue-leaf + "
+        f"{n_coord} deform-coordinate nodes = {len(block)} total "
+        f"(of {len(g.node)} graph nodes)"
+    )
     return sorted(block)
 
 
@@ -173,15 +423,29 @@ def retype_outputs_fp32(model: onnx.ModelProto) -> None:
             for i, o in enumerate(p.output):
                 if o == out.name:
                     p.output[i] = inner
-            g.node.append(helper.make_node("Cast", [inner], [out.name],
-                                           name=out.name + "_to_fp32",
-                                           to=TensorProto.FLOAT))
+            g.node.append(
+                helper.make_node(
+                    "Cast", [inner], [out.name], name=out.name + "_to_fp32", to=TensorProto.FLOAT
+                )
+            )
         out.type.tensor_type.elem_type = TensorProto.FLOAT
 
 
 # ops whose outputs are never float regardless of inputs
-NONFLOAT_OUT = {"Shape", "ArgMax", "ArgMin", "Equal", "Less", "Greater",
-                "LessOrEqual", "GreaterOrEqual", "And", "Or", "Not", "NonZero"}
+NONFLOAT_OUT = {
+    "Shape",
+    "ArgMax",
+    "ArgMin",
+    "Equal",
+    "Less",
+    "Greater",
+    "LessOrEqual",
+    "GreaterOrEqual",
+    "And",
+    "Or",
+    "Not",
+    "NonZero",
+}
 
 
 def _attr_tensor_dtype(n: onnx.NodeProto):
@@ -226,8 +490,11 @@ def harmonize_blockset(model: onnx.ModelProto, block: set[str]) -> int:
         # spec-pinned inputs that must stay float32 regardless of the data dtype
         SPEC_F32 = {"Resize": (1, 2)}  # roi, scales
         skip = SPEC_F32.get(n.op_type, ())
-        float_ins = [(i, vtype.get(x)) for i, x in enumerate(n.input)
-                     if i not in skip and vtype.get(x) in FLOAT_TYPES]
+        float_ins = [
+            (i, vtype.get(x))
+            for i, x in enumerate(n.input)
+            if i not in skip and vtype.get(x) in FLOAT_TYPES
+        ]
         target = TensorProto.FLOAT if n.name in block else TensorProto.FLOAT16
         for i, t in float_ins:
             if t == target:
@@ -237,8 +504,7 @@ def harmonize_blockset(model: onnx.ModelProto, block: set[str]) -> int:
                 key = (iname, target)
                 if key not in dup_cache:
                     arr = onnx.numpy_helper.to_array(inits[iname])
-                    arr = arr.astype(np.float16 if target == TensorProto.FLOAT16
-                                     else np.float32)
+                    arr = arr.astype(np.float16 if target == TensorProto.FLOAT16 else np.float32)
                     suffix = "__f16" if target == TensorProto.FLOAT16 else "__f32"
                     ni = onnx.numpy_helper.from_array(arr, iname + suffix)
                     g.initializer.append(ni)
@@ -247,8 +513,9 @@ def harmonize_blockset(model: onnx.ModelProto, block: set[str]) -> int:
                 n.input[i] = dup_cache[key]
             else:
                 cast_out = f"{iname}__harm{fixed}"
-                cast = helper.make_node("Cast", [iname], [cast_out],
-                                        name=f"harmonize_cast_{fixed}", to=target)
+                cast = helper.make_node(
+                    "Cast", [iname], [cast_out], name=f"harmonize_cast_{fixed}", to=target
+                )
                 vtype[cast_out] = target
                 pending.append((idx, cast))
                 n.input[i] = cast_out
@@ -273,25 +540,33 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--onnx", required=True)
     p.add_argument("--output", required=True)
-    p.add_argument("--slim", action="store_true",
-                   help="leave the decoder glue leaves FP16 too (FP32 island = FDR scopes "
-                        "+ deform coordinate slice only) — measured lossless on COCO "
-                        "full-val for all five sizes, +2-3%% b8; the release default")
+    p.add_argument(
+        "--slim",
+        action="store_true",
+        help="leave the decoder glue leaves FP16 too (FP32 island = FDR scopes "
+        "+ deform coordinate slice only) — measured lossless on COCO "
+        "full-val for all five sizes, +2-3%% b8; the release default",
+    )
     args = p.parse_args()
     env_slim = os.environ.get("SURGICAL_NO_GLUE", "").strip().lower()
     slim = args.slim or env_slim not in ("", "0", "false", "no", "off")
 
-    model = onnx.load(args.onnx)
-    opset = max((imp.version for imp in model.opset_import
-                 if imp.domain in ("", "ai.onnx")), default=0)
+    source_path, output_path = _validated_conversion_paths(args.onnx, args.output)
+    model, source_bytes, source_meta = _load_source_artifact(source_path)
+    opset = max(
+        (imp.version for imp in model.opset_import if imp.domain in ("", "ai.onnx")), default=0
+    )
     if opset < 19 and not os.environ.get("SURGICAL_FP16_ONLY"):
         raise SystemExit(
             f"[surgical] input opset is {opset}, need >= 19: opset-16 exports decompose "
             "LayerNorm and TensorRT miscompiles the decomposition in FP16 (mAP ~0.005). "
-            "Re-export with export_dfine_onnx.py --opset 19.")
+            "Re-export with export_dfine_onnx.py --opset 19."
+        )
+    overrides = _conversion_overrides()
     block = build_blocklist(model, slim=slim)
     model16 = float16.convert_float_to_float16(
-        model, node_block_list=block, keep_io_types=True, disable_shape_infer=False)
+        model, node_block_list=block, keep_io_types=True, disable_shape_infer=False
+    )
     retype_outputs_fp32(model16)
     n = 1
     total = 0
@@ -302,19 +577,17 @@ def main() -> None:
             raise RuntimeError("harmonize did not converge")
     print(f"[surgical] harmonized {total} mixed-type inputs")
     onnx.checker.check_model(model16)
-    tmp = args.output + ".tmp"
-    onnx.save(model16, tmp)
-    src_sidecar = Path(args.onnx).with_suffix(".json")
+    tmp = _adjacent_temp(output_path)
     sidecar_text = None
-    if src_sidecar.exists():
-        meta = json.loads(src_sidecar.read_text())
-        meta["precision"] = "fp16"
-        meta["precision_mode"] = ("strongly_typed_onnx_fp16_surgical_slim" if slim
-                                  else "strongly_typed_onnx_fp16_surgical_decoder")
-        sidecar_text = json.dumps(meta, indent=2) + "\n"
-    _publish_pair(tmp, args.output, sidecar_text,
-                  Path(args.output).with_suffix(".json"), "surgical")
-    print(f"[surgical] wrote {args.output}")
+    try:
+        onnx.save(model16, tmp)
+        if source_meta is not None:
+            meta = _converted_sidecar(source_meta, source_bytes, slim, overrides)
+            sidecar_text = json.dumps(meta, indent=2) + "\n"
+        _publish_pair(tmp, output_path, sidecar_text, output_path.with_suffix(".json"), "surgical")
+    finally:
+        tmp.unlink(missing_ok=True)
+    print(f"[surgical] wrote {output_path}")
 
 
 if __name__ == "__main__":

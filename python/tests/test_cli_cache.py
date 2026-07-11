@@ -19,7 +19,7 @@ from dfine import cli
 @pytest.fixture()
 def env(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_cache_dir", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_repo_root", lambda: None)   # no dev-tree fallback
+    monkeypatch.setattr(cli, "_repo_root", lambda: None)  # no dev-tree fallback
     monkeypatch.setattr(cli, "_gpu_arch", lambda: "89")
     monkeypatch.setattr(cli, "_trt_version", lambda: "10.13")
     builds: list[tuple[Path, Path]] = []
@@ -33,10 +33,14 @@ def env(monkeypatch, tmp_path):
         twin = Path(str(output) + ".json")
         if twin.exists():
             twin.unlink()
-        output.with_suffix(".json").write_text(json.dumps({
-            "onnx_sha256": hashlib.sha256(Path(onnx).read_bytes()).hexdigest(),
-            "max_batch": max_batch,
-        }))
+        output.with_suffix(".json").write_text(
+            json.dumps(
+                {
+                    "onnx_sha256": hashlib.sha256(Path(onnx).read_bytes()).hexdigest(),
+                    "max_batch": max_batch,
+                }
+            )
+        )
         return output
 
     monkeypatch.setattr(cli, "_build_engine", fake_build)
@@ -158,8 +162,9 @@ def test_engine_recorded_from_another_source_is_refused(env, capsys):
     d, builds = env
     a = onnx_file(d, "dfine_m_slim.onnx", b"graph")
     fp = cli._artifact_fingerprint(a)
-    fake = engine_with_sidecar(cli._cache_engine_path("m", "fp16", fp, 1, 8),
-                               {"onnx_sha256": "0" * 64, "max_batch": 8})
+    fake = engine_with_sidecar(
+        cli._cache_engine_path("m", "fp16", fp, 1, 8), {"onnx_sha256": "0" * 64, "max_batch": 8}
+    )
     # The filename matches the artifact, the recorded source does not: never served...
     with pytest.raises(SystemExit, match="no engine built from"):
         cli._resolve_engine("m", None, "fp16", None, allow_build=False)
@@ -189,3 +194,41 @@ def test_info_and_bench_have_no_dead_onnx_flag():
     for sub in ("info", "bench"):
         with pytest.raises(SystemExit):
             parser.parse_args([sub, "--model", "m", "--onnx", "x.onnx"])
+
+
+@pytest.mark.parametrize(("opt_batch", "max_batch"), [(0, 8), (1, 0), (9, 8)])
+def test_engine_build_rejects_invalid_profile_before_tensorrt(
+    monkeypatch,
+    tmp_path,
+    opt_batch,
+    max_batch,
+):
+    def unexpected_probe():
+        raise AssertionError("TensorRT must not be probed for an invalid profile")
+
+    monkeypatch.setattr(cli, "_have_tensorrt", unexpected_probe)
+    with pytest.raises(SystemExit, match="1 <= opt <= max"):
+        cli._build_engine(
+            tmp_path / "model.onnx",
+            tmp_path / "model.engine",
+            "fp16",
+            max_batch=max_batch,
+            opt_batch=opt_batch,
+        )
+
+
+def test_gpu_arch_uses_cuda_runtime_device(monkeypatch):
+    class CudaRuntime:
+        @staticmethod
+        def cudaGetDevice(device):
+            device._obj.value = 0
+            return 0
+
+        @staticmethod
+        def cudaDeviceGetAttribute(value, attribute, device):
+            assert device == 0
+            value._obj.value = {75: 8, 76: 6}[attribute]
+            return 0
+
+    monkeypatch.setattr(cli.ctypes, "CDLL", lambda _: CudaRuntime())
+    assert cli._gpu_arch() == "86"

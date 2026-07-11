@@ -15,6 +15,7 @@ includes both.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
@@ -27,18 +28,26 @@ from typing import Optional
 MODELS = ("n", "s", "m", "l", "x")
 _ENGINE_SUFFIX = {"fp32": "fp32", "fp16": "fp16_st"}
 # Artifact suffixes are defined here so discovery and export use one vocabulary.
-_SLIM_SUFFIX = "_slim"       # production surgical FP16
+_SLIM_SUFFIX = "_slim"  # production surgical FP16
 _LEGACY_SUFFIX = "_fp16_st"  # decoder-FP32 compatibility recipe
 # Prefer the production recipe while continuing to discover compatibility assets.
 _ONNX_SUFFIXES = {"fp32": ("", "_op19"), "fp16": (_SLIM_SUFFIX, _LEGACY_SUFFIX)}
 # Known D-FINE-seg checkpoints (relative to the seg source dir).
 _CHECKPOINTS = {
-    "n": "dfine_n_coco.pt",
-    "s": "dfine_s_obj2coco.pt",
+    "n": "pretrained/dfine_n_coco.pt",
+    "s": "pretrained/dfine_s_obj2coco.pt",
     "m": "pretrained/dfine_m_obj2coco.pt",
-    "l": "dfine_l_obj2coco.pt",
-    "x": "dfine_x_obj2coco.pt",
+    "l": "pretrained/dfine_l_obj2coco.pt",
+    "x": "pretrained/dfine_x_obj2coco.pt",
 }
+
+
+def _default_checkpoint(seg: Path, model: str) -> Path:
+    canonical = seg / _CHECKPOINTS[model]
+    if canonical.exists():
+        return canonical
+    legacy = seg / canonical.name
+    return legacy if legacy.exists() else canonical
 
 
 # --------------------------------------------------------------------------- #
@@ -108,14 +117,17 @@ def _tensorrt_header_roots() -> list[Path]:
 
 def _gpu_arch() -> str:
     try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        cap = out.stdout.strip().splitlines()[0].strip()
-        return cap.replace(".", "") or "unknown"
+        cudart = ctypes.CDLL("libcudart.so.12")
+        device = ctypes.c_int()
+        major = ctypes.c_int()
+        minor = ctypes.c_int()
+        if cudart.cudaGetDevice(ctypes.byref(device)) != 0:
+            return "unknown"
+        if cudart.cudaDeviceGetAttribute(ctypes.byref(major), 75, device.value) != 0:
+            return "unknown"
+        if cudart.cudaDeviceGetAttribute(ctypes.byref(minor), 76, device.value) != 0:
+            return "unknown"
+        return f"{major.value}{minor.value}"
     except Exception:
         return "unknown"
 
@@ -157,14 +169,18 @@ def _cache_engine_name(model: str, precision: str, fingerprint: str, profile: st
     """The one cache-name grammar — the path builder and every cache glob derive
     from it. The name is a human label and a glob pre-filter, not the source of
     truth: identity is the fingerprint, build facts live in the engine sidecar."""
-    return (f"dfine_{model}_{precision}-{fingerprint}-{profile}"
-            f"-sm{_gpu_arch()}-trt{_trt_version()}.engine")
+    return (
+        f"dfine_{model}_{precision}-{fingerprint}-{profile}"
+        f"-sm{_gpu_arch()}-trt{_trt_version()}.engine"
+    )
 
 
-def _cache_engine_path(model: str, precision: str, fingerprint: str,
-                       opt_batch: int, max_batch: int) -> Path:
-    return _cache_dir() / _cache_engine_name(model, precision, fingerprint,
-                                             f"b1-{opt_batch}-{max_batch}")
+def _cache_engine_path(
+    model: str, precision: str, fingerprint: str, opt_batch: int, max_batch: int
+) -> Path:
+    return _cache_dir() / _cache_engine_name(
+        model, precision, fingerprint, f"b1-{opt_batch}-{max_batch}"
+    )
 
 
 def _same_artifact_engines(model: str, precision: str, fingerprint: str) -> list:
@@ -267,36 +283,48 @@ def _resolve_engine(
                     return mb
                 m = re.search(r"-b1-\d+-(\d+)-sm", p.name)
                 return int(m.group(1)) if m else 0
+
             others.sort(key=profile_max)
             pick = others[-1]
             if len(others) > 1:
-                _log(f"[dfine] {len(others)} engines for this artifact with different "
-                     f"batch profiles; using {pick.name}")
+                _log(
+                    f"[dfine] {len(others)} engines for this artifact with different "
+                    f"batch profiles; using {pick.name}"
+                )
             else:
                 _log(f"[dfine] using {pick.name} (same artifact, different batch profile)")
             return pick
         if allow_build:
-            _log(f"[dfine] no cached engine for {onnx.name} ({fp}) — "
-                 f"building {model} ({precision}) ...")
-            return _build_engine(onnx, cached, precision, max_batch=max_batch,
-                                 opt_batch=opt_batch)
-        raise SystemExit(f"no engine built from {onnx.name} (fingerprint {fp}); "
-                         "run `dfine build` first or pass --engine")
+            _log(
+                f"[dfine] no cached engine for {onnx.name} ({fp}) — "
+                f"building {model} ({precision}) ..."
+            )
+            return _build_engine(onnx, cached, precision, max_batch=max_batch, opt_batch=opt_batch)
+        raise SystemExit(
+            f"no engine built from {onnx.name} (fingerprint {fp}); "
+            "run `dfine build` first or pass --engine"
+        )
 
     # No ONNX anywhere: fall back to engines whose provenance we cannot verify.
     hashed = sorted(_cache_dir().glob(_cache_engine_name(model, precision, "*", "b*")))
     if len(hashed) == 1:
-        _log(f"[dfine] using cached {hashed[0].name} — its source ONNX is gone, "
-             "so its provenance cannot be re-verified")
+        _log(
+            f"[dfine] using cached {hashed[0].name} — its source ONNX is gone, "
+            "so its provenance cannot be re-verified"
+        )
         return hashed[0]
     if len(hashed) > 1:
         names = "\n  ".join(h.name for h in hashed)
-        raise SystemExit(f"several cached engines for '{model}' ({precision}) and no ONNX "
-                         f"to disambiguate:\n  {names}\npass --engine (or --onnx to rebuild)")
+        raise SystemExit(
+            f"several cached engines for '{model}' ({precision}) and no ONNX "
+            f"to disambiguate:\n  {names}\npass --engine (or --onnx to rebuild)"
+        )
     legacy = _legacy_cache_engine_path(model, precision)
     if legacy.exists():
-        _log(f"[dfine] using unfingerprinted cache entry {legacy.name} — not bound to an ONNX; "
-             "re-run `dfine build` to bind it")
+        _log(
+            f"[dfine] using unfingerprinted cache entry {legacy.name} — not bound to an ONNX; "
+            "re-run `dfine build` to bind it"
+        )
         return legacy
     repo = _repo_root()
     if repo:
@@ -309,7 +337,9 @@ def _resolve_engine(
             f"no engine or ONNX for model '{model}' ({precision}). Provide --onnx, or run "
             "`dfine export` first (needs the D-FINE-seg source), or pass --engine."
         )
-    raise SystemExit(f"no engine found for model '{model}' ({precision}); pass --engine or build one")
+    raise SystemExit(
+        f"no engine found for model '{model}' ({precision}); pass --engine or build one"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -353,8 +383,9 @@ def _check_onnx_precision(onnx: Path, precision: str) -> None:
         actual = json.loads(sidecar.read_text()).get("precision", "fp32")
     except (OSError, ValueError) as e:
         # An unreadable sidecar must not silently DISABLE this safety check.
-        raise SystemExit(f"{sidecar.name} exists but cannot be parsed ({e}); "
-                         "fix or remove it before building")
+        raise SystemExit(
+            f"{sidecar.name} exists but cannot be parsed ({e}); fix or remove it before building"
+        )
     if actual != precision:
         raise SystemExit(
             f"{onnx.name} is an {actual} export (per its sidecar) but --precision is "
@@ -363,20 +394,32 @@ def _check_onnx_precision(onnx: Path, precision: str) -> None:
         )
 
 
-def _build_engine(onnx: Path, output: Path, precision: str, max_batch: int,
-                  opt_batch: int = 1) -> Path:
-    if not _have_tensorrt():
+def _validate_batch_profile(opt_batch: int, max_batch: int) -> None:
+    if opt_batch < 1 or max_batch < 1 or opt_batch > max_batch:
         raise SystemExit(
-            "building an engine needs TensorRT — `pip install tensorrt-cu12==10.13.*`")
+            f"batch profile must satisfy 1 <= opt <= max (got {opt_batch}/{max_batch})"
+        )
+
+
+def _build_engine(
+    onnx: Path, output: Path, precision: str, max_batch: int, opt_batch: int = 1
+) -> Path:
+    _validate_batch_profile(opt_batch, max_batch)
+    if not _have_tensorrt():
+        raise SystemExit("building an engine needs TensorRT — `pip install tensorrt-cu12==10.13.*`")
     _check_onnx_precision(onnx, precision)
     output.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable,
         str(_build_engine_script()),
-        "--onnx", str(onnx),
-        "--output", str(output),
-        "--max-batch", str(max_batch),
-        "--opt-batch", str(opt_batch),
+        "--onnx",
+        str(onnx),
+        "--output",
+        str(output),
+        "--max-batch",
+        str(max_batch),
+        "--opt-batch",
+        str(opt_batch),
         "--no-tf32",
     ]
     if precision == "fp16":
@@ -395,8 +438,10 @@ def _convert_fp16(fp32_onnx: Path, output: Path) -> Path:
     cmd = [
         sys.executable,
         str(_scripts_dir() / "convert_fp16.py"),
-        "--onnx", str(fp32_onnx),
-        "--output", str(output),
+        "--onnx",
+        str(fp32_onnx),
+        "--output",
+        str(output),
     ]
     _log("[dfine] $", " ".join(cmd))
     subprocess.run(cmd, check=True, stdout=sys.stderr)
@@ -409,8 +454,10 @@ def _convert_fp16_surgical(fp32_onnx: Path, output: Path) -> Path:
     cmd = [
         sys.executable,
         str(_scripts_dir() / "convert_fp16_surgical.py"),
-        "--onnx", str(fp32_onnx),
-        "--output", str(output),
+        "--onnx",
+        str(fp32_onnx),
+        "--output",
+        str(output),
         "--slim",
     ]
     _log("[dfine] $", " ".join(cmd))
@@ -418,26 +465,36 @@ def _convert_fp16_surgical(fp32_onnx: Path, output: Path) -> Path:
     return output
 
 
-def _export_onnx(model: str, checkpoint: Optional[str], output: Path,
-                 opset: Optional[int] = None, num_classes: Optional[int] = None,
-                 class_names: Optional[str] = None, allow_partial: bool = False) -> Path:
+def _export_onnx(
+    model: str,
+    checkpoint: Optional[str],
+    output: Path,
+    opset: Optional[int] = None,
+    num_classes: Optional[int] = None,
+    class_names: Optional[str] = None,
+    allow_partial: bool = False,
+) -> Path:
     seg = _seg_dir()
     if seg is None:
         raise SystemExit(
             "export needs D-FINE-seg source (set DFINE_SEG_DIR/DFINE_SEG_SRC or place it "
             "beside this repo)"
         )
-    ckpt = Path(checkpoint) if checkpoint else seg / _CHECKPOINTS[model]
+    ckpt = Path(checkpoint) if checkpoint else _default_checkpoint(seg, model)
     if not ckpt.exists():
         raise SystemExit(f"checkpoint not found: {ckpt} (pass --checkpoint)")
     output.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable,
         str(_scripts_dir() / "export_dfine_onnx.py"),
-        "--model-name", model,
-        "--checkpoint", str(ckpt),
-        "--dfine-src", str(seg),
-        "--output", str(output),
+        "--model-name",
+        model,
+        "--checkpoint",
+        str(ckpt),
+        "--dfine-src",
+        str(seg),
+        "--output",
+        str(output),
     ]
     if opset is not None:
         cmd += ["--opset", str(opset)]
@@ -457,8 +514,16 @@ def _export_onnx(model: str, checkpoint: Optional[str], output: Path,
 # --------------------------------------------------------------------------- #
 
 _PALETTE = [
-    (255, 56, 56), (255, 159, 56), (255, 214, 56), (162, 255, 56), (56, 255, 128),
-    (56, 236, 255), (56, 128, 255), (128, 56, 255), (222, 56, 255), (255, 56, 152),
+    (255, 56, 56),
+    (255, 159, 56),
+    (255, 214, 56),
+    (162, 255, 56),
+    (56, 255, 128),
+    (56, 236, 255),
+    (56, 128, 255),
+    (128, 56, 255),
+    (222, 56, 255),
+    (255, 56, 152),
 ]
 
 
@@ -534,10 +599,10 @@ def cmd_build(args) -> int:
     if not args.model and not args.output:
         # Without a model there is no cache key the other subcommands would ever
         # resolve, so a cache-named engine would be a dead end.
-        raise SystemExit("with --onnx alone, pass --output PATH "
-                         "(or add --model to cache under a preset name)")
-    if args.opt_batch > args.max_batch:
-        raise SystemExit(f"--opt-batch {args.opt_batch} exceeds --max-batch {args.max_batch}")
+        raise SystemExit(
+            "with --onnx alone, pass --output PATH (or add --model to cache under a preset name)"
+        )
+    _validate_batch_profile(args.opt_batch, args.max_batch)
     onnx = _find_onnx(args.model, args.precision, args.onnx)
     if onnx is None:
         raise SystemExit(
@@ -565,8 +630,10 @@ def _warn_if_replacing_different_checkpoint(onnx_out: Path) -> None:
     except (OSError, ValueError):
         return
     if old:
-        _log(f"[dfine] note: replacing cached {onnx_out.name} (previous checkpoint "
-             f"{old[:12]}…) — pass --output to keep exports side by side")
+        _log(
+            f"[dfine] note: replacing cached {onnx_out.name} (previous checkpoint "
+            f"{old[:12]}…) — pass --output to keep exports side by side"
+        )
 
 
 def cmd_export(args) -> int:
@@ -577,13 +644,18 @@ def cmd_export(args) -> int:
     # compatibility tier on its opset-16 base. Unmeasured combinations are refused
     # rather than silently exported.
     if args.precision == "fp16" and args.opset is not None and args.opset < 19:
-        raise SystemExit(f"--precision fp16 (surgical) needs --opset >= 19, got {args.opset}; "
-                         "use --precision fp16-legacy for the opset-16 tier")
+        raise SystemExit(
+            f"--precision fp16 (surgical) needs --opset >= 19, got {args.opset}; "
+            "use --precision fp16-legacy for the opset-16 tier"
+        )
     if args.precision == "fp16-legacy" and args.opset not in (None, 16):
-        raise SystemExit("--precision fp16-legacy is the validated opset-16 compatibility tier; "
-                         "drop --opset or use --precision fp16")
-    opset = args.opset if args.opset is not None else (16 if args.precision == "fp16-legacy"
-                                                       else 19)
+        raise SystemExit(
+            "--precision fp16-legacy is the validated opset-16 compatibility tier; "
+            "drop --opset or use --precision fp16"
+        )
+    opset = (
+        args.opset if args.opset is not None else (16 if args.precision == "fp16-legacy" else 19)
+    )
 
     # Always produce the FP32 ONNX first (its name has no precision suffix, matching
     # _find_onnx for fp32). With --output, EVERYTHING lands next to the requested
@@ -609,9 +681,15 @@ def cmd_export(args) -> int:
     else:
         fp32_out = _cache_dir() / f"dfine_{model}.onnx"
         _warn_if_replacing_different_checkpoint(fp32_out)
-    _export_onnx(model, args.checkpoint, fp32_out, opset,
-                 num_classes=args.num_classes, class_names=args.class_names,
-                 allow_partial=args.allow_partial_checkpoint)
+    _export_onnx(
+        model,
+        args.checkpoint,
+        fp32_out,
+        opset,
+        num_classes=args.num_classes,
+        class_names=args.class_names,
+        allow_partial=args.allow_partial_checkpoint,
+    )
     if args.precision == "fp32":
         print(f"exported {fp32_out}")
         return 0
@@ -655,9 +733,10 @@ def cmd_doctor(_args) -> int:
     gpu = None
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,driver_version,compute_cap",
-             "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=10,
+            ["nvidia-smi", "--query-gpu=name,driver_version,compute_cap", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if out.returncode == 0 and out.stdout.strip():
             gpu = out.stdout.strip().splitlines()[0]
@@ -736,28 +815,50 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(pb, engine=False)
     pb.add_argument("--output", help="engine output path (default: cache)")
     pb.add_argument("--max-batch", type=int, default=8)
-    pb.add_argument("--opt-batch", type=int, default=1,
-                    help="batch size TRT optimizes tactics for (8 for batch serving; "
-                         "1, the default, for lowest single-image latency)")
+    pb.add_argument(
+        "--opt-batch",
+        type=int,
+        default=1,
+        help="batch size TRT optimizes tactics for (8 for batch serving; "
+        "1, the default, for lowest single-image latency)",
+    )
     pb.set_defaults(func=cmd_build)
 
     pe = sub.add_parser("export", help="export a checkpoint to ONNX (needs D-FINE-seg)")
     pe.add_argument("--model", choices=MODELS, default="m")
-    pe.add_argument("--precision", choices=("fp32", "fp16", "fp16-legacy"), default="fp32",
-                    help="fp16 = production surgical/slim (opset 19); "
-                         "fp16-legacy = decoder-FP32 compatibility recipe (opset 16)")
+    pe.add_argument(
+        "--precision",
+        choices=("fp32", "fp16", "fp16-legacy"),
+        default="fp32",
+        help="fp16 = production surgical/slim (opset 19); "
+        "fp16-legacy = decoder-FP32 compatibility recipe (opset 16)",
+    )
     pe.add_argument("--checkpoint", help="path to a D-FINE .pt (defaults to the known seg ckpt)")
-    pe.add_argument("--num-classes", type=int, default=None,
-                    help="class count of the checkpoint (default 80); a mismatch aborts "
-                         "the export instead of silently dropping the classifier head")
-    pe.add_argument("--class-names", default=None,
-                    help="display names for the sidecar: a file (one per line) or a comma list")
-    pe.add_argument("--allow-partial-checkpoint", action="store_true",
-                    help="research only: keep exporting when checkpoint tensors are "
-                         "missing/mismatched (the sidecar records the partial load)")
+    pe.add_argument(
+        "--num-classes",
+        type=int,
+        default=None,
+        help="class count of the checkpoint (default 80); a mismatch aborts "
+        "the export instead of silently dropping the classifier head",
+    )
+    pe.add_argument(
+        "--class-names",
+        default=None,
+        help="display names for the sidecar: a file (one per line) or a comma list",
+    )
+    pe.add_argument(
+        "--allow-partial-checkpoint",
+        action="store_true",
+        help="research only: keep exporting when checkpoint tensors are "
+        "missing/mismatched (the sidecar records the partial load)",
+    )
     pe.add_argument("--output", help="ONNX output path (default: cache)")
-    pe.add_argument("--opset", type=int, default=None,
-                    help="ONNX opset (default: 19; fp16-legacy uses its validated 16)")
+    pe.add_argument(
+        "--opset",
+        type=int,
+        default=None,
+        help="ONNX opset (default: 19; fp16-legacy uses its validated 16)",
+    )
     pe.set_defaults(func=cmd_export)
 
     pbe = sub.add_parser("bench", help="benchmark latency/throughput (C++ dfine_bench)")

@@ -106,3 +106,18 @@ def test_custom_model_args_passthrough(harness):
 
 def test_resolver_prefers_the_production_tier():
     assert cli._ONNX_SUFFIXES["fp16"][0] == "_slim"
+
+
+def test_standard_checkpoints_use_upstream_pretrained_directory():
+    assert all(path.startswith("pretrained/") for path in cli._CHECKPOINTS.values())
+
+
+def test_standard_checkpoint_falls_back_to_legacy_root(tmp_path):
+    canonical = tmp_path / cli._CHECKPOINTS["n"]
+    legacy = tmp_path / canonical.name
+    legacy.write_bytes(b"checkpoint")
+    assert cli._default_checkpoint(tmp_path, "n") == legacy
+
+    canonical.parent.mkdir()
+    canonical.write_bytes(b"canonical")
+    assert cli._default_checkpoint(tmp_path, "n") == canonical

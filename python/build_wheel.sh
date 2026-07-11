@@ -38,6 +38,9 @@ done
 # dist/ is the product. NB: "build" here is python/build, not the C++ ../build.
 cleanup() {
     rm -rf "$BUNDLED" "$BUNDLED_SCRIPTS" build dfine.egg-info "${RPATH_SCRIPT:-}"
+    if [[ -n "${WHEEL_STAGE_DIR:-}" ]]; then
+        rm -rf "$WHEEL_STAGE_DIR"
+    fi
     if [[ "$LICENSES_STAGED" == 1 ]]; then
         rm -f "$STAGED_LICENSE" "$STAGED_NOTICE"
     fi
@@ -91,15 +94,19 @@ cp "$REPO/NOTICE" "$STAGED_NOTICE"
 VERSION=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml)
 [[ -n "$VERSION" ]] || { echo "error: package version not found in pyproject.toml" >&2; exit 1; }
 TARGET="dist/dfine-${VERSION}-py3-none-linux_$(uname -m).whl"
+mkdir -p dist
+WHEEL_STAGE_DIR=$(mktemp -d "$PWD/dist/.dfine-wheel.XXXXXX")
 if [[ -f "$TARGET" ]]; then
     echo "WARNING: replacing existing $TARGET" >&2
     echo "  old sha256: $(sha256sum "$TARGET" | cut -d' ' -f1)" >&2
-    rm -f "$TARGET"
 fi
-"$PYTHON" -m build --wheel --outdir dist .
+"$PYTHON" -m build --wheel --outdir "$WHEEL_STAGE_DIR" .
+STAGED_WHEEL="$WHEEL_STAGE_DIR/$(basename "$TARGET")"
+[[ -f "$STAGED_WHEEL" ]] \
+    || { echo "error: expected wheel not produced: $STAGED_WHEEL" >&2; exit 1; }
+echo "  new sha256: $(sha256sum "$STAGED_WHEEL" | cut -d' ' -f1)" >&2
+mv -f "$STAGED_WHEEL" "$TARGET"
 WHEEL="$TARGET"
-[[ -f "$WHEEL" ]] || { echo "error: expected wheel not produced: $WHEEL" >&2; exit 1; }
-echo "  new sha256: $(sha256sum "$WHEEL" | cut -d' ' -f1)" >&2
 
 echo
 echo "wheel: $PWD/$WHEEL"

@@ -1,42 +1,34 @@
-# External validation matrix
+# Validation
 
-Every number this repo publishes — parity, mAP, throughput — was measured on **one machine**:
-an RTX 4070 Ti SUPER (Ada, SM 8.9), WSL2, TensorRT 10.x. The engine, however, is compiled on
-*your* GPU from the released ONNX, so behavior on other architectures (Ampere, Hopper, Orin, …),
-drivers and OSes is asserted, not demonstrated. This page closes that gap: a stranger with a
-different GPU runs one script and gets a report comparable across machines, because the tool
-records the same facts the same way — environment, artifact hashes, the exact build recipe,
-and steady-state throughput.
+The reference accuracy and research campaign ran on an RTX 4070 Ti SUPER (Ada, SM 8.9), WSL2, and TensorRT 10.13. The release `slim` recipe was then rebuilt and measured on RTX 3090 (Ampere) and RTX 5080 (Blackwell) systems. The three generations reproduce its accuracy and the expected recipe ordering.
+
+TensorRT engines are compiled on the target stack. `validation_report.py` records environment facts, artifact hashes, the exact engine recipe, and steady-state batch-1/batch-8 throughput in a comparable report. The published rows below are maintainer-run; external reports are welcome and identified separately when submitted.
+
+The v0.3.1, v0.3.2, and v0.3.3 model artifacts are byte-identical. Rows produced with v0.3.2 therefore validate the current graph recipe; the `dfine` column records the tooling version used for each report.
 
 ## Run it
 
-Requirements: a repo checkout and Python ≥ 3.10. For the engine-build step also
-`pip install "tensorrt-cu12==10.13.*"` — without it (or without a GPU) the script still
-writes a useful report with the build marked "skipped".
+Requirements: a repository checkout and Python ≥3.10. The engine build also needs `tensorrt-cu12==10.13.*`. Without TensorRT or a GPU, the script still records the environment and marks the build as skipped.
 
 ```sh
 git clone https://github.com/PogChamper/dfine-cpp && cd dfine-cpp
-curl -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.2/dfine_m_slim.onnx \
-     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.2/dfine_m_slim.json \
-     -LO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.2/SHA256SUMS
+python -m pip install "tensorrt-cu12==10.13.*"
+curl -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine_m_slim.onnx \
+     -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine_m_slim.json \
+     -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/SHA256SUMS
 python trt-files/scripts/validation_report.py --onnx dfine_m_slim.onnx \
     --check-sums SHA256SUMS --out validation
 ```
 
-The engine build is the README quickstart recipe (`build_engine.py --no-tf32 --max-batch 8`,
-`--strongly-typed` added automatically for fp16-typed ONNX per the sidecar) and takes 1–3 min.
-Throughput rows appear only if the C++ bench tool exists: run `./build.sh` first, then rerun the
-script — it picks up `build/dfine_bench` automatically and benches batches 1 and 8.
+The report uses the production engine recipe: strong typing, TF32 disabled, and max batch 8. Build `dfine_bench` with `./build.sh` before running the report to include throughput; otherwise the engine and environment sections remain useful.
 
 ## Submit
 
-Attach **both** files from `validation/` — `report.md` (human-readable) and `report.json`
-(machine-readable, `schema: 1`) — to a GitHub issue titled:
+Review the generated files, then attach both `validation/report.md` and `validation/report.json` (`schema: 1`) to a GitHub issue titled:
 
     validation: <GPU> / TRT <version>
 
-e.g. `validation: RTX 3060 / TRT 10.9`. Nothing in the report identifies you beyond what
-`nvidia-smi` and `platform.uname()` print; skim it before posting if in doubt.
+For example, `validation: RTX 3060 / TRT 10.9`. The report includes `nvidia-smi` and `platform.uname()` output; inspect it before posting.
 
 ## Results
 
@@ -48,48 +40,48 @@ e.g. `validation: RTX 3060 / TRT 10.9`. Nothing in the report identifies you bey
 
 ## Full-methodology results (maintainer-run)
 
-The rows above are the m-surgical spot bench from `validation_report.py`. The tables below
+The rows above are the D-FINE-M `slim` spot bench from `validation_report.py`. The tables below
 reproduce the README benchmark methodology end to end on rented hardware — batches 1/2/4/8
 × 500 iters, medians of 3 interleaved rounds, peak VRAM — via
-`trt-files/scripts/remote_matrix.sh` followed by `remote_bench_full.sh`. The mAP column is
+`trt-files/scripts/remote_matrix.sh` followed by
+`trt-files/scripts/remote_bench_full.sh`. The mAP column is
 the 500-image val2017 subset: a lossless check against fp32 on the same machine, **not**
 comparable to the README's full-val numbers. Cells are `p50 ms / img/s`.
+
+The fast/max rows predate the fixed `min(300, Q×C)` runtime decode limit and used `K=Q` for
+reduced-query artifacts. Their VRAM measurements still describe the same engines; treat throughput
+and subset mAP as historical until the end-to-end runs are repeated with the current decoder.
 
 ### RTX 3090 — Ampere SM 8.6, driver 550.107.02, TRT 10.13.3.9, Ubuntu 22.04 native
 
 | size | config | b1 | b2 | b4 | b8 | VRAM MiB | subset mAP |
 |------|--------|----|----|----|----|----------|------------|
-| m | prod | 3.55/281 | 6.13/326 | 10.58/378 | 19.23/416 | 532 | — |
-| m | surgical | 3.23/310 | 5.39/371 | 9.11/439 | 16.44/487 | 468 | 0.578 |
+| m | legacy `fp16_st` | 3.55/281 | 6.13/326 | 10.58/378 | 19.23/416 | 532 | — |
+| m | `slim` | 3.23/310 | 5.39/371 | 9.11/439 | 16.44/487 | 468 | 0.578 |
 | m | fast | 3.07/326 | 4.99/401 | 8.12/493 | 14.25/562 | 458 | 0.571 |
 | m | max | 3.90/257 | 5.33/375 | 8.13/492 | 13.67/585 | 428 | 0.571 |
 | m | fp32 | 5.95/168 | 10.64/188 | 19.80/202 | 38.38/208 | 650 | 0.577 |
-| n | prod | 1.66/601 | 2.49/802 | 4.05/988 | 7.12/1124 | 232 | — |
-| n | surgical | 1.51/664 | 2.25/887 | 3.65/1098 | 6.33/1265 | 204 | 0.458 |
+| n | legacy `fp16_st` | 1.66/601 | 2.49/802 | 4.05/988 | 7.12/1124 | 232 | — |
+| n | `slim` | 1.51/664 | 2.25/887 | 3.65/1098 | 6.33/1265 | 204 | 0.458 |
 | n | fast | 1.38/725 | 1.97/1014 | 3.05/1310 | 5.17/1549 | 202 | 0.455 |
 | n | fp32 | 2.27/440 | 3.50/571 | 5.97/670 | 10.67/750 | 266 | 0.458 |
 
-The full tier ladder reproduces (prod < surgical < fast < max), surgical is lossless
-against fp32 on the subset, and the fast/max accuracy deltas match Ada's. Batch-1 latency
-beats the published WSL2 numbers across the board — D-FINE is dispatch-bound at small
-batch, and native Linux does not pay the WSL2 kernel-launch tax the README table carries.
+In those historical runs, the batch-8 ordering was `legacy fp16_st < slim < fast < max`;
+`slim` matched FP32 on the subset, and the fast/max deltas matched the Ada reference. Native
+Linux also reduced the batch-1 dispatch cost measured under WSL2.
 
 ### RTX 5080 — Blackwell SM 12.0, driver 610.43.02, TRT 10.13.3.9, Ubuntu 22.04 native
 
 | size | config | b1 | b2 | b4 | b8 | VRAM MiB | subset mAP |
 |------|--------|----|----|----|----|----------|------------|
-| m | prod | 2.29/436 | 3.73/536 | 6.42/623 | 12.44/643 | 542 | — |
-| m | surgical | 2.19/456 | 3.55/564 | 6.10/656 | 11.83/676 | 476 | 0.575 |
+| m | legacy `fp16_st` | 2.29/436 | 3.73/536 | 6.42/623 | 12.44/643 | 542 | — |
+| m | `slim` | 2.19/456 | 3.55/564 | 6.10/656 | 11.83/676 | 476 | 0.575 |
 | m | fast | 1.84/542 | 2.88/696 | 4.80/834 | 9.19/871 | 468 | 0.571 |
 | m | max | 2.21/452 | 3.03/661 | 4.59/872 | 8.08/990 | 440 | 0.570 |
 | m | fp32 | 3.93/254 | 6.53/306 | 11.98/334 | 24.78/323 | 702 | 0.577 |
-| n | prod | 1.00/999 | 1.61/1245 | 2.53/1579 | 4.39/1821 | 236 | — |
-| n | surgical | 0.91/1099 | 1.39/1439 | 2.34/1711 | 4.10/1953 | 208 | 0.457 |
+| n | legacy `fp16_st` | 1.00/999 | 1.61/1245 | 2.53/1579 | 4.39/1821 | 236 | — |
+| n | `slim` | 0.91/1099 | 1.39/1439 | 2.34/1711 | 4.10/1953 | 208 | 0.457 |
 | n | fast | 0.82/1222 | 1.18/1702 | 1.90/2111 | 3.19/2506 | 206 | 0.454 |
 | n | fp32 | 1.50/665 | 2.22/900 | 3.55/1126 | 6.86/1166 | 268 | 0.458 |
 
-First Blackwell build of this project (`CUDA_ARCH=120`, driver 610-open). Everything
-holds: tier ladder, lossless surgical, exact predict parity on the README picture. The
-published sm_89 wheel runs via PTX JIT with identical detections — RTX 50xx works out of
-the box. One scheduler difference: the 0-aux-stream CUDA-graph build (`slim-g0`) gains
-throughput even at batch 8 here, where Ada and Ampere are batch-8-neutral.
+The `sm_89` wheel runs on RTX 5080 through PTX JIT with matching detections. On this system the 0-aux-stream `slim-g0` build also gains throughput at batch 8; the Ada and Ampere runs were batch-8-neutral.

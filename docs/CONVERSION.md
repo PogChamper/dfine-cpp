@@ -1,0 +1,193 @@
+# Conversion
+
+The conversion toolchain produces a verified D-FINE TensorRT artifact without moving model-specific box math into the runtime.
+
+```text
+checkpoint
+  → explicit-gather FP32 ONNX artifact
+  → surgical strongly typed FP16 ONNX artifact
+  → target-local TensorRT engine
+```
+
+An **ONNX artifact** is an `.onnx` graph and its required `.json` sidecar. An **engine** is a TensorRT plan compiled from that artifact for one target stack. A **model pack** is a published set of ONNX artifacts. A **preset** changes the exported model graph and may trade accuracy for speed.
+
+## Production path
+
+| Stage | Default | Output |
+|---|---|---|
+| Load | Strict checkpoint match | Loaded detection model |
+| Export | Opset 19, explicit gather, trace batch 2 | FP32 ONNX artifact |
+| Convert | Surgical FP16 with `--slim` | Typed FP16 ONNX artifact |
+| Build | Strong typing, TF32 off, min/opt/max batch 1/1/8 | TensorRT engine |
+
+Released model packs contain both FP32 (`dfine_<size>_op19`) and production FP16 (`dfine_<size>_slim`) artifacts for N, S, M, L, and X. Download a graph together with its same-stem JSON sidecar.
+
+## Build an engine from a released artifact
+
+The Python CLI is the shortest path:
+
+```sh
+dfine build --model m --onnx dfine_m_slim.onnx \
+    --output dfine_m_slim.engine
+```
+
+The direct builder is equivalent:
+
+```sh
+python trt-files/scripts/build_engine.py \
+    --onnx dfine_m_slim.onnx \
+    --output dfine_m_slim.engine \
+    --strongly-typed --no-tf32 \
+    --min-batch 1 --opt-batch 1 --max-batch 8
+```
+
+Use `--opt-batch 8` for a batch-serving engine. It improves batch-8 throughput by approximately 6–10% in the measured D-FINE-M runs and increases batch-1 latency by 8–19%.
+
+Add `--max-aux-streams 0` when either CUDA Graph mode will be used. The ordinary runtime and GPU decode do not require it.
+
+Do not add `--fp16` to a typed FP16 artifact. That flag selects the measured weakly typed anti-example. The FP16 compute types are already encoded in `dfine_m_slim.onnx`; `--strongly-typed` tells TensorRT to preserve them.
+
+## Export a checkpoint
+
+Checkpoint export currently uses the model builder from [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg). It is an export-time dependency only; engine build and inference do not import it. The tested source revision is stored in [`trt-files/DFINE_SEG_REVISION`](../trt-files/DFINE_SEG_REVISION).
+
+Prepare the locked tools environment and a source checkout:
+
+```sh
+git clone https://github.com/ArgoHA/D-FINE-seg ../D-FINE-seg
+git -C ../D-FINE-seg checkout "$(cat trt-files/DFINE_SEG_REVISION)"
+uv sync --frozen --extra gpu --extra torch
+```
+
+Export the FP32 base:
+
+```sh
+uv run python trt-files/scripts/export_dfine_onnx.py \
+    --model-name m \
+    --checkpoint /path/to/checkpoint.pt \
+    --dfine-src ../D-FINE-seg \
+    --opset 19 \
+    --output dfine_m_op19.onnx
+```
+
+The exporter performs these postconditions before publishing the graph and sidecar:
+
+1. Every checkpoint-owned detection tensor is loaded with a matching shape.
+2. Graph inputs and outputs are `images`, `logits`, and `boxes`.
+3. The batch dimension remains symbolic.
+4. The graph contains only standard-domain ONNX operations.
+5. The explicit deformable-attention core contains no `GridSample` node.
+6. ONNX Runtime executes batch 1 and 2 with shapes matching the sidecar.
+
+Failed postconditions do not publish or overwrite the output pair. `--allow-partial-checkpoint` exists for research and records a partial load in the sidecar; do not use it for a release or deployment artifact.
+
+Convert the FP32 graph to the production recipe:
+
+```sh
+uv run python trt-files/scripts/convert_fp16_surgical.py \
+    --onnx dfine_m_op19.onnx \
+    --output dfine_m_slim.onnx \
+    --slim
+```
+
+The converter carries the sidecar forward and updates its precision recipe. It keeps the FDR box-decoder scopes and deform coordinate/index chain in FP32; backbone, encoder, decoder compute, and deform data flow use FP16. Graph outputs remain FP32, preserving one output contract for CPU decode and the optional GPU/graph paths.
+
+The CLI runs the same sequence from a repository checkout:
+
+```sh
+dfine export --model m --checkpoint /path/to/checkpoint.pt \
+    --precision fp16 --output dfine_m_slim.onnx
+```
+
+Set `DFINE_SEG_DIR` for the CLI when the D-FINE-seg checkout is not the default sibling directory. The direct exporter accepts `--dfine-src` and also reads `DFINE_SEG_SRC` or `DFINE_SEG_DIR`.
+
+## Custom classes and checkpoints
+
+Choose the model size and class count that match training. The strict loader reports classifier-shape and variant mismatches before export.
+
+```sh
+uv run python trt-files/scripts/export_dfine_onnx.py \
+    --model-name s \
+    --checkpoint food_s.pt \
+    --num-classes 3 \
+    --class-names burger,fries,drink \
+    --dfine-src ../D-FINE-seg \
+    --output food_s_op19.onnx
+```
+
+`--class-names` accepts a comma-separated list or a file with one label per line. When it is omitted, COCO-80 names are recorded for an 80-class model; other class counts use `class_<id>` display names unless names are supplied at runtime.
+
+The standard checkpoints are detection checkpoints. Extra tensors, such as a segmentation head, are reported and ignored when every detection tensor matches. Missing or shape-mismatched detection tensors remain fatal.
+
+## Artifact contract
+
+The raw ONNX interface is deliberately small:
+
+| Tensor | Type and shape | Meaning |
+|---|---|---|
+| `images` | FP32 `[N,3,H,W]` | RGB, `/255`, NCHW input |
+| `logits` | FP32 `[N,Q,C]` | Pre-sigmoid class logits |
+| `boxes` | FP32 `[N,Q,4]` | Normalized `cxcywh` boxes |
+
+Sigmoid, global top-k, thresholding, `cxcywh → xyxy`, and source-image scaling remain outside the engine. D-FINE's FDR/Integral/LQE box computation and deformable attention remain inside it. No NMS is applied.
+
+The current exporter records:
+
+- model size, input geometry, query count, class count, and labels;
+- input layout, `/255` normalization, resize geometry, and output semantics;
+- checkpoint hash and strict/partial load status;
+- ONNX opset, deform core, precision recipe, simplification result, tool versions, and exporter
+  source hash;
+- D-FINE source repository, commit, and dirty state when exported from a Git checkout.
+
+The production Python builder carries that contract forward and adds the TensorRT version, GPU
+architecture, network typing, TF32 mode, auxiliary-stream setting, optimization profile, and source
+ONNX hash. The FP32-only C++ builder uses weak network typing with TF32 disabled and records its
+profile and auxiliary-stream setting, but omits GPU architecture and the source ONNX hash. The
+runtime validates engine IO and the batch profile, cross-checks sidecar dimensions and names, and
+validates preprocessing before applying it. An explicit sidecar path must exist, and any present
+sidecar must agree with the engine. When automatic discovery finds no sidecar, dimensions and names
+come from the engine and preprocessing uses the documented defaults.
+
+Names are discovery labels, not identity. The exact rules and cache fingerprint are defined in [Artifact naming and identity](NAMING.md).
+
+## Why the ordinary paths fail
+
+Three failures define the maintained recipe:
+
+| Path | Observed result | Maintained fix |
+|---|---|---|
+| Native `grid_sample` deform export | 0.4455 AP vs 0.5509 PyTorch | Explicit gather-bilinear ONNX |
+| Weakly typed TensorRT FP16 flag | Large fixed AP loss in box decode | Precision encoded in typed ONNX |
+| Fine-grained FP16 on opset-16 LayerNorm decomposition | TensorRT collapse while ONNX Runtime remains healthy | Opset 19 native `LayerNormalization` |
+
+These are measured TensorRT behaviors for the recorded graph and stack. They are not general claims about every model using the same operators. Full isolation data is in [`impl/DFINE_SEG_TRT_BUG_REPORT.md`](impl/DFINE_SEG_TRT_BUG_REPORT.md) and the [research matrix](RESEARCH_MATRIX.md).
+
+## Accuracy-traded presets
+
+The release `slim` recipe changes precision placement but remains full-val lossless. The following presets alter the export graph and, for `max`, the engine profile:
+
+| Preset or option | Graph change | Measured D-FINE-M cost |
+|---|---|---:|
+| `--num-queries 200` | Start with 200 decoder queries | −0.13 AP |
+| `--cascade 1:150` | Keep the top 150 queries after decoder layer 1 | −0.18 AP |
+| `--eval-idx 2` | Emit after decoder layer 2 | −0.57 AP |
+| `fast` recipe | Q200 + cascade 1:100 | −0.44 to −0.77 AP across sizes |
+| `max` recipe | `fast` + eval layer 2 + opt batch 8 | −0.89 AP on M |
+
+There is no `--preset fast` CLI alias. Apply the required export flags explicitly so the resulting sidecar records the changed query/layer contract. Use the [research matrix](RESEARCH_MATRIX.md) for full accuracy, throughput, and hardware scope before shipping one of these variants.
+
+## Reproducibility and release gates
+
+`uv.lock` pins the Python toolchain; `trt-files/DFINE_SEG_REVISION` pins the tested model source. Byte comparison is meaningful only when tool versions, checkpoint hash, model-source state, export flags, and simplification path match. A dirty model-source checkout is not a release input. Runtime correctness does not rely on byte identity alone: validate the produced engine against the expected detections and dataset metric.
+
+For a release candidate:
+
+1. Verify the ONNX artifact at batch 1 and 2.
+2. Build with the production flags on the target TensorRT stack.
+3. Run engine smoke tests at batches 1, 2, and 8 for the default profile.
+4. Compare boxes and scores against the reference path.
+5. Run full COCO validation for any graph or precision change.
+6. Publish graph and sidecar together with SHA-256 coverage.
+
+The executable release procedure is in [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md); benchmark methodology is in [Validation](VALIDATION.md).

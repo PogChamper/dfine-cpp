@@ -1,53 +1,89 @@
 # Release checklist
 
-Executable, in order. The GPU gates run on the release machine until a GPU runner exists;
-everything else is covered by CI. Rule zero: **the bytes that were validated are the bytes
-that get published — no rebuild between the gate and the upload.**
+Run the gates in order on the release commit. The GPU gates remain release-machine checks until a
+GPU runner is available. Publish the validated bytes; do not rebuild between validation and upload.
 
-Environment used below:
+## Environment
 
 ```sh
+export DFINE_SEG_DIR="${DFINE_SEG_DIR:?set DFINE_SEG_DIR to the tested D-FINE-seg checkout}"
 export TRTLIB="${TRTLIB:?set TRTLIB to the directory containing libnvinfer.so.10}"
-export ENGINE="${ENGINE:-trt-files/engines/dfine_m_fp16_st.engine}"
-export ENGINE_G0="${ENGINE_G0:-trt-files/engines/dfine_m_fp16_g0.engine}"
+export ENGINE="${ENGINE:-trt-files/engines/dfine_m_slim.engine}"
+export ENGINE_G0="${ENGINE_G0:-trt-files/engines/dfine_m_slim_g0.engine}"
 export KNOWN_IMAGE="${KNOWN_IMAGE:?set KNOWN_IMAGE to a recorded COCO image}"
 export FOOD_CHECKPOINT="${FOOD_CHECKPOINT:?set FOOD_CHECKPOINT to the 3-class checkpoint}"
 export FOOD_CLASSES="${FOOD_CLASSES:-food,plate,tray}"
 export FOOD_IMAGE="${FOOD_IMAGE:?set FOOD_IMAGE to the recorded food image}"
 export RELEASE_DIR="${RELEASE_DIR:-/tmp/dfine-release}"
-mkdir -p "$RELEASE_DIR"
+export MODEL_DIR="${MODEL_DIR:-$RELEASE_DIR/models}"
+mkdir -p "$RELEASE_DIR" "$MODEL_DIR"
+
+export TRTLIB="$(realpath "$TRTLIB")"
+export ENGINE="$(realpath "$ENGINE")"
+export ENGINE_G0="$(realpath "$ENGINE_G0")"
+export KNOWN_IMAGE="$(realpath "$KNOWN_IMAGE")"
+export FOOD_CHECKPOINT="$(realpath "$FOOD_CHECKPOINT")"
+export FOOD_IMAGE="$(realpath "$FOOD_IMAGE")"
+export RELEASE_DIR="$(realpath "$RELEASE_DIR")"
+export MODEL_DIR="$(realpath "$MODEL_DIR")"
+
+test -z "$(git status --porcelain)"
+test "$(git -C "$DFINE_SEG_DIR" rev-parse HEAD)" = "$(cat trt-files/DFINE_SEG_REVISION)"
+test -z "$(git -C "$DFINE_SEG_DIR" status --porcelain)"
 ```
 
-## 1. Hosted gates (must be green in CI on the release commit)
+The revision file identifies the tested model source. A dirty or different checkout is not a
+release input.
 
-- [ ] `lint`, `compile-cuda`, `python-nogpu`, `wheel` jobs green — the wheel job includes the
-      hygiene gate (bundled `.so` + `_scripts/build_engine.py`, no RPATH, SONAME intact)
-      and the outside-checkout smoke.
-- [ ] `WERROR=ON ./build.sh` clean locally.
+## 1. Hosted gates
 
-## 2. CPU test gates
+- [ ] `lint`, `compile-cuda`, `install-consumer`, `python-nogpu`, and `wheel` are green on the
+      release commit.
+- [ ] The wheel job verifies the bundled library and build script, absent RPATH/RUNPATH,
+      `libdfine.so.1` SONAME, `Root-Is-Purelib: false`, LICENSE/NOTICE, and import outside the
+      checkout.
+- [ ] `CUDA_ARCH=89 WERROR=ON ./build.sh` is clean with the release toolchain and produces the
+      native library that will be packaged.
+
+## 2. CPU gates
 
 ```sh
-ctest --test-dir build --output-on-failure          # image_layout, engine_meta run anywhere
+ctest --test-dir build --output-on-failure
 PYTHONPATH="$PWD/python" python -m pytest "$PWD/python/tests" -q
-./build/tests/dfine_test_engine_meta trt-files/onnx/*.json trt-files/engines/*.json  # all sidecars parse
+./build/tests/dfine_test_engine_meta trt-files/onnx/*.json trt-files/engines/*.json
 ```
 
-## 3. GPU runtime-safety gates
+- [ ] All checked sidecars parse and reject contradictory engine contracts.
+- [ ] The out-of-tree CMake consumer links the installed package, not the source tree.
+
+## 3. GPU runtime gates
 
 ```sh
-LD_LIBRARY_PATH=$TRTLIB DFINE_TEST_ENGINE=$ENGINE ./build/tests/dfine_test_shape_transitions
-LD_LIBRARY_PATH=$TRTLIB DFINE_TEST_ENGINE=$ENGINE DFINE_TEST_ENGINE_G0=$ENGINE_G0 \
+LD_LIBRARY_PATH="$TRTLIB" DFINE_TEST_ENGINE="$ENGINE" \
+    ./build/tests/dfine_test_shape_transitions
+LD_LIBRARY_PATH="$TRTLIB" DFINE_TEST_ENGINE="$ENGINE" DFINE_TEST_ENGINE_G0="$ENGINE_G0" \
     DFINE_TEST_REQUIRE_FULL_GRAPH=1 ./build/tests/dfine_test_detector_recovery
-LD_LIBRARY_PATH=$TRTLIB DFINE_TEST_ENGINE=$ENGINE \
-    compute-sanitizer --tool memcheck --error-exitcode 99 ./build/tests/dfine_test_shape_transitions
+LD_LIBRARY_PATH="$TRTLIB" DFINE_TEST_ENGINE="$ENGINE" \
+    compute-sanitizer --tool memcheck --error-exitcode 99 \
+    ./build/tests/dfine_test_shape_transitions
+LD_LIBRARY_PATH="$TRTLIB" DFINE_TEST_ENGINE="$ENGINE" DFINE_TEST_ENGINE_G0="$ENGINE_G0" \
+    DFINE_TEST_REQUIRE_FULL_GRAPH=1 compute-sanitizer --tool memcheck --error-exitcode 99 \
+    ./build/tests/dfine_test_detector_recovery
+python trt-files/scripts/verify_engine.py --engine "$ENGINE" --batches 1 2 8
+PYTHONPATH="$PWD/python" DFINE_LIBRARY="$PWD/build/libdfine.so" \
+    LD_LIBRARY_PATH="$TRTLIB" DFINE_TEST_ENGINE="$ENGINE" DFINE_TEST_IMAGE="$KNOWN_IMAGE" \
+    python -m pytest python/tests -q -ra
+PYTHONPATH="$PWD/python" DFINE_LIBRARY="$PWD/build/libdfine.so" LD_LIBRARY_PATH="$TRTLIB" \
+    python -m dfine.cli predict --engine "$ENGINE" --image "$KNOWN_IMAGE" --json \
+    > "$RELEASE_DIR/native-detections.json"
 ```
 
-- [ ] All pass; memcheck reports 0 errors. `dfine_test_detector_recovery` must exercise
-      the full-graph section: an unset `DFINE_TEST_ENGINE_G0` or an inactive full graph is
-      a failed release gate, not a passing partial run.
+- [ ] Recovery covers ordinary, GPU-decode, CUDA Graph, and required full-pipeline-graph paths.
+- [ ] Repeated shape transitions and teardown report zero compute-sanitizer errors.
+- [ ] Batches 1, 2, and 8 execute against the declared engine profile.
+- [ ] The Python/C++ parity test runs against the recorded image; it is not skipped.
 
-## 4. Official-model gate (D-FINE-M)
+## 4. Official-model provenance and accuracy
 
 ```sh
 dfine export --model m --precision fp16 --output "$RELEASE_DIR/dfine_m_slim.onnx"
@@ -58,15 +94,28 @@ python trt-files/scripts/verify_engine.py \
     --engine "$RELEASE_DIR/dfine_m_slim.engine" --batches 1 2 8
 ```
 
-- [ ] Engine sidecar says `precision: fp16`, `precision_mode: strongly_typed_onnx_fp16_surgical_slim`,
-      carries `onnx_sha256`.
-- [ ] `sha256sum "$RELEASE_DIR/dfine_m_slim.onnx"` is
-      `0f0b8e9ecafa3112d3f7d983e52809c92514836ee1328b519fe81fe25abc7419`, the gated
-      v0.3.0 m-slim asset. If it differs, run the full-COCO m gate against the newly built
-      engine (`profile.py --backends trt --engine "$RELEASE_DIR/dfine_m_slim.engine" --full`)
-      before shipping; byte-identical graph = skip.
+- [ ] The ONNX sidecar reports `checkpoint_load: strict`, the commit in
+      `trt-files/DFINE_SEG_REVISION`, `model_source.dirty: false`, the checkpoint SHA-256, and
+      complete `tool_versions`. `exporter_sha256` is a 64-character lowercase SHA-256 and
+      `onnx_simplification` records `applied` for the locked release recipe.
+- [ ] The engine sidecar reports `precision: fp16`,
+      `precision_mode: strongly_typed_onnx_fp16_surgical_slim`, the actual TensorRT and SM target,
+      the 1/2/8-compatible profile, and the ONNX SHA-256.
+- [ ] Python and C++ return equivalent detections on the recorded image.
 
-## 5. Custom-model gate (3-class food checkpoint)
+The validated D-FINE-M slim graph SHA-256 is
+`0f0b8e9ecafa3112d3f7d983e52809c92514836ee1328b519fe81fe25abc7419`. If the ONNX bytes differ,
+run the full COCO D-FINE-M gate before release:
+
+```sh
+python trt-files/scripts/profile.py --backends trt cpp \
+    --engine "$RELEASE_DIR/dfine_m_slim.engine" --full
+```
+
+An unchanged graph may reuse the recorded accuracy result even when its sidecar gains new
+provenance fields.
+
+## 5. Custom-model gate
 
 ```sh
 dfine export --model s --checkpoint "$FOOD_CHECKPOINT" --num-classes 3 \
@@ -76,35 +125,78 @@ dfine build --model s --onnx "$RELEASE_DIR/food_s_slim.onnx" \
 dfine predict --engine "$RELEASE_DIR/food_s.engine" --image "$FOOD_IMAGE"
 ```
 
-- [ ] Strict load reports full tensor coverage; sidecar carries the 3 class names.
-- [ ] A deliberately wrong invocation (no `--num-classes`) aborts with the class-count hint.
+- [ ] Strict checkpoint load covers every checkpoint-owned detection tensor; the sidecar carries
+      the three class names and source provenance.
+- [ ] Omitting `--num-classes` fails with the class-count diagnostic.
 
-## 6. All-size static gate
+## 6. Five-size static gate
 
-For each of n/s/m/l/x: strict-load passes (`export` runs through the checkpoint check), the
-export postconditions pass (GridSample=0, symbolic batch, ORT N=1/2 run), `onnx.checker` clean.
-The exporter log must contain `dynamic batch OK: N=1 and N=2 run`; a missing onnxruntime or
-any skipped behavioral check fails the gate.
-Full five-size COCO campaign only when the precision recipe itself changed.
+For n/s/m/l/x, require strict checkpoint load, zero `GridSample` nodes, symbolic batch, successful
+ONNX Runtime execution at N=1 and N=2, and a clean `onnx.checker` result. A missing ONNX Runtime or
+skipped behavioral postcondition fails the gate. Each published sidecar must pass the source,
+exporter-hash, tool-version, and simplification checks from the D-FINE-M gate. Run the five-size full
+COCO campaign only when the graph or precision recipe changes.
 
-## 7. Package and publish
+## 7. Version and wheel
+
+Set the intended release version, then require all five version sources to agree:
 
 ```sh
-CUDA_ARCH=89 ./python/build_wheel.sh    # or (preferred) take the CI artifact: same script,
-                                        # but a different toolchain — the artifacts are NOT
-                                        # byte-identical; gate and publish ONE of them
-python trt-files/scripts/release_assets.py assemble --input "$RELEASE_DIR" \
-    --wheel python/dist/dfine-<version>-py3-none-linux_x86_64.whl --out "$RELEASE_DIR/upload"
+export VERSION="${VERSION:?set VERSION to the release version without the v prefix}"
+test "$(sed -n 's/^project(dfine VERSION \([^ ]*\).*/\1/p' CMakeLists.txt)" = "$VERSION"
+test "$(sed -n 's/^version = "\([^"]*\)"/\1/p' pyproject.toml)" = "$VERSION"
+test "$(sed -n 's/^version = "\([^"]*\)"/\1/p' python/pyproject.toml)" = "$VERSION"
+test "$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' python/dfine/__init__.py)" = "$VERSION"
+test "$(sed -n 's/^[[:space:]]*return "\([^"]*\)";/\1/p' include/dfine/version.hpp)" = "$VERSION"
+
+SKIP_BUILD=1 ./python/build_wheel.sh
+export WHEEL="python/dist/dfine-$VERSION-py3-none-linux_x86_64.whl"
+
+python -m venv "$RELEASE_DIR/wheel-smoke"
+"$RELEASE_DIR/wheel-smoke/bin/python" -m pip install "$WHEEL" "tensorrt-cu12==10.13.*" "pillow>=9"
+export WHEEL_TRTLIB="$("$RELEASE_DIR/wheel-smoke/bin/python" -c \
+    'import os, tensorrt_libs; print(os.path.dirname(tensorrt_libs.__file__))')"
+(cd /tmp && LD_LIBRARY_PATH="$WHEEL_TRTLIB" \
+    "$RELEASE_DIR/wheel-smoke/bin/python" -c 'import dfine
+from dfine.cli import _build_engine_script
+assert dfine.library_version() == dfine.__version__
+assert _build_engine_script().is_file()')
+(cd /tmp && LD_LIBRARY_PATH="$WHEEL_TRTLIB" "$RELEASE_DIR/wheel-smoke/bin/dfine" doctor)
+(cd /tmp && LD_LIBRARY_PATH="$WHEEL_TRTLIB" "$RELEASE_DIR/wheel-smoke/bin/dfine" predict \
+    --engine "$ENGINE" --image "$KNOWN_IMAGE" --json \
+    > "$RELEASE_DIR/wheel-detections.json")
+cmp "$RELEASE_DIR/native-detections.json" "$RELEASE_DIR/wheel-detections.json"
 ```
 
-- [ ] `assemble` succeeds: it enforces the release grammar — exactly 20 model files
-      (`dfine_{n,s,m,l,x}_{op19,slim}.{onnx,json}`), every graph paired with its sidecar,
-      sidecar precision matching the recipe suffix, opset 19 — and writes `SHA256SUMS`
-      over all 21 payload files (wheel included). Engines and custom-model artifacts are
-      not staged and not uploaded.
-- [ ] Release notes name every behavior change (this release: `dfine export --precision fp16`
-      now = surgical/slim; re-export custom models to pick up the production tier).
-- [ ] Tag; upload the *gated* `$RELEASE_DIR/upload` contents (21 payload files + `SHA256SUMS`);
-      then `python trt-files/scripts/release_assets.py verify --tag <tag>` — it downloads
-      every published asset into a fresh directory, runs `sha256sum -c SHA256SUMS`, and
-      fails on any asset the manifest does not cover.
+- [ ] The wheel contains `dfine/libdfine.so`, `dfine/_scripts/build_engine.py`, LICENSE, and NOTICE.
+- [ ] Its WHEEL metadata contains `Root-Is-Purelib: false`; the native library has no build-machine
+      RPATH/RUNPATH and retains the `libdfine.so.1` SONAME.
+- [ ] In a fresh environment outside the checkout, `dfine.library_version() ==
+      dfine.__version__`, `dfine doctor` selects the bundled library, and `dfine build` resolves the
+      bundled build script. The bundled library reproduces the native detection result.
+
+## 8. Stage and publish
+
+- [ ] Convert `docs/releases/UNRELEASED.md` into the versioned release note and restore a fresh
+      Unreleased page. Update every active latest-release link and version statement; preserve
+      explicitly historical validation rows. Review all current references with
+      `rg 'v0\.3\.3|0\.3\.3' README.md docs python/README.md examples`. Enumerate observable
+      behavior and compatibility changes; do not relabel an unchanged model recipe.
+- [ ] `$MODEL_DIR` contains exactly the gated n/s/m/l/x FP32 and slim ONNX/JSON pairs.
+
+```sh
+python trt-files/scripts/release_assets.py assemble \
+    --input "$MODEL_DIR" --wheel "$WHEEL" --out "$RELEASE_DIR/upload"
+```
+
+- [ ] `assemble` requires a new or empty output directory, accepts exactly 20 model files, validates
+      graph/sidecar pairing, precision suffixes, and opset 19, then writes `SHA256SUMS` for the 20
+      model files and wheel.
+- [ ] Tag the release commit and upload the contents of `$RELEASE_DIR/upload` without rebuilding.
+
+```sh
+python trt-files/scripts/release_assets.py verify --tag "v$VERSION"
+```
+
+- [ ] Verification downloads every published asset, checks every digest, and reports no uncovered
+      files.

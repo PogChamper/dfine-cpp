@@ -2,18 +2,18 @@
 
 Vendored / externally-provided dependencies.
 
-## `stb/` — tracked ✅
+## `stb/` (tracked)
 
 `stb_image.h` (v2.30, public domain) — single-header JPEG/PNG decoder used by the image-consuming apps
 (`dfine_detect`, `dfine_bench`, `dfine_coco_eval`) via `apps/image_io.cpp`. The core `libdfine` is
 OpenCV-free and does **not** need this — it takes a raw `ImageU8`. Committed so a fresh clone builds.
 
-## `tensorrt/` — NOT tracked, and NOT required
+## `tensorrt/` (local, optional)
 
-Ignored by `.gitignore` (machine-specific symlinks + re-fetchable headers). **You do not need it**: a system
-TensorRT install is found automatically by `cmake/FindTensorRT.cmake` (searches `$TENSORRT_DIR`,
-`/usr/local/TensorRT`, `/opt/tensorrt`, `/usr`). Populate this directory only as an alternative — e.g. no
-root access, or you get TensorRT from the pip wheel (which ships the `.so`s but no headers). Layout:
+This directory is ignored because it contains machine-specific symlinks and replaceable headers.
+The build resolves an explicit `TENSORRT_DIR`, this local tree when populated, then system paths
+such as `/usr/local/TensorRT`, `/opt/tensorrt`, and `/usr`. Leave it empty when TensorRT is already
+installed in a searched location. Layout:
 
 ```
 third_party/tensorrt/
@@ -25,7 +25,7 @@ third_party/tensorrt/
   (`github.com/NVIDIA/TensorRT`, `include/`), for the version you link against (validated here: 10.13). The
   compile only needs `NvInfer*.h` + `NvOnnxParser.h`.
 - **Libraries:** symlink the `.so`s from wherever your TensorRT runtime lives — e.g. a venv after
-  `python -m pip install "tensorrt==10.13.*"`:
+  `python -m pip install "tensorrt-cu12==10.13.*"`:
   ```sh
   mkdir -p third_party/tensorrt/lib && cd third_party/tensorrt/lib
   ln -sf <venv>/lib/python3.11/site-packages/tensorrt_libs/*.so* .
@@ -33,5 +33,5 @@ third_party/tensorrt/
 - At **runtime**, the same lib dir must be on `LD_LIBRARY_PATH`.
 
 `build.sh` auto-detects a populated tree (checks `third_party/tensorrt/include/NvInfer.h`) and passes
-`-DTENSORRT_DIR`; an explicit `$TENSORRT_DIR` wins. Inside a container the base image
-(`nvcr.io/nvidia/tensorrt:*`) already provides the headers/libs — see the `Dockerfile`.
+`-DTENSORRT_DIR`; an explicit `$TENSORRT_DIR` wins. The `Dockerfile` installs matching TensorRT
+10.13 headers and libraries from pinned NVIDIA apt packages and does not use this directory.

@@ -1,67 +1,160 @@
-# Artifact naming & identity
+# Artifact naming and identity
 
-Rule of thumb: **the name is a label, the sidecar is the truth, the fingerprint
-is the identity.** Tools may use filenames to *find* candidates, but any fact
-that decides behavior (batch profile, precision recipe, source binding) must be
-read from the artifact's JSON sidecar, never parsed out of its name.
+Filenames are labels. Artifact bytes establish identity; sidecars declare provenance and behavior. The
+runtime treats TensorRT engine IO and profile data as execution truth.
 
-## The four identity axes
+## Vocabulary
 
-| # | Axis | Question it answers | Recorded in | Typical fields |
-|---|------|--------------------|-------------|----------------|
-| 1 | Model contract | *what* is computed | ONNX sidecar | `variant`, `checkpoint_sha256`, `num_classes`, `class_names`, input size, preprocessing, output contract |
-| 2 | Conversion recipe | *how the graph represents it* | ONNX sidecar (+ name suffix) | `opset`, `precision` / `precision_mode`, `deform_core` |
-| 3 | Engine build | *how/where the graph is compiled* | engine sidecar | `trt_version`, `sm_arch`, `min/opt/max_batch`, `network_typing`, `tf32`, `max_aux_streams`, `cuda_graph_compat`, `onnx_sha256` |
-| 4 | Runtime invocation | *how it is called* | nowhere — not identity | actual batch, thresholds, JSON/drawing, graph replay |
+| Term | Meaning |
+|---|---|
+| Checkpoint | Trained PyTorch weights |
+| ONNX artifact | One ONNX graph and its same-stem JSON sidecar |
+| Engine | Target-local TensorRT plan and its engine sidecar |
+| Runtime | `libdfine`, which executes an engine |
+| Model pack | Published ONNX artifacts for one or more model sizes/recipes |
+| Preset | Named graph/build recipe with an explicit accuracy/performance contract |
 
-Classifying a change: classes, shapes or output meaning change → axis 1; the
-ONNX differs but the expected detections are the same → axis 2; the same ONNX,
-different engine compatibility or performance → axis 3; no rebuild needed →
-axis 4.
+Do not use *model* alone when the distinction affects a command or compatibility decision.
 
-## Name vocabulary
+## Identity axes
 
-ONNX (release assets and `dfine export` defaults), each with a `.json` sidecar:
+| Axis | Question | Source of truth |
+|---|---|---|
+| Model contract | What does the artifact compute? | Engine IO plus ONNX sidecar |
+| Conversion recipe | How are graph operations and precision represented? | ONNX sidecar |
+| Engine build | For which TensorRT/GPU/profile was it compiled? | Engine plus engine sidecar |
+| Runtime invocation | How is this call executed? | Detector options and call arguments |
 
-- `dfine_<size>_op19.onnx` — the FP32 opset-19 base (`dfine_<size>_op<N>` for a
-  non-default opset; the suffix-less `dfine_<size>.onnx` is the cache-dir spelling).
-- `dfine_<size>_slim.onnx` — the v0.3 production surgical-FP16 recipe.
-- `dfine_<size>_fp16_st.onnx` — the v0.2 legacy decoder-FP32 tier
-  (`--precision fp16-legacy`).
+Examples:
 
-The suffix names the *recipe* (axis 2), nothing else. It deliberately does not
-encode the opset or the checkpoint: those live in the sidecar, and the cache
-holds one artifact per public name — the fingerprint disambiguates engines.
-The two recipe suffixes are defined once, in `python/dfine/cli.py`
-(`_SLIM_SUFFIX` / `_LEGACY_SUFFIX`).
+- changing classes, input geometry, query count, or output meaning changes the model contract;
+- changing FP32/FP16 placement while preserving detections changes the conversion recipe;
+- changing TensorRT version, GPU architecture, auxiliary streams, or batch profile changes the engine build;
+- changing threshold, actual batch, decode mode, or graph replay changes only runtime invocation.
 
-Engines:
+## Published ONNX names
 
-- Cache: `dfine_<model>_<precision>-<fingerprint>-b1-<opt>-<max>-sm<arch>-trt<ver>.engine`,
-  assembled only by `_cache_engine_name()` in `python/dfine/cli.py`. Every field
-  after the fingerprint is a label — the resolver reads the batch profile from
-  the engine sidecar and falls back to the name only for pre-sidecar engines.
-- Dev tree / `dfine_build`: `<onnx-stem>_<precision>.engine` (underscore; the
-  pre-v0.3.2 C++ default was a hyphen no other tool recognized).
-- Engine sidecar: `<engine>.json` (appended) or `<engine-stem>.json` — probed in
-  that order by the C++ runtime and the CLI alike.
+Every graph is published with a same-stem `.json` sidecar.
 
-## Identity, from strongest to weakest
+| Pattern | Recipe |
+|---|---|
+| `dfine_<size>_op19.onnx` | FP32 opset-19 base |
+| `dfine_<size>_slim.onnx` | Production surgical-FP16 recipe |
+| `dfine_<size>_fp16_st.onnx` | Legacy decoder-FP32 recipe |
 
-1. `fingerprint` — `sha256(ONNX bytes + ONNX sidecar bytes)[:12]`, embedded in
-   cache engine names; binds an engine to the exact artifact it was built from.
-2. `onnx_sha256` in the engine sidecar — the engine's source graph. The resolver
-   checks it when binding a cached engine: a contradicting sidecar beats a
-   matching filename. Engines built by the C++ `dfine_build` fallback carry no
-   `onnx_sha256` (the tool has no hash dependency) — the resolver treats them as
-   provenance-unverified, exactly like pre-sidecar engines.
-3. `checkpoint_sha256` in the ONNX sidecar — the training-side provenance;
-   `dfine export` warns before replacing a previous cache export, noting which
-   checkpoint it came from.
+`<size>` is `n`, `s`, `m`, `l`, or `x`. A suffix identifies a recipe; it does not identify the checkpoint, class set, or exact graph bytes. Those facts belong in the sidecar and hashes.
 
-## Compatibility
+The active release model pack contains the `op19` and `slim` pairs. Legacy assets remain available from their original release but are not the default conversion path.
 
-Nothing published is renamed: all v0.3.1 asset names stay valid. Pre-v0.3.1
-cache entries resolve with a warning; engines without a sidecar simply fall back
-to filename facts. Engine sidecars written by the builders stamp
-`schema_version: 1`; fields are only ever added, never renamed or removed.
+## Engine names
+
+CLI cache entries use:
+
+```text
+dfine_<size>_<precision>-<fingerprint>-b1-<opt>-<max>-sm<arch>-trt<version>.engine
+```
+
+The CLI assembles this spelling in one function. It is useful for discovery and inspection, but the runtime obtains the real batch profile from the engine and cross-checks the engine sidecar.
+
+Explicit output paths and development builds may use any filename. A conventional local name is:
+
+```text
+<onnx-stem>.engine
+```
+
+Filenames do not establish identity, but move or rename each graph or engine together with its sidecar so discovery retains the complete contract.
+
+## Fingerprints and hashes
+
+The CLI cache fingerprint is:
+
+```text
+sha256(ONNX bytes + ONNX sidecar bytes)[:12]
+```
+
+It scopes a cache entry to the exact graph/sidecar pair. The production builder records the source graph as `onnx_sha256`; the resolver compares that value when both the engine candidate and source ONNX are available. The ONNX sidecar records the checkpoint hash and export provenance, including tool versions and model-source revision when available.
+
+The trust chain is:
+
+```text
+checkpoint_sha256 + model_source + export recipe
+                 ↓
+       ONNX graph + sidecar
+                 ↓ cache fingerprint / declared onnx_sha256
+       TensorRT engine + sidecar
+```
+
+These hashes prevent accidental cache shadowing; they do not authenticate engine bytes or replace dataset validation.
+
+## Sidecar locations
+
+An ONNX artifact always uses:
+
+```text
+model.onnx
+model.json
+```
+
+For an engine, the builder may use either:
+
+```text
+model.engine
+model.engine.json    # appended form
+```
+
+or:
+
+```text
+model.engine
+model.json           # same-stem form
+```
+
+The appended form is required when an ONNX graph and engine share a stem in the same directory; otherwise `model.json` belongs to the ONNX artifact. Runtime auto-discovery probes the appended form first, then the same-stem form. Passing an explicit metadata path disables discovery: that file must exist, parse, and agree with the engine.
+
+Avoid keeping two engine sidecars next to one engine. Builders remove a stale shadowing twin when
+publishing to an automatic-discovery location, while preserving the input ONNX sidecar.
+
+## Sidecar responsibilities
+
+The ONNX sidecar owns model and conversion facts:
+
+- model size, task, input geometry, classes, labels, and query count;
+- input/output names, shapes, box format, and score activation;
+- preprocessing and resize geometry;
+- checkpoint load status and SHA-256;
+- model-source provenance, exporter hash, simplification result, and tool versions;
+- opset, deform core, precision, and precision recipe.
+
+The production Python builder carries those fields forward and adds build facts:
+
+- TensorRT version and GPU architecture;
+- network typing and TF32 setting;
+- min/opt/max batch;
+- auxiliary-stream and graph-compatibility facts;
+- source ONNX SHA-256.
+
+The FP32-only C++ builder records tensor/profile facts, TensorRT version, `tf32: false`, and
+`max_aux_streams` (`0` for `--cuda-graph`, otherwise `null`). It uses weak network typing and omits
+GPU architecture and source ONNX SHA-256. Treat such an engine as provenance-unverified unless it
+is selected explicitly and validated separately.
+
+The engine remains authoritative for tensor format, dimensions, data types, and optimization profile. A sidecar contradiction is an error, not an override.
+
+## Cache resolution
+
+Resolution follows artifact identity:
+
+1. An explicit `--engine` wins; cache provenance resolution is bypassed.
+2. Otherwise the resolved ONNX artifact determines the fingerprint.
+3. The fingerprint selects cache candidates for that graph/sidecar pair.
+4. A candidate whose sidecar records another ONNX hash is rejected.
+5. An exact requested batch profile wins; otherwise the candidate with the largest maximum batch
+   is chosen deterministically.
+
+An absent source hash cannot be verified independently; an engine whose source ONNX is missing cannot be re-fingerprinted. The CLI reports the latter loss of provenance instead of presenting the result as verified.
+
+## Schema evolution
+
+Engine sidecars use `schema_version: 1`. Readers accept absent optional fields and reject a schema newer than they support. Existing fields retain their meaning; compatible additions do not require renaming artifacts.
+
+Changes that alter tensor semantics, preprocessing, or output meaning require a new artifact contract and validation, even when the JSON schema can represent them without a version bump.

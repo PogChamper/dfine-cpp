@@ -37,26 +37,14 @@ jobs:
         # because formatting output drifts across major versions.
         run: pip install ruff==0.6.9 clang-format==18.1.8
 
-      # python/dfine and python/tests are fully clean — no exclusions there.
-      # The per-file ignores carry pre-existing debt only (E401/E702/E731/
-      # F401/F541/F841/I001 in trt-files/scripts), scoped per path so any NEW
-      # rule or any violation in python/dfine still fails the job.
       - name: ruff
-        run: >
-          ruff check trt-files/scripts python/dfine python/tests
-          --extend-per-file-ignores
-          'trt-files/scripts/*:E401,trt-files/scripts/*:E702,trt-files/scripts/*:E731,trt-files/scripts/*:F401,trt-files/scripts/*:F541,trt-files/scripts/*:F841,trt-files/scripts/*:I001'
+        run: ruff check trt-files/scripts python/dfine python/tests
 
       - name: shellcheck
         # shellcheck is preinstalled on ubuntu-latest runners.
         run: |
-          # Fully clean scripts — no exclusions.
           shellcheck build.sh cmake/cuda_host_ccbin.sh python/build_wheel.sh \
-            trt-files/scripts/remote_matrix.sh
-          # overnight_bench.sh predates gating: SC2086 ($PY/$SUBSET_ARGS/... rely
-          # on intentional word splitting), SC2015 (`A && B || C` used as
-          # success/failure logging). Both info-level; excluded for this file only.
-          shellcheck --exclude=SC2086,SC2015 trt-files/scripts/overnight_bench.sh
+            trt-files/scripts/remote_matrix.sh trt-files/scripts/overnight_bench.sh
 
       - name: clang-format --dry-run --Werror
         # Gating. The whole tree is formatted with the repo .clang-format
@@ -119,9 +107,9 @@ jobs:
           ./build/dfine_detect --help
           ./build/dfine_bench --help
       - name: ctest (CPU suites; GPU suites skip via 77)
-        # image_layout and engine_meta are CPU-only and must PASS here; the
-        # shape-transition/recovery suites need a GPU + DFINE_TEST_ENGINE and
-        # report SKIP_RETURN_CODE 77 on hosted runners.
+        # image_layout, postprocess, engine_meta, detector_options, and c_api_smoke
+        # must pass here. Shape-transition/recovery need a GPU + DFINE_TEST_ENGINE
+        # and report SKIP_RETURN_CODE 77 on hosted runners.
         run: |
           export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
           ctest --test-dir build --output-on-failure

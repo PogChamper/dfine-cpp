@@ -42,7 +42,8 @@ def torch_outputs(args, x: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
                         device="cuda", img_size=(args.img_size, args.img_size), in_channels=3,
                         pretrained_model_path=None, pretrained_backbone=False)
     model = load_tuning_state(model, args.checkpoint).cuda()
-    model.deploy(); model.eval()
+    model.deploy()
+    model.eval()
     with torch.no_grad():
         out = model(x.cuda())
     return out["pred_logits"].float().cpu().numpy(), out["pred_boxes"].float().cpu().numpy()
@@ -84,7 +85,6 @@ def compare(name: str, ref_log, ref_box, log, box, num_classes: int, k: int) -> 
     rprob = _sigmoid(ref_log[0]).reshape(-1)
     order = np.argsort(-rprob)[:k]
     q = order // num_classes
-    c = order % num_classes
     ref_scores = rprob[order]
     cmp_scores = _sigmoid(log[0]).reshape(-1)[order]
 

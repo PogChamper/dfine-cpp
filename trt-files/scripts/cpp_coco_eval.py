@@ -16,17 +16,22 @@ import argparse
 import json
 import os
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
+from eval_contract import (
+    byte_value,
+    nonnegative_int,
+    positive_int,
+    probability,
+    require_arguments,
+    require_detections,
+    resolution,
+)
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
 REPO = Path(__file__).resolve().parents[2]
-SEG = Path("/home/dxdxxd/projects/custom-dfine/D-FINE-seg")
-DEFAULT_LD = (f"{SEG}/.venv/lib/python3.11/site-packages/tensorrt_libs:"
-              "/home/dxdxxd/miniconda3/lib")
 
 
 def main(args):
@@ -38,23 +43,38 @@ def main(args):
         # Restrict BOTH the filelist and the scored imgIds to the fixed resolution —
         # skipped images left in ev.params.imgIds would count as misses (gotcha #8).
         fw, fh = (int(v) for v in args.filter_res.split("x"))
-        img_ids = [iid for iid in img_ids
-                   if coco.loadImgs(iid)[0]["width"] == fw
-                   and coco.loadImgs(iid)[0]["height"] == fh]
+        img_ids = [
+            iid
+            for iid in img_ids
+            if coco.loadImgs(iid)[0]["width"] == fw and coco.loadImgs(iid)[0]["height"] == fh
+        ]
     if args.limit:
         img_ids = img_ids[: args.limit]
+    if not img_ids:
+        raise SystemExit("[cpp_coco]: selection contains zero images")
     print(f"[cpp_coco] images={len(img_ids)} classes={len(cat_ids)}")
 
-    tmpdir = args.tmpdir or tempfile.gettempdir()
-    filelist = Path(tmpdir) / "cpp_coco_filelist.txt"
+    scratch = tempfile.TemporaryDirectory(prefix="dfine-cpp-coco-", dir=args.tmpdir or None)
+    tmpdir = Path(scratch.name)
+    filelist = tmpdir / "filelist.txt"
     with open(filelist, "w") as f:
         for iid in img_ids:
             f.write(f"{iid} {coco.loadImgs(iid)[0]['file_name']}\n")
 
-    dets_json = Path(args.out) if args.out else Path(tmpdir) / "cpp_coco_dets.json"
-    cmd = [args.binary, "--engine", args.engine, "--images-dir", args.images,
-           "--filelist", str(filelist), "--out", str(dets_json),
-           "--threshold", str(args.score_thresh)]
+    dets_json = Path(args.out) if args.out else tmpdir / "detections.json"
+    cmd = [
+        args.binary,
+        "--engine",
+        args.engine,
+        "--images-dir",
+        args.images,
+        "--filelist",
+        str(filelist),
+        "--out",
+        str(dets_json),
+        "--threshold",
+        str(args.score_thresh),
+    ]
     if args.meta:
         cmd += ["--meta", args.meta]
     if args.cuda_graph:
@@ -80,18 +100,23 @@ def main(args):
     if args.no_upscale:
         cmd += ["--no-upscale"]
     env = dict(os.environ)
-    env["LD_LIBRARY_PATH"] = args.ld_library_path + ":" + env.get("LD_LIBRARY_PATH", "")
+    library_paths = [args.ld_library_path, env.get("LD_LIBRARY_PATH", "")]
+    env["LD_LIBRARY_PATH"] = ":".join(path for path in library_paths if path)
     print("[cpp_coco] $", " ".join(cmd))
     subprocess.run(cmd, check=True, env=env)
 
     raw = json.loads(Path(dets_json).read_text())
-    results = [{"image_id": d["image_id"],
-                "category_id": cont2cat[int(d["category_contig"])],
-                "bbox": d["bbox"], "score": d["score"]} for d in raw]
+    results = [
+        {
+            "image_id": d["image_id"],
+            "category_id": cont2cat[int(d["category_contig"])],
+            "bbox": d["bbox"],
+            "score": d["score"],
+        }
+        for d in raw
+    ]
     print(f"[cpp_coco] {len(results)} detections")
-    if not results:
-        print("[cpp_coco] no detections — abort")
-        return
+    require_detections(results, "[cpp_coco]")
 
     dt = coco.loadRes(results)
     ev = COCOeval(coco, dt, iouType="bbox")
@@ -100,36 +125,62 @@ def main(args):
     ev.accumulate()
     ev.summarize()
     print(f"[cpp_coco] C++ detector AP@[.50:.95]={ev.stats[0]:.4f}  AP@.50={ev.stats[1]:.4f}")
+    scratch.cleanup()
+    return 0
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description="COCO val2017 mAP for the C++ D-FINE detector")
     p.add_argument("--binary", default=str(REPO / "build" / "dfine_coco_eval"))
-    p.add_argument("--engine", default=str(REPO / "trt-files" / "engines" / "dfine_m_fp32.engine"))
+    p.add_argument("--engine", default=os.environ.get("ENGINE", ""))
     p.add_argument("--meta", default="")
-    p.add_argument("--images", default="/mnt/d/datasets/coco/val2017")
-    p.add_argument("--ann", default="/mnt/d/datasets/coco/annotations/instances_val2017.json")
-    p.add_argument("--limit", type=int, default=0, help="0 = all val images")
-    p.add_argument("--score-thresh", type=float, default=0.001)
+    p.add_argument("--images", default=os.environ.get("COCO_IMAGES", ""))
+    p.add_argument("--ann", default=os.environ.get("COCO_ANN", ""))
+    p.add_argument("--limit", type=nonnegative_int, default=0, help="0 = all val images")
+    p.add_argument("--score-thresh", type=probability, default=0.001)
     p.add_argument("--out", default="")
     p.add_argument("--tmpdir", default="")
-    p.add_argument("--ld-library-path", default=DEFAULT_LD)
+    p.add_argument(
+        "--ld-library-path", default="", help="prepend this directory to LD_LIBRARY_PATH"
+    )
     p.add_argument("--cuda-graph", action="store_true", help="pass --cuda-graph to the binary")
     p.add_argument("--gpu-decode", action="store_true", help="decode engine outputs on the GPU")
     p.add_argument("--own-device-memory", action="store_true", help="pass --own-device-memory")
     p.add_argument("--freeze", action="store_true", help="pass --freeze (frozen-memory contract)")
-    p.add_argument("--full-graph", action="store_true",
-                   help="use the full-pipeline graph; pair with --filter-res")
-    p.add_argument("--filter-res", default="",
-                   help="WxH: eval only images of exactly this size (fixed-resolution regime)")
-    p.add_argument("--batch", type=int, default=1, help="pass --batch to the binary")
-    p.add_argument("--letterbox", action="store_true",
-                   help="letterbox preprocessing (validated against letterbox_eval.py hosts)")
+    p.add_argument(
+        "--full-graph",
+        action="store_true",
+        help="use the full-pipeline graph; pair with --filter-res",
+    )
+    p.add_argument(
+        "--filter-res",
+        type=resolution,
+        default=None,
+        help="WxH: eval only images of exactly this size (fixed-resolution regime)",
+    )
+    p.add_argument("--batch", type=positive_int, default=1, help="pass --batch to the binary")
+    p.add_argument(
+        "--letterbox",
+        action="store_true",
+        help="letterbox preprocessing (validated against letterbox_eval.py hosts)",
+    )
     p.add_argument("--letterbox-topleft", action="store_true")
-    p.add_argument("--letterbox-pad", type=int, default=114)
+    p.add_argument("--letterbox-pad", type=byte_value, default=114)
     p.add_argument("--no-upscale", action="store_true")
-    return p.parse_args()
+    args = p.parse_args(argv)
+    require_arguments(
+        p,
+        args,
+        [
+            ("engine", "--engine", "ENGINE"),
+            ("images", "--images", "COCO_IMAGES"),
+            ("ann", "--ann", "COCO_ANN"),
+        ],
+    )
+    if args.full_graph and not args.filter_res:
+        p.error("--full-graph requires --filter-res WxH")
+    return args
 
 
 if __name__ == "__main__":
-    main(parse_args())
+    raise SystemExit(main(parse_args()))

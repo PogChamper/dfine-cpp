@@ -16,6 +16,7 @@ D-FINE-seg's `run_parity` only checks scores (not boxes), so it doesn't catch th
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 import cv2
@@ -27,7 +28,7 @@ from pycocotools.cocoeval import COCOeval
 
 SEG = "/home/dxdxxd/projects/custom-dfine/D-FINE-seg"
 SCRIPTS = "/home/dxdxxd/projects/custom-dfine/D-FINE-cpp/trt-files/scripts"
-TMP = Path("/home/dxdxxd/.claude/jobs/7407fa85/tmp")
+TMP = Path(tempfile.gettempdir()) / "dfine-seg-repro"
 CKPT = f"{SEG}/pretrained/dfine_m_obj2coco.pt"
 IMG_DIR = Path("/mnt/d/datasets/coco/val2017")
 ANN = "/mnt/d/datasets/coco/annotations/instances_val2017.json"
@@ -45,7 +46,9 @@ def build_seg_export(explicit: bool, onnx_path: Path):
     model = build_model("m", num_classes=80, enable_mask_head=False, device="cuda",
                         img_size=(640, 640), in_channels=3, pretrained_model_path=None, pretrained_backbone=False)
     model = load_tuning_state(model, CKPT).cuda()
-    model.deploy(); model.decoder.num_denoising = 0; model.eval()
+    model.deploy()
+    model.decoder.num_denoising = 0
+    model.eval()
     if explicit:
         from export_dfine_onnx import patch_explicit_deform
         patch_explicit_deform(model)
@@ -84,13 +87,16 @@ def eval_fused_engine(engine_path: Path, coco: COCO, img_ids, cont2cat) -> tuple
         H, W = bgr.shape[:2]
         r = cv2.resize(bgr, (640, 640), interpolation=cv2.INTER_LINEAR)  # stretch, keep_ratio=False
         x = torch.from_numpy(cv2.cvtColor(r, cv2.COLOR_BGR2RGB).transpose(2, 0, 1).astype(np.float32) / 255.0).unsqueeze(0).cuda().contiguous()
-        ctx.set_input_shape(in_name, (1, 3, 640, 640)); ctx.set_tensor_address(in_name, x.data_ptr())
+        ctx.set_input_shape(in_name, (1, 3, 640, 640))
+        ctx.set_tensor_address(in_name, x.data_ptr())
         outs = {}
         for n in names:
             if engine.get_tensor_mode(n) == trt.TensorIOMode.OUTPUT:
                 b = torch.empty(tuple(ctx.get_tensor_shape(n)), dtype=t2t[engine.get_tensor_dtype(n)], device="cuda")
-                outs[n] = b; ctx.set_tensor_address(n, b.data_ptr())
-        ctx.execute_async_v3(stream.cuda_stream); stream.synchronize()
+                outs[n] = b
+                ctx.set_tensor_address(n, b.data_ptr())
+        ctx.execute_async_v3(stream.cuda_stream)
+        stream.synchronize()
         labels = outs["labels"][0].cpu().numpy()
         boxes = outs["boxes"][0].cpu().numpy().astype(np.float64)   # xyxy in 640 space
         scores = outs["scores"][0].cpu().numpy()
@@ -105,7 +111,9 @@ def eval_fused_engine(engine_path: Path, coco: COCO, img_ids, cont2cat) -> tuple
         return 0.0, 0.0
     ev = COCOeval(coco, coco.loadRes(dets), iouType="bbox")
     ev.params.imgIds = list(img_ids)
-    ev.evaluate(); ev.accumulate(); ev.summarize()
+    ev.evaluate()
+    ev.accumulate()
+    ev.summarize()
     return float(ev.stats[0]), float(ev.stats[1])
 
 

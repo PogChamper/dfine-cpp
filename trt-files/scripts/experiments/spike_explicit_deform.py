@@ -26,15 +26,20 @@ def bilinear_gather(value_l, grid_l, h, w):
     gx, gy = grid_l[..., 0], grid_l[..., 1]
     ix = (gx + 1) * w / 2 - 0.5   # align_corners=False unnormalize
     iy = (gy + 1) * h / 2 - 0.5
-    x0 = torch.floor(ix); y0 = torch.floor(iy)
-    x1 = x0 + 1; y1 = y0 + 1
-    wx1 = ix - x0; wx0 = 1 - wx1
-    wy1 = iy - y0; wy0 = 1 - wy1
+    x0 = torch.floor(ix)
+    y0 = torch.floor(iy)
+    x1 = x0 + 1
+    y1 = y0 + 1
+    wx1 = ix - x0
+    wx0 = 1 - wx1
+    wy1 = iy - y0
+    wy0 = 1 - wy1
     vflat = value_l.reshape(M, c, h * w)
 
     def corner(xc, yc, wgt):
         valid = ((xc >= 0) & (xc <= w - 1) & (yc >= 0) & (yc <= h - 1)).to(value_l.dtype)
-        xcl = xc.clamp(0, w - 1); ycl = yc.clamp(0, h - 1)
+        xcl = xc.clamp(0, w - 1)
+        ycl = yc.clamp(0, h - 1)
         idx = (ycl * w + xcl).long().reshape(M, 1, Lq * P).expand(M, c, Lq * P)
         g = torch.gather(vflat, 2, idx).reshape(M, c, Lq, P)
         return g * (wgt * valid).unsqueeze(1)
@@ -75,7 +80,9 @@ def build(args):
     m = build_model("m", num_classes=80, enable_mask_head=False, device="cuda",
                     img_size=(640, 640), in_channels=3, pretrained_model_path=None, pretrained_backbone=False)
     m = load_tuning_state(m, args.checkpoint).cuda()
-    m.deploy(); m.decoder.num_denoising = 0; m.eval()
+    m.deploy()
+    m.decoder.num_denoising = 0
+    m.eval()
     return m
 
 
@@ -88,7 +95,7 @@ def patch(m):
 
 
 def main(args):
-    import cv2, numpy as np
+    import cv2
     m = build(args)
     img = cv2.imread("/mnt/d/datasets/coco/val2017/000000000285.jpg")
     img = cv2.resize(img, (640, 640), interpolation=cv2.INTER_LINEAR)

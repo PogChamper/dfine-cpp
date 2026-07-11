@@ -22,7 +22,11 @@ inline const char* next_value(int argc, char** argv, int& i, std::string_view fl
 
 inline int parse_int(const char* s, std::string_view flag) {
     try {
-        return std::stoi(s);
+        const std::string value(s);
+        std::size_t consumed = 0;
+        const int parsed = std::stoi(value, &consumed);
+        if (consumed != value.size()) throw std::invalid_argument("trailing characters");
+        return parsed;
     } catch (...) {
         throw std::runtime_error("invalid integer for " + std::string(flag));
     }
@@ -30,7 +34,11 @@ inline int parse_int(const char* s, std::string_view flag) {
 
 inline float parse_float(const char* s, std::string_view flag) {
     try {
-        return std::stof(s);
+        const std::string value(s);
+        std::size_t consumed = 0;
+        const float parsed = std::stof(value, &consumed);
+        if (consumed != value.size()) throw std::invalid_argument("trailing characters");
+        return parsed;
     } catch (...) {
         throw std::runtime_error("invalid float for " + std::string(flag));
     }

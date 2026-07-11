@@ -34,6 +34,7 @@ int main(int argc, char** argv) {
     bool own_dev_mem = false;
     bool do_freeze = false;
     bool full_graph = false;
+    bool filter_res_set = false;
     int filter_w = 0, filter_h = 0;  // --filter-res: only eval images of exactly WxH
     bool letterbox = false;          // validates the letterbox preprocessing path
     bool lb_topleft = false;
@@ -43,10 +44,10 @@ int main(int argc, char** argv) {
         auto parse_wh = [](std::string_view v, int& w, int& h, const char* flag) {
             const std::string s(v);
             const auto x = s.find('x');
-            if (x == std::string::npos)
+            if (x == std::string::npos || s.find('x', x + 1) != std::string::npos)
                 throw std::runtime_error(std::string(flag) + " expects WxH");
-            w = std::stoi(s.substr(0, x));
-            h = std::stoi(s.substr(x + 1));
+            w = parse_int(s.substr(0, x).c_str(), flag);
+            h = parse_int(s.substr(x + 1).c_str(), flag);
         };
         for (int i = 1; i < argc; ++i) {
             std::string_view a = argv[i];
@@ -87,10 +88,11 @@ int main(int argc, char** argv) {
                 do_freeze = true;
             else if (a == "--full-graph")
                 full_graph = true;
-            else if (starts_with(a, "--filter-res"))
+            else if (starts_with(a, "--filter-res")) {
                 parse_wh(next_value(argc, argv, i, "--filter-res"), filter_w, filter_h,
                          "--filter-res");
-            else if (a == "--letterbox")
+                filter_res_set = true;
+            } else if (a == "--letterbox")
                 letterbox = true;
             else if (a == "--letterbox-topleft") {
                 letterbox = true;
@@ -108,7 +110,10 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "error: --engine, --images-dir, --filelist, --out are required\n");
             return 2;
         }
-        if (batch < 1) batch = 1;
+        if (batch < 1) throw std::runtime_error("--batch must be greater than zero");
+        if (filter_res_set && (filter_w <= 0 || filter_h <= 0)) {
+            throw std::runtime_error("--filter-res dimensions must be positive");
+        }
 
         dfine::DetectorOptions opts;
         opts.threshold = threshold;
@@ -125,11 +130,8 @@ int main(int argc, char** argv) {
         dfine::DFineDetector det = meta.empty() ? dfine::DFineDetector(engine, opts)
                                                 : dfine::DFineDetector(engine, meta, opts);
 
-        if (full_graph && filter_w <= 0) {
-            std::fprintf(stderr,
-                         "[dfine_coco_eval] warning: --full-graph without --filter-res — "
-                         "images not matching the frozen source size fall back to the "
-                         "split path\n");
+        if (full_graph && !filter_res_set) {
+            throw std::runtime_error("--full-graph requires --filter-res WxH");
         }
 
         std::size_t free_after_freeze = 0, total_vram = 0;
@@ -143,10 +145,12 @@ int main(int argc, char** argv) {
             det.freeze(fs);  // warm to peak + capture + lock; steady state must not allocate
             cudaMemGetInfo(&free_after_freeze, &total_vram);
             if (full_graph) {
-                std::fprintf(stderr, "[dfine_coco_eval] full-pipeline graph: %s\n",
-                             det.full_pipeline_graph_active()
-                                 ? "captured"
-                                 : "NOT active (engine needs FP32 outputs + --max-aux-streams 0)");
+                if (!det.full_pipeline_graph_active()) {
+                    throw std::runtime_error(
+                        "full-pipeline graph capture is inactive; the engine must have FP32 "
+                        "outputs and zero auxiliary streams");
+                }
+                std::fprintf(stderr, "[dfine_coco_eval] full-pipeline graph: captured\n");
             }
         }
 
@@ -157,7 +161,7 @@ int main(int argc, char** argv) {
 
         os << "[";
         bool first = true;
-        long long n_imgs = 0, n_dets = 0, n_missing = 0;
+        long long n_imgs = 0, n_dets = 0, n_calls = 0;
 
         struct Item {
             long long id;
@@ -185,6 +189,7 @@ int main(int argc, char** argv) {
                 }
             }
             n_imgs += static_cast<long long>(chunk.size());
+            ++n_calls;
             if (n_imgs % 500 < static_cast<long long>(chunk.size()))
                 std::fprintf(stderr, "[dfine_coco_eval] %lld images...\n", n_imgs);
             chunk.clear();
@@ -197,12 +202,14 @@ int main(int argc, char** argv) {
             std::istringstream ss(line);
             long long image_id = 0;
             std::string fname;
-            if (!(ss >> image_id >> fname)) continue;
+            if (!(ss >> image_id >> fname)) {
+                throw std::runtime_error("invalid filelist line: " + line);
+            }
 
             dfine_app::LoadedImage img = dfine_app::load_image_rgb((images_dir / fname).string());
             if (!img) {
-                ++n_missing;
-                continue;
+                throw std::runtime_error("cannot read input image: " +
+                                         (images_dir / fname).string());
             }
             if (filter_w > 0 && (img.view().width != filter_w || img.view().height != filter_h)) {
                 ++n_filtered;
@@ -214,19 +221,23 @@ int main(int argc, char** argv) {
         flush();
 
         os << "]\n";
-        std::fprintf(stderr,
-                     "[dfine_coco_eval] done: %lld images, %lld detections, %lld missing "
-                     "(batch=%d)\n",
-                     n_imgs, n_dets, n_missing, batch);
+        os.close();
+        if (!os) throw std::runtime_error("failed to write output: " + out.string());
+        std::fprintf(stderr, "[dfine_coco_eval] done: %lld images, %lld detections (batch=%d)\n",
+                     n_imgs, n_dets, batch);
         if (filter_w > 0) {
             std::fprintf(stderr, "[dfine_coco_eval] filter-res %dx%d: %lld images skipped\n",
                          filter_w, filter_h, n_filtered);
         }
         if (full_graph) {
+            const std::uint64_t replays = det.full_graph_replays();
             std::fprintf(stderr,
-                         "[dfine_coco_eval] full-graph replays: %llu calls over %lld "
-                         "images (non-replayed calls used the split path)\n",
-                         static_cast<unsigned long long>(det.full_graph_replays()), n_imgs);
+                         "[dfine_coco_eval] full-graph replays: %llu calls over %lld images\n",
+                         static_cast<unsigned long long>(replays), n_imgs);
+            if (replays != static_cast<std::uint64_t>(n_calls)) {
+                throw std::runtime_error("full-pipeline graph replayed " + std::to_string(replays) +
+                                         " of " + std::to_string(n_calls) + " inference calls");
+            }
         }
         if (do_freeze || full_graph) {
             std::size_t free_end = 0, tot = 0;
@@ -238,6 +249,8 @@ int main(int argc, char** argv) {
                          "%+lld bytes (0 == no steady-state allocation)\n",
                          n_imgs, delta);
         }
+        if (n_imgs == 0) throw std::runtime_error("evaluation processed zero images");
+        if (n_dets == 0) throw std::runtime_error("evaluation produced zero detections");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;

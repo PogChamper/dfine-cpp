@@ -96,7 +96,7 @@ blog, rounds = Path(sys.argv[1]), int(sys.argv[2])
 # rows: batch p50 p90 p99 pre infer decode img/s ; plus "peak GPU mem ...: N MiB"
 row = re.compile(r"^(\d+)\s+([\d.]+)\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+([\d.]+)")
 mem = re.compile(r"peak GPU mem[^:]*:\s*(\d+)\s*MiB")
-TIER = {"fp16_st": "prod", "slim": "surgical", "fp32": "fp32", "fast": "fast", "max": "max"}
+TIER = {"fp16_st": "prod", "slim": "slim", "fp32": "fp32", "fast": "fast", "max": "max"}
 data = {}  # (size, tier) -> {batch: ([p50...],[ips...]), "vram": [..]}
 for log in sorted(blog.glob("r*_dfine_*.log")):
     m = re.match(r"r\d+_dfine_([a-z])_(\w+)$", log.stem)
@@ -114,7 +114,7 @@ for log in sorted(blog.glob("r*_dfine_*.log")):
         v = mem.search(line)
         if v:
             d["vram"].append(int(v.group(1)))
-order = {"prod": 0, "surgical": 1, "fast": 2, "max": 3, "fp32": 4}
+order = {"prod": 0, "slim": 1, "fast": 2, "max": 3, "fp32": 4}
 print(f"Medians of {rounds} interleaved rounds, p50 ms / img/s; VRAM = peak engine+buffers.\n")
 print(f"{'size':<5}{'config':<10}{'b1':<13}{'b2':<13}{'b4':<13}{'b8':<13}{'VRAM MiB':<9}")
 for (size, tier) in sorted(data, key=lambda k: (k[0], order.get(k[1], 9))):

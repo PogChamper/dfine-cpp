@@ -246,8 +246,9 @@ def _bilinear_gather(value_l, grid_l, h, w):
     vflat = value_l.reshape(M, c, h * w)
 
     def _clip(t, hi):
-        # min/max instead of .clamp(): the dynamo exporter (opset>=18) lowers .clamp() to a Clip
-        # whose constant min/max inputs TensorRT 10.13's parser rejects ("input was not registered").
+        # min/max instead of .clamp(): the dynamo exporter (opset>=18) lowers .clamp()
+        # to a Clip whose constant min/max inputs TensorRT 10.13's parser rejects
+        # ("input was not registered").
         # minimum/maximum lower to Min/Max, which parse cleanly. (legacy tracer is unaffected.)
         return torch.minimum(torch.maximum(t, t.new_zeros(())), t.new_full((), float(hi)))
 
@@ -421,7 +422,8 @@ def apply_sliders(model: nn.Module, args: argparse.Namespace) -> None:
         model.decoder.eval_idx = args.eval_idx
         model.decoder.decoder.eval_idx = args.eval_idx
         print(
-            f"[sliders] eval_idx -> {args.eval_idx} (deploy keeps {args.eval_idx + 1} decoder layers)"
+            f"[sliders] eval_idx -> {args.eval_idx} "
+            f"(deploy keeps {args.eval_idx + 1} decoder layers)"
         )
     if args.num_queries is not None:
         if args.num_queries <= 0:
@@ -988,7 +990,8 @@ def export(args: argparse.Namespace) -> None:
     if args.deform == "explicit":
         n = patch_explicit_deform(model)
         print(
-            f"[export] patched {n} deformable cores -> explicit gather-bilinear (TRT-accurate, no GridSample)"
+            f"[export] patched {n} deformable cores -> explicit gather-bilinear "
+            "(TRT-accurate, no GridSample)"
         )
 
     # Trace with batch >= 2 so the tracer cannot constant-fold the batch axis to a
@@ -1003,7 +1006,8 @@ def export(args: argparse.Namespace) -> None:
             f"unexpected eval output keys: {list(out) if isinstance(out, dict) else type(out)}"
         )
     print(
-        f"[export] eval forward ok: logits={tuple(out['pred_logits'].shape)} boxes={tuple(out['pred_boxes'].shape)}"
+        f"[export] eval forward ok: logits={tuple(out['pred_logits'].shape)} "
+        f"boxes={tuple(out['pred_boxes'].shape)}"
     )
 
     meta = _collect_meta(model, args, validated_revision)
@@ -1019,9 +1023,18 @@ def export(args: argparse.Namespace) -> None:
             "[export] note: D-FINE source commit differs from the validated revision; "
             "the export will continue and record both commits"
         )
-    print(
-        f"[export] meta: {json.dumps({k: meta[k] for k in ('variant', 'num_queries', 'reg_max', 'reg_scale', 'num_decoder_layers', 'eval_idx', 'num_levels', 'hidden_dim', 'feat_strides')})}"
+    summary_keys = (
+        "variant",
+        "num_queries",
+        "reg_max",
+        "reg_scale",
+        "num_decoder_layers",
+        "eval_idx",
+        "num_levels",
+        "hidden_dim",
+        "feat_strides",
     )
+    print(f"[export] meta: {json.dumps({key: meta[key] for key in summary_keys})}")
 
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1289,36 +1302,34 @@ def parse_args() -> argparse.Namespace:
         "--deform",
         default="explicit",
         choices=["explicit", "gridsample"],
-        help="explicit gather-bilinear (TRT-accurate, default) vs native GridSample (~10 AP loss on TRT)",
+        help=(
+            "explicit gather-bilinear (TRT-accurate, default) vs native GridSample "
+            "(~10 AP loss on TRT)"
+        ),
     )
     sliders = p.add_argument_group(
         "accuracy/speed sliders",
-        "optional decoder reshapes baked into the export; measured cost/gain tables in "
-        "docs/RESEARCH_MATRIX.md (m/COCO full-val/b8: --num-queries 200 = -0.13 AP, "
-        "--cascade 1:150 = -0.18 AP +8%, --eval-idx 2 = -0.57 AP; composed presets "
-        "reach +21..46% throughput)",
+        "optional decoder reshapes baked into the export; measured accuracy and throughput "
+        "results are in docs/RESEARCH_MATRIX.md",
     )
     sliders.add_argument(
         "--num-queries",
         type=int,
         default=None,
-        help="initial decoder queries (default: the checkpoint's 300); "
-        "200 halves the decode cost at -0.13 AP",
+        help="initial decoder queries (default: the checkpoint's 300)",
     )
     sliders.add_argument(
         "--eval-idx",
         type=int,
         default=None,
-        help="decoder layer that produces the output; deploy() drops "
-        "the layers after it (m: 2 keeps 3 of 4 layers, -0.57 AP)",
+        help="decoder layer that produces the output; deploy() drops the layers after it",
     )
     sliders.add_argument(
         "--cascade",
         default=None,
         metavar="K:KEEP",
-        help="after decoder layer K, keep only the top-KEEP queries "
-        "ranked by layer K's trained score head (1:150 = -0.18 AP, "
-        "+8%% b8 on m)",
+        help="after decoder layer K, keep only the top-KEEP queries ranked by layer K's "
+        "trained score head",
     )
     return p.parse_args()
 

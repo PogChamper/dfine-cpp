@@ -1,7 +1,7 @@
 """validation_report.py — the external-validation-matrix tool (docs/VALIDATION.md).
 Pure parts only: env collection always returns the full key set with "unknown"
 fallbacks, report.json/report.md land together and agree, --check-sums classifies
-match/mismatch/not-listed, and the build/bench subprocess plumbing passes the
+match/mismatch/not-listed/duplicate, and the build/bench subprocess plumbing passes the
 right flags. Every subprocess is mocked — no GPU, nvidia-smi or tensorrt needed."""
 
 from __future__ import annotations
@@ -29,14 +29,15 @@ peak GPU mem (engine+buffers): 812 MiB / 16376 total
 def mod():
     """A fresh module per test so monkeypatched attributes never leak."""
     spec = importlib.util.spec_from_file_location(
-        "validation_report", REPO / "trt-files/scripts/validation_report.py")
+        "validation_report", REPO / "trt-files/scripts/validation_report.py"
+    )
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
 
 
 def _offline(mod, monkeypatch):
-    """No nvidia-smi/git/nvcc, no importable tensorrt/dfine — a GPU-less stranger."""
+    """No nvidia-smi/git/nvcc or importable TensorRT — a GPU-less machine."""
     monkeypatch.setattr(mod, "_run", lambda *a, **k: None)
     monkeypatch.setattr(mod, "_module_version", lambda name: "unknown")
 
@@ -46,9 +47,17 @@ def _fake_assets(tmp_path, precision="fp16"):
     onnx = tmp_path / "dfine_m_slim.onnx"
     onnx.write_bytes(b"not-a-real-graph")
     sidecar = onnx.with_suffix(".json")
-    sidecar.write_text(json.dumps({
-        "variant": "m", "precision": precision, "opset": 19, "num_classes": 80,
-        "precision_mode": "strongly_typed_onnx_fp16" if precision == "fp16" else "fp32"}))
+    sidecar.write_text(
+        json.dumps(
+            {
+                "variant": "m",
+                "precision": precision,
+                "opset": 19,
+                "num_classes": 80,
+                "precision_mode": "strongly_typed_onnx_fp16" if precision == "fp16" else "fp32",
+            }
+        )
+    )
     return onnx, sidecar
 
 
@@ -56,8 +65,9 @@ def test_env_all_keys_present_with_unknown_fallbacks(mod, monkeypatch):
     _offline(mod, monkeypatch)
     env = mod.collect_env()
     assert set(env) == set(mod.ENV_KEYS)
-    for key in ("gpu_name", "compute_cap", "driver", "cuda", "tensorrt", "dfine", "commit"):
+    for key in ("gpu_name", "compute_cap", "driver", "cuda", "tensorrt", "commit"):
         assert env[key] == "unknown"
+    assert env["dfine"] == mod._checkout_dfine_version()
     for key in ("os", "kernel", "python"):  # platform facts are always determinable
         assert env[key] and env[key] != "unknown"
     assert isinstance(env["wsl"], bool)
@@ -67,8 +77,10 @@ def test_reports_written_and_agree(mod, monkeypatch, tmp_path):
     onnx, sidecar = _fake_assets(tmp_path)
     _offline(mod, monkeypatch)  # tensorrt "unknown" -> build skipped -> bench skipped
     sums = tmp_path / "SHA256SUMS"
-    sums.write_text(f"{hashlib.sha256(onnx.read_bytes()).hexdigest()}  {onnx.name}\n"
-                    f"{'0' * 64}  {sidecar.name}\n")
+    sums.write_text(
+        f"{hashlib.sha256(onnx.read_bytes()).hexdigest()}  {onnx.name}\n"
+        f"{hashlib.sha256(sidecar.read_bytes()).hexdigest()}  {sidecar.name}\n"
+    )
     out = tmp_path / "out"
     returned = mod.main(["--onnx", str(onnx), "--out", str(out), "--check-sums", str(sums)])
 
@@ -78,13 +90,14 @@ def test_reports_written_and_agree(mod, monkeypatch, tmp_path):
     assert data["build"]["skipped"] is True and "tensorrt" in data["build"]["note"]
     assert data["bench"]["skipped"] is True and "no engine" in data["bench"]["note"]
     assert data["checksums"]["onnx"] == "match"
-    assert data["checksums"]["sidecar"] == "mismatch"
+    assert data["checksums"]["sidecar"] == "match"
+    assert mod.checksum_failures(data["checksums"]) == {}
     # md is a rendering of the same facts
     assert data["onnx"]["sha256"] == hashlib.sha256(onnx.read_bytes()).hexdigest()
     assert data["onnx"]["sha256"] in md and data["onnx"]["sidecar"]["sha256"] in md
     assert data["onnx"]["sidecar"]["opset"] == 19 and "opset=19" in md
     assert data["build"]["note"] in md and data["bench"]["note"] in md
-    assert "onnx match" in md and "sidecar mismatch" in md
+    assert "onnx match" in md and "sidecar match" in md
     for key in mod.ENV_KEYS:
         if isinstance(data["env"][key], str):
             assert data["env"][key] in md
@@ -97,23 +110,62 @@ def test_check_sums_match_mismatch_not_listed(mod, tmp_path):
     ha = hashlib.sha256(b"graph").hexdigest()
     sums = tmp_path / "SHA256SUMS"
     sums.write_text(f"{ha}  *./a.onnx\n{'0' * 64}  a.json\nnot a checksum line\n")
-    res = mod.verify_sums(sums, {
-        "onnx": (str(a), ha.upper()),  # case-insensitive
-        "sidecar": (str(b), hashlib.sha256(b"{}").hexdigest()),
-        "ghost": (str(tmp_path / "c.bin"), "ff" * 32),
-    })
+    res = mod.verify_sums(
+        sums,
+        {
+            "onnx": (str(a), ha.upper()),  # case-insensitive
+            "sidecar": (str(b), hashlib.sha256(b"{}").hexdigest()),
+            "ghost": (str(tmp_path / "c.bin"), "ff" * 32),
+        },
+    )
     assert res["onnx"] == "match"
     assert res["sidecar"] == "mismatch"
     assert res["ghost"] == "not-listed"
+
+
+def test_check_sums_rejects_duplicate_names(mod, tmp_path):
+    graph = tmp_path / "a.onnx"
+    graph.write_bytes(b"graph")
+    digest = hashlib.sha256(graph.read_bytes()).hexdigest()
+    sums = tmp_path / "SHA256SUMS"
+    sums.write_text(f"{digest}  a.onnx\n{digest}  ./a.onnx\n")
+
+    result = mod.verify_sums(sums, {"onnx": (str(graph), digest)})
+    assert result["onnx"] == "duplicate"
+
+
+def test_check_sums_requires_local_sidecar(mod, monkeypatch, tmp_path):
+    onnx = tmp_path / "a.onnx"
+    onnx.write_bytes(b"graph")
+    sums = tmp_path / "SHA256SUMS"
+    sums.write_text(f"{hashlib.sha256(b'graph').hexdigest()}  a.onnx\n")
+    _offline(mod, monkeypatch)
+    monkeypatch.setattr(
+        mod,
+        "build_engine",
+        lambda *args, **kwargs: pytest.fail("unverified artifacts must not be built"),
+    )
+
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit, match="sidecar=missing-local"):
+        mod.main(["--onnx", str(onnx), "--out", str(out), "--check-sums", str(sums)])
+    assert not (out / "report.json").exists()
 
 
 def test_build_flags_follow_sidecar_precision(mod, monkeypatch, tmp_path):
     def fake_run(cmd, **kw):  # stands in for the build_engine.py subprocess
         engine = Path(cmd[cmd.index("--output") + 1])
         engine.write_bytes(b"engine")
-        Path(str(engine) + ".json").write_text(json.dumps(
-            {"precision": "fp16", "precision_mode": "strongly_typed_onnx_fp16",
-             "trt_version": "10.13.0", "sm_arch": "89"}))
+        Path(str(engine) + ".json").write_text(
+            json.dumps(
+                {
+                    "precision": "fp16",
+                    "precision_mode": "strongly_typed_onnx_fp16",
+                    "trt_version": "10.13.0",
+                    "sm_arch": "89",
+                }
+            )
+        )
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(mod.subprocess, "run", fake_run)
@@ -153,3 +205,19 @@ def test_bench_output_parsed_and_embedded(mod, monkeypatch, tmp_path):
     # no binary -> skipped with the documented note, no subprocess call
     rec2 = mod.run_bench(str(tmp_path / "e.engine"), bench=tmp_path / "missing")
     assert rec2["skipped"] and "no dfine_bench binary" in rec2["note"] and len(calls) == 1
+
+
+@pytest.mark.parametrize("stdout, parsed", [("", []), (BENCH_STDOUT.split("8      ")[0], [1])])
+def test_bench_requires_both_requested_batches(mod, monkeypatch, tmp_path, stdout, parsed):
+    bench = tmp_path / "dfine_bench"
+    bench.write_text("")
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout=stdout, stderr=""),
+    )
+
+    result = mod.run_bench(str(tmp_path / "e.engine"), bench=bench)
+    assert not result["ok"]
+    assert [row["batch"] for row in result["results"]] == parsed
+    assert "expected batches 1 and 8" in result["note"]

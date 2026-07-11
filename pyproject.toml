@@ -3,6 +3,7 @@
 #
 #   uv sync --frozen --extra gpu                     # scripts env (needs an NVIDIA GPU + CUDA 12)
 #   uv sync --frozen --extra gpu --extra torch       # + the checkpoint-export chain
+#   uv sync --frozen --extra gpu --extra torch --group release  # + release tests/build
 #   uv sync --frozen                                 # ONNX-graph tooling only (no GPU wheels)
 #
 # uv.lock pins the Python toolchain. Reproducing a release export also requires
@@ -41,6 +42,9 @@ gpu = [
 # The full checkpoint-export chain: export_dfine_onnx.py needs torch itself;
 # the D-FINE-seg model sources it imports pull in torchvision, loguru, scipy.
 torch = ["torch==2.9.1", "torchvision==0.24.*", "loguru", "scipy"]
+
+[dependency-groups]
+release = ["build>=1", "pytest>=7", "pillow>=9"]
 
 [tool.uv]
 # The locked torch/torchvision wheels come from the CUDA 12.8 index.

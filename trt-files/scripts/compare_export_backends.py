@@ -34,6 +34,7 @@ import argparse
 import glob
 import json
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -67,8 +68,10 @@ def cxcywh_to_xyxy(b: np.ndarray) -> np.ndarray:
 
 def iou_pairs(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Elementwise IoU of two [N,4] xyxy arrays."""
-    x1 = np.maximum(a[:, 0], b[:, 0]); y1 = np.maximum(a[:, 1], b[:, 1])
-    x2 = np.minimum(a[:, 2], b[:, 2]); y2 = np.minimum(a[:, 3], b[:, 3])
+    x1 = np.maximum(a[:, 0], b[:, 0])
+    y1 = np.maximum(a[:, 1], b[:, 1])
+    x2 = np.minimum(a[:, 2], b[:, 2])
+    y2 = np.minimum(a[:, 3], b[:, 3])
     inter = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
     area_a = np.clip(a[:, 2] - a[:, 0], 0, None) * np.clip(a[:, 3] - a[:, 1], 0, None)
     area_b = np.clip(b[:, 2] - b[:, 0], 0, None) * np.clip(b[:, 3] - b[:, 1], 0, None)
@@ -77,8 +80,10 @@ def iou_pairs(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 def iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """[M,N] IoU between a[M,4] and b[N,4] xyxy. For alignment-free best-match scoring."""
-    x1 = np.maximum(a[:, None, 0], b[None, :, 0]); y1 = np.maximum(a[:, None, 1], b[None, :, 1])
-    x2 = np.minimum(a[:, None, 2], b[None, :, 2]); y2 = np.minimum(a[:, None, 3], b[None, :, 3])
+    x1 = np.maximum(a[:, None, 0], b[None, :, 0])
+    y1 = np.maximum(a[:, None, 1], b[None, :, 1])
+    x2 = np.minimum(a[:, None, 2], b[None, :, 2])
+    y2 = np.minimum(a[:, None, 3], b[None, :, 3])
     inter = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
     ar_a = np.clip(a[:, 2] - a[:, 0], 0, None) * np.clip(a[:, 3] - a[:, 1], 0, None)
     ar_b = np.clip(b[:, 2] - b[:, 0], 0, None) * np.clip(b[:, 3] - b[:, 1], 0, None)
@@ -96,7 +101,8 @@ class TorchBackend:
                         device="cuda", img_size=(args.img_size, args.img_size), in_channels=3,
                         pretrained_model_path=None, pretrained_backbone=False)
         m = load_tuning_state(m, args.checkpoint).cuda()
-        m.deploy(); m.eval()
+        m.deploy()
+        m.eval()
         self.m = m
 
     @torch.no_grad()
@@ -211,7 +217,9 @@ def coco_ap(gt_anns, gt_imgs, dets, num_classes, agnostic):
     dt = coco.loadRes(d)
     ev = COCOeval(coco, dt, iouType="bbox")
     ev.params.imgIds = sorted({im["id"] for im in gt_imgs})
-    ev.evaluate(); ev.accumulate(); ev.summarize()
+    ev.evaluate()
+    ev.accumulate()
+    ev.summarize()
     return {"AP": float(ev.stats[0]), "AP50": float(ev.stats[1]), "AP75": float(ev.stats[2])}
 
 
@@ -222,7 +230,6 @@ def main(args):
     images = sample_images(root, args.limit)
     print(f"[cmp] sampled {len(images)} Main.jpg images from {root}")
 
-    repo = SCRIPTS.parents[1]
     backends = {"torch": TorchBackend(args)}
     if "ort" in args.backends:
         backends["ort"] = OrtBackend(args.onnx)
@@ -409,7 +416,9 @@ def parse_args():
     p.add_argument("--backends", nargs="+",
                    default=["ort", "trt_basic", "trt_basic_tf32", "trt_correct"])
     p.add_argument("--log-every", type=int, default=200)
-    p.add_argument("--out", default="/tmp/claude-1000/-home-dxdxxd-projects-custom-dfine/8a557c70-94cc-4a63-807a-d81829510420/scratchpad/compare_report.json")
+    p.add_argument(
+        "--out", default=str(Path(tempfile.gettempdir()) / "dfine-compare-report.json")
+    )
     return p.parse_args()
 
 

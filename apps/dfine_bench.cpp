@@ -19,6 +19,7 @@
 #include "internal/cuda_preprocess.cuh"
 #include "internal/cuda_raii.hpp"
 #include "internal/decode_gpu.cuh"
+#include "internal/engine_meta_detail.hpp"
 #include "internal/trt_session.hpp"
 
 #include <NvInferRuntime.h>
@@ -66,28 +67,76 @@ double ev_ms(cudaEvent_t a, cudaEvent_t b) {
     return static_cast<double>(ms);
 }
 
+dfine::CudaEvent make_cuda_event() {
+    cudaEvent_t event = nullptr;
+    DFINE_CUDA_CHECK(cudaEventCreate(&event));
+    return dfine::CudaEvent(event);
+}
+
 std::vector<int> parse_batches(std::string_view s) {
     std::vector<int> out;
     std::string cur;
+    const auto append = [&] {
+        if (cur.empty()) {
+            throw std::runtime_error("--batches expects comma-separated positive integers");
+        }
+        std::size_t consumed = 0;
+        int batch = 0;
+        try {
+            batch = std::stoi(cur, &consumed);
+        } catch (...) {
+            throw std::runtime_error("--batches expects comma-separated positive integers");
+        }
+        if (consumed != cur.size() || batch <= 0) {
+            throw std::runtime_error("--batches expects comma-separated positive integers");
+        }
+        out.push_back(batch);
+        cur.clear();
+    };
     for (char c : s) {
         if (c == ',') {
-            if (!cur.empty()) out.push_back(std::stoi(cur));
-            cur.clear();
+            append();
         } else
             cur += c;
     }
-    if (!cur.empty()) out.push_back(std::stoi(cur));
-    if (out.empty()) out = {1};
+    append();
     return out;
 }
 
-const dfine::BindingInfo* find_output(const dfine::TrtSession& s, const char* name, int want_last) {
-    if (const auto* b = s.find(name)) return b;
-    for (int i : s.output_indices()) {
-        const auto& b = s.bindings()[i];
-        if (b.shape.nbDims > 0 && b.shape.d[b.shape.nbDims - 1] == want_last) return &b;
+struct OutputBindings {
+    const dfine::BindingInfo* logits{nullptr};
+    const dfine::BindingInfo* boxes{nullptr};
+};
+
+OutputBindings resolve_outputs(const dfine::TrtSession& session, const dfine::EngineMeta& meta,
+                               bool names_asserted) {
+    const auto named = [&](std::string_view name) {
+        const auto* binding = session.find(name);
+        return binding && !binding->is_input ? binding : nullptr;
+    };
+    if (names_asserted) {
+        if (meta.output_names.size() != 2 || meta.output_names[0] == meta.output_names[1])
+            return {};
+        return {named(meta.output_names[0]), named(meta.output_names[1])};
     }
-    return nullptr;
+    OutputBindings resolved{named("logits"), named("boxes")};
+    if (resolved.logits && resolved.boxes) return resolved;
+
+    if (session.output_indices().size() != 2) return {};
+    int boxes_candidates = 0;
+    for (int index : session.output_indices()) {
+        const auto* binding = &session.bindings()[static_cast<std::size_t>(index)];
+        const int last = binding->shape.nbDims > 0
+                             ? static_cast<int>(binding->shape.d[binding->shape.nbDims - 1])
+                             : -1;
+        if (last == 4) {
+            resolved.boxes = binding;
+            ++boxes_candidates;
+        } else {
+            resolved.logits = binding;
+        }
+    }
+    return boxes_candidates == 1 && resolved.logits ? resolved : OutputBindings{};
 }
 
 // Bit-pattern float compare: the parity contract is byte-exactness, and operator==
@@ -203,11 +252,12 @@ int run_pipeline_compare(const std::filesystem::path& engine, const std::filesys
             n_dets = ra.empty() ? 0 : ra.front().size();
         }
         const std::uint64_t measured_replays = graph.full_graph_replays() - replays_before;
-        if (measured_replays < static_cast<std::uint64_t>(iters)) {
+        if (measured_replays != static_cast<std::uint64_t>(iters)) {
             std::printf(
                 "[pipeline-compare] batch %d: only %llu/%d measured iterations replayed "
-                "the graph — results below are contaminated by fallback calls\n",
+                "the graph\n",
                 B, static_cast<unsigned long long>(measured_replays), iters);
+            return 1;
         }
 
         const Stats sp = summarize(s_pre), sd = summarize(s_disp), sw = summarize(s_wait),
@@ -239,13 +289,18 @@ int run_pipeline_compare(const std::filesystem::path& engine, const std::filesys
         // opts.threshold must match on both paths — the captured decode kernel
         // reads the threshold through mapped pinned memory at execution time, so
         // a baked (capture-time) value would show up here as a count mismatch.
-        const float probe = threshold * 0.5f + 1e-4f;
+        const float probe = threshold == 0.25f ? 0.75f : 0.25f;
+        const std::uint64_t replays_before_probe = graph.full_graph_replays();
         const auto pa = split.detect_batch(frames, probe);
         const auto pb = graph.detect_batch(frames, probe);
         const bool ok = detections_equal(pa, pb);
         std::printf("  threshold probe (%.4f vs frozen %.4f): %s\n", probe, threshold,
                     ok ? "byte-identical" : "mismatch (threshold was captured)");
         if (!ok) return 1;
+        if (graph.full_graph_replays() != replays_before_probe + 1) {
+            std::printf("  threshold probe did not replay the full graph\n");
+            return 1;
+        }
     }
     return 0;
 }
@@ -258,6 +313,7 @@ int main(int argc, char** argv) {
     int warmup = 20, iters = 200, src_w = 640, src_h = 480;
     float threshold = 0.001f;
     bool cuda_graph = false;
+    bool require_cuda_graph = false;
     bool graph_compare = false;
     bool gpu_decode = false;
     bool pipeline_compare = false;
@@ -272,9 +328,11 @@ int main(int argc, char** argv) {
                     "[--json out]\n"
                     "  --cuda-graph  replay enqueueV3+D2H from a captured CUDA graph "
                     "(infer col then includes D2H)\n"
+                    "  --require-cuda-graph  fail unless every batch uses graph replay\n"
                     "  --graph-compare  compare enqueue and graph replay in one run\n"
                     "  --gpu-decode  benchmark device-side decode and compact result transfer\n"
                     "  --pipeline-compare  compare split decode with the full-pipeline graph\n"
+                    "  raw benchmark modes require FP32 logits and boxes outputs\n"
                     "  dfine v%s\n",
                     argv[0], dfine::version());
                 return 0;
@@ -296,7 +354,10 @@ int main(int argc, char** argv) {
                 json_out = next_value(argc, argv, i, "--json");
             else if (a == "--cuda-graph")
                 cuda_graph = true;
-            else if (a == "--graph-compare") {
+            else if (a == "--require-cuda-graph") {
+                cuda_graph = true;
+                require_cuda_graph = true;
+            } else if (a == "--graph-compare") {
                 cuda_graph = true;
                 graph_compare = true;
             } else if (a == "--gpu-decode")
@@ -306,9 +367,11 @@ int main(int argc, char** argv) {
             else if (starts_with(a, "--src-size")) {
                 std::string v = next_value(argc, argv, i, "--src-size");
                 const auto x = v.find('x');
-                if (x == std::string::npos) throw std::runtime_error("--src-size expects WxH");
-                src_w = std::stoi(v.substr(0, x));
-                src_h = std::stoi(v.substr(x + 1));
+                if (x == std::string::npos || v.find('x', x + 1) != std::string::npos) {
+                    throw std::runtime_error("--src-size expects WxH");
+                }
+                src_w = parse_int(v.substr(0, x).c_str(), "--src-size");
+                src_h = parse_int(v.substr(x + 1).c_str(), "--src-size");
             } else
                 throw std::runtime_error("unknown arg: " + std::string(a));
         }
@@ -316,11 +379,31 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "error: --engine required\n");
             return 2;
         }
+        if (warmup < 0) throw std::runtime_error("--warmup must be non-negative");
+        if (iters <= 0) throw std::runtime_error("--iters must be positive");
+        if (src_w <= 0 || src_h <= 0) {
+            throw std::runtime_error("--src-size dimensions must be positive");
+        }
+        if (!std::isfinite(threshold) || threshold < 0.0f || threshold > 1.0f) {
+            throw std::runtime_error("--threshold must be finite and within [0,1]");
+        }
+        if (pipeline_compare && (cuda_graph || gpu_decode || !json_out.empty())) {
+            throw std::runtime_error(
+                "--pipeline-compare cannot be combined with raw execution modes or --json");
+        }
+        if (graph_compare && (require_cuda_graph || !json_out.empty())) {
+            throw std::runtime_error(
+                "--graph-compare cannot be combined with --require-cuda-graph or --json");
+        }
+        if (cuda_graph && gpu_decode) {
+            throw std::runtime_error("CUDA Graph replay and --gpu-decode are separate modes");
+        }
+        const auto batches = parse_batches(batches_arg);
 
         // Detector-level split-vs-full-graph comparison; self-contained mode.
         if (pipeline_compare) {
-            return run_pipeline_compare(engine, meta, parse_batches(batches_arg), image, src_w,
-                                        src_h, warmup, iters, threshold);
+            return run_pipeline_compare(engine, meta, batches, image, src_w, src_h, warmup, iters,
+                                        threshold);
         }
 
         // Baseline free memory before we build anything (force context init first).
@@ -328,26 +411,84 @@ int main(int argc, char** argv) {
         std::size_t free_before = 0, total_mem = 0;
         DFINE_CUDA_CHECK(cudaMemGetInfo(&free_before, &total_mem));
 
-        // Meta (sidecar or default) for input dims + tensor names.
-        dfine::EngineMeta m;
+        // The engine owns tensor shapes and names; the sidecar supplies preprocessing metadata.
+        dfine::detail::EngineMetaDocument meta_doc;
+        bool have_meta = false;
         if (meta.empty()) {
             std::filesystem::path alt = engine;
             alt.replace_extension(".json");
-            if (std::filesystem::is_regular_file(engine.string() + ".json"))
-                m = dfine::EngineMeta::from_json_file(engine.string() + ".json");
-            else if (std::filesystem::is_regular_file(alt))
-                m = dfine::EngineMeta::from_json_file(alt);
-        } else if (std::filesystem::is_regular_file(meta)) {
-            m = dfine::EngineMeta::from_json_file(meta);
+            std::filesystem::path discovered = engine.string() + ".json";
+            if (!std::filesystem::is_regular_file(discovered)) discovered = alt;
+            if (std::filesystem::is_regular_file(discovered)) {
+                meta_doc = dfine::detail::load_engine_meta(discovered);
+                have_meta = true;
+            }
+        } else {
+            if (!std::filesystem::is_regular_file(meta)) {
+                throw std::runtime_error("cannot open explicit sidecar: " + meta.string());
+            }
+            meta_doc = dfine::detail::load_engine_meta(meta);
+            have_meta = true;
         }
-        const int H = m.input_h, W = m.input_w;
-
+        const dfine::EngineMeta& m = meta_doc.meta;
         dfine::TrtSession session(engine);
-        const std::string in_name = m.input_names.empty() ? "images" : m.input_names.front();
-        const bool dynamic = [&] {
-            const auto* b = session.find(in_name);
-            return b && b->shape.nbDims >= 1 && b->shape.d[0] < 0;
-        }();
+        if (session.input_indices().size() != 1) {
+            throw std::runtime_error("dfine_bench requires exactly one input tensor");
+        }
+        if (session.num_optimization_profiles() != 1) {
+            throw std::runtime_error("dfine_bench requires exactly one optimization profile");
+        }
+        const dfine::BindingInfo& input =
+            session.bindings()[static_cast<std::size_t>(session.input_indices().front())];
+        if (input.dtype != nvinfer1::DataType::kFLOAT || input.shape.nbDims != 4 ||
+            input.shape.d[1] != 3 || input.shape.d[2] <= 0 || input.shape.d[3] <= 0 ||
+            (input.shape.d[0] != -1 && input.shape.d[0] != 1)) {
+            throw std::runtime_error("dfine_bench requires an FP32 [B,3,H,W] input with fixed H/W");
+        }
+        const std::string& in_name = input.name;
+        const bool dynamic = input.shape.d[0] == -1;
+        const int H = static_cast<int>(input.shape.d[2]);
+        const int W = static_cast<int>(input.shape.d[3]);
+        int min_batch = 1;
+        int opt_batch = 1;
+        int max_batch = 1;
+        if (dynamic) {
+            const dfine::InputProfileInfo profile = session.input_profile(in_name);
+            const auto valid_profile_shape = [&](const nvinfer1::Dims& shape) {
+                return shape.nbDims == 4 && shape.d[0] > 0 && shape.d[1] == 3 && shape.d[2] == H &&
+                       shape.d[3] == W;
+            };
+            if (!valid_profile_shape(profile.min) || !valid_profile_shape(profile.opt) ||
+                !valid_profile_shape(profile.max)) {
+                throw std::runtime_error(
+                    "dfine_bench requires a profile that varies only the batch dimension");
+            }
+            min_batch = static_cast<int>(profile.min.d[0]);
+            opt_batch = static_cast<int>(profile.opt.d[0]);
+            max_batch = static_cast<int>(profile.max.d[0]);
+            if (min_batch > opt_batch || opt_batch > max_batch) {
+                throw std::runtime_error("dfine_bench: engine batch profile is not ordered");
+            }
+        }
+        if (have_meta && meta_doc.has_input_names &&
+            (m.input_names.size() != 1 || m.input_names.front() != in_name)) {
+            throw std::runtime_error("dfine_bench: sidecar input_names contradict the engine");
+        }
+        if (have_meta && meta_doc.has_input_hw && (m.input_h != H || m.input_w != W)) {
+            throw std::runtime_error("dfine_bench: sidecar input dimensions contradict the engine");
+        }
+        if (have_meta && meta_doc.batch_facts_describe_engine()) {
+            const auto conflict = [](bool asserted, int sidecar, int actual) {
+                return asserted && sidecar != actual;
+            };
+            if ((meta_doc.has_dynamic_batch && m.dynamic_batch != dynamic) ||
+                conflict(meta_doc.has_min_batch, m.min_batch, min_batch) ||
+                conflict(meta_doc.has_opt_batch, m.opt_batch, opt_batch) ||
+                conflict(meta_doc.has_max_batch, m.max_batch, max_batch)) {
+                throw std::runtime_error(
+                    "dfine_bench: sidecar batch profile contradicts the engine");
+            }
+        }
 
         // Source image (real, repeated) or synthetic gradient.
         dfine_app::LoadedImage loaded;
@@ -370,22 +511,40 @@ int main(int argc, char** argv) {
         pre.set_mean(m.mean[0], m.mean[1], m.mean[2]);
         pre.set_std(m.std[0], m.std[1], m.std[2]);
 
-        const dfine::BindingInfo* b_logits = find_output(session, "logits", 80);
-        const dfine::BindingInfo* b_boxes = find_output(session, "boxes", 4);
+        const OutputBindings outputs =
+            resolve_outputs(session, m, have_meta && meta_doc.has_output_names);
+        const dfine::BindingInfo* b_logits = outputs.logits;
+        const dfine::BindingInfo* b_boxes = outputs.boxes;
         if (!b_logits || !b_boxes)
             throw std::runtime_error("dfine_bench: cannot resolve logits/boxes outputs");
-        const int N = static_cast<int>(b_logits->shape.d[b_logits->shape.nbDims - 2]);
-        const int C = static_cast<int>(b_logits->shape.d[b_logits->shape.nbDims - 1]);
+        if (b_logits->dtype != nvinfer1::DataType::kFLOAT ||
+            b_boxes->dtype != nvinfer1::DataType::kFLOAT) {
+            throw std::runtime_error("dfine_bench requires FP32 logits and boxes outputs");
+        }
+        const int batch_dim = dynamic ? -1 : 1;
+        if (b_logits->shape.nbDims != 3 || b_logits->shape.d[0] != batch_dim ||
+            b_logits->shape.d[1] <= 0 || b_logits->shape.d[2] <= 0) {
+            throw std::runtime_error("dfine_bench requires logits shaped [B,Q,C]");
+        }
+        if (b_boxes->shape.nbDims != 3 || b_boxes->shape.d[0] != batch_dim ||
+            b_boxes->shape.d[1] != b_logits->shape.d[1] || b_boxes->shape.d[2] != 4) {
+            throw std::runtime_error("dfine_bench requires boxes shaped [B,Q,4]");
+        }
+        const int N = static_cast<int>(b_logits->shape.d[1]);
+        const int C = static_cast<int>(b_logits->shape.d[2]);
+        if (have_meta && ((meta_doc.has_num_queries && m.num_queries != N) ||
+                          (meta_doc.has_num_classes && m.num_classes != C))) {
+            throw std::runtime_error(
+                "dfine_bench: sidecar output dimensions contradict the engine");
+        }
         const int K = dfine::detection_limit(N, C);
 
         cudaStream_t stream = session.stream();
-        cudaEvent_t e0, e1, e2, e3;
-        DFINE_CUDA_CHECK(cudaEventCreate(&e0));
-        DFINE_CUDA_CHECK(cudaEventCreate(&e1));
-        DFINE_CUDA_CHECK(cudaEventCreate(&e2));
-        DFINE_CUDA_CHECK(cudaEventCreate(&e3));
+        const dfine::CudaEvent e0 = make_cuda_event();
+        const dfine::CudaEvent e1 = make_cuda_event();
+        const dfine::CudaEvent e2 = make_cuda_event();
+        const dfine::CudaEvent e3 = make_cuda_event();
 
-        const auto batches = parse_batches(batches_arg);
         std::printf(
             "dfine_bench: engine=%s  variant=%s  input=%dx%d  src=%dx%d  warmup=%d iters=%d%s\n",
             engine.filename().c_str(), m.variant.empty() ? "?" : m.variant.c_str(), W, H, src_w,
@@ -395,7 +554,9 @@ int main(int argc, char** argv) {
 
         std::string json = "{\"engine\":\"" + engine.string() + "\",\"input\":[" +
                            std::to_string(W) + "," + std::to_string(H) + "]," +
-                           "\"cuda_graph\":" + (cuda_graph ? "true" : "false") + ",\"results\":[";
+                           "\"cuda_graph\":" + (cuda_graph ? "true" : "false") +
+                           ",\"cuda_graph_required\":" + (require_cuda_graph ? "true" : "false") +
+                           ",\"results\":[";
         bool first_json = true;
         std::size_t peak_used_mib = 0;
 
@@ -403,6 +564,11 @@ int main(int argc, char** argv) {
             if (dynamic)
                 session.set_input_shape(in_name, nvinfer1::Dims4{B, 3, H, W});
             else if (B != 1) {
+                if (graph_compare || require_cuda_graph) {
+                    throw std::runtime_error(
+                        "the requested graph mode requires every batch; "
+                        "the static engine only supports batch 1");
+                }
                 std::printf("(static engine — skipping batch %d)\n", B);
                 continue;
             }
@@ -479,14 +645,14 @@ int main(int argc, char** argv) {
             }
 
             auto one_iter = [&](double& pre_ms, double& inf_ms, double& d2h_ms, double& dec_ms) {
-                DFINE_CUDA_CHECK(cudaEventRecord(e0, stream));
+                DFINE_CUDA_CHECK(cudaEventRecord(e0.get(), stream));
                 for (int b = 0; b < B; ++b) pre.process(base, d_input + b * single, stream);
-                DFINE_CUDA_CHECK(cudaEventRecord(e1, stream));
+                DFINE_CUDA_CHECK(cudaEventRecord(e1.get(), stream));
                 if (gpu_decode) {
                     // infer -> on-device decode -> compact survivor D2H (no CPU decode).
                     if (!session.context()->enqueueV3(stream))
                         throw std::runtime_error("enqueueV3 failed");
-                    DFINE_CUDA_CHECK(cudaEventRecord(e2, stream));
+                    DFINE_CUDA_CHECK(cudaEventRecord(e2.get(), stream));
                     dfine::gpu_decode_enqueue(static_cast<const float*>(d_logits),
                                               static_cast<const float*>(d_boxes), B, N, C, K,
                                               threshold,
@@ -497,33 +663,33 @@ int main(int argc, char** argv) {
                     DFINE_CUDA_CHECK(cudaMemcpyAsync(gh_counts.data(), gdec.counts,
                                                      gh_counts.size() * sizeof(uint32_t),
                                                      cudaMemcpyDeviceToHost, stream));
-                    DFINE_CUDA_CHECK(cudaEventRecord(e3, stream));
+                    DFINE_CUDA_CHECK(cudaEventRecord(e3.get(), stream));
                     DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
-                    pre_ms = ev_ms(e0, e1);
-                    inf_ms = ev_ms(e1, e2);
-                    d2h_ms = ev_ms(e2, e3);
+                    pre_ms = ev_ms(e0.get(), e1.get());
+                    inf_ms = ev_ms(e1.get(), e2.get());
+                    d2h_ms = ev_ms(e2.get(), e3.get());
                     dec_ms = 0.0;
                     return;
                 }
                 if (graph_exec) {
                     // replay = enqueueV3 + both D2H copies fused; d2h folds into infer.
                     DFINE_CUDA_CHECK(cudaGraphLaunch(graph_exec.get(), stream));
-                    DFINE_CUDA_CHECK(cudaEventRecord(e2, stream));
-                    DFINE_CUDA_CHECK(cudaEventRecord(e3, stream));
+                    DFINE_CUDA_CHECK(cudaEventRecord(e2.get(), stream));
+                    DFINE_CUDA_CHECK(cudaEventRecord(e3.get(), stream));
                 } else {
                     if (!session.context()->enqueueV3(stream))
                         throw std::runtime_error("enqueueV3 failed");
-                    DFINE_CUDA_CHECK(cudaEventRecord(e2, stream));
+                    DFINE_CUDA_CHECK(cudaEventRecord(e2.get(), stream));
                     DFINE_CUDA_CHECK(cudaMemcpyAsync(h_logits.data(), d_logits, logits_bytes,
                                                      cudaMemcpyDeviceToHost, stream));
                     DFINE_CUDA_CHECK(cudaMemcpyAsync(h_boxes.data(), d_boxes, boxes_bytes,
                                                      cudaMemcpyDeviceToHost, stream));
-                    DFINE_CUDA_CHECK(cudaEventRecord(e3, stream));
+                    DFINE_CUDA_CHECK(cudaEventRecord(e3.get(), stream));
                 }
                 DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
-                pre_ms = ev_ms(e0, e1);
-                inf_ms = ev_ms(e1, e2);
-                d2h_ms = ev_ms(e2, e3);
+                pre_ms = ev_ms(e0.get(), e1.get());
+                inf_ms = ev_ms(e1.get(), e2.get());
+                d2h_ms = ev_ms(e2.get(), e3.get());
                 const float* Lsrc = graph_exec ? pl : h_logits.data();
                 const float* Bsrc = graph_exec ? pb : h_boxes.data();
                 const auto t0 = std::chrono::steady_clock::now();
@@ -567,10 +733,23 @@ int main(int argc, char** argv) {
                     for (int w = 0; w < 3; ++w) one_iter(a, bb, c, d);  // prime the replay
             }
 
+            if (require_cuda_graph && !graph_exec) {
+                throw std::runtime_error("--require-cuda-graph: capture failed for batch " +
+                                         std::to_string(B));
+            }
+
+            // Peak memory after warm-up and optional graph capture.
+            std::size_t free_now = 0;
+            DFINE_CUDA_CHECK(cudaMemGetInfo(&free_now, &total_mem));
+            const std::size_t used_mib =
+                free_before > free_now ? (free_before - free_now) / (1024 * 1024) : 0;
+            peak_used_mib = std::max(peak_used_mib, used_mib);
+
             if (graph_compare) {
                 if (!graph_exec) {
-                    std::printf("[graph-compare] batch %d: capture failed, skipping\n", B);
-                    continue;
+                    throw std::runtime_error(
+                        "--graph-compare: CUDA Graph capture failed for batch " +
+                        std::to_string(B));
                 }
                 // Rigorous same-run comparison. Per iteration, run BOTH the enqueueV3+D2H path
                 // and the graph-replay path back-to-back (microseconds apart → identical GPU-clock
@@ -588,7 +767,7 @@ int main(int argc, char** argv) {
                     DFINE_CUDA_CHECK(
                         cudaStreamSynchronize(stream));  // exclude preprocess from both
                     // no-graph: enqueueV3 + D2H
-                    DFINE_CUDA_CHECK(cudaEventRecord(e0, stream));
+                    DFINE_CUDA_CHECK(cudaEventRecord(e0.get(), stream));
                     const auto c0 = Clock::now();
                     if (!session.context()->enqueueV3(stream))
                         throw std::runtime_error("enqueueV3 failed");
@@ -597,23 +776,29 @@ int main(int argc, char** argv) {
                     DFINE_CUDA_CHECK(cudaMemcpyAsync(h_boxes.data(), d_boxes, boxes_bytes,
                                                      cudaMemcpyDeviceToHost, stream));
                     const auto c1 = Clock::now();  // CPU dispatch done (work is async)
-                    DFINE_CUDA_CHECK(cudaEventRecord(e1, stream));
+                    DFINE_CUDA_CHECK(cudaEventRecord(e1.get(), stream));
                     DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
                     const auto c1s = Clock::now();  // full wall done
                     // graph: single replay (enqueueV3+D2H fused)
-                    DFINE_CUDA_CHECK(cudaEventRecord(e2, stream));
+                    DFINE_CUDA_CHECK(cudaEventRecord(e2.get(), stream));
                     const auto c2 = Clock::now();
                     DFINE_CUDA_CHECK(cudaGraphLaunch(graph_exec.get(), stream));
                     const auto c3 = Clock::now();  // CPU dispatch done
-                    DFINE_CUDA_CHECK(cudaEventRecord(e3, stream));
+                    DFINE_CUDA_CHECK(cudaEventRecord(e3.get(), stream));
                     DFINE_CUDA_CHECK(cudaStreamSynchronize(stream));
                     const auto c3s = Clock::now();
+                    if (std::memcmp(h_logits.data(), pl, logits_bytes) != 0 ||
+                        std::memcmp(h_boxes.data(), pb, boxes_bytes) != 0) {
+                        throw std::runtime_error("--graph-compare: output mismatch at batch " +
+                                                 std::to_string(B) + ", iteration " +
+                                                 std::to_string(it));
+                    }
                     ng_cpu.push_back(cpu_ms(c0, c1));
                     g_cpu.push_back(cpu_ms(c2, c3));
                     ng_wall.push_back(cpu_ms(c0, c1s));
                     g_wall.push_back(cpu_ms(c2, c3s));
-                    ng_gpu.push_back(ev_ms(e0, e1));
-                    g_gpu.push_back(ev_ms(e2, e3));
+                    ng_gpu.push_back(ev_ms(e0.get(), e1.get()));
+                    g_gpu.push_back(ev_ms(e2.get(), e3.get()));
                 }
                 const Stats nc = summarize(ng_cpu), gc = summarize(g_cpu);
                 const Stats nw = summarize(ng_wall), gw = summarize(g_wall);
@@ -630,12 +815,6 @@ int main(int argc, char** argv) {
                     nw.p50, gw.p50, nw.p50 - gw.p50, nw.p50 > 0 ? (gw.p50 / nw.p50 - 1) * 100 : 0);
                 continue;
             }
-
-            // Peak memory after warm-up (engine + context + all buffers resident).
-            std::size_t free_now = 0;
-            DFINE_CUDA_CHECK(cudaMemGetInfo(&free_now, &total_mem));
-            const std::size_t used_mib = (free_before - free_now) / (1024 * 1024);
-            peak_used_mib = std::max(peak_used_mib, used_mib);
 
             std::vector<double> totals, pres, infs, d2hs, decs;
             totals.reserve(iters);
@@ -659,23 +838,26 @@ int main(int argc, char** argv) {
             char buf[512];
             std::snprintf(
                 buf, sizeof buf,
-                "{\"batch\":%d,\"total_p50\":%.4f,\"total_p90\":%.4f,\"total_p99\":%.4f,"
+                "{\"batch\":%d,\"cuda_graph_replay\":%s,\"total_p50\":%.4f,"
+                "\"total_mean\":%.4f,\"total_p90\":%.4f,\"total_p99\":%.4f,"
                 "\"preprocess_p50\":%.4f,\"infer_p50\":%.4f,\"d2h_p50\":%.4f,\"decode_p50\":%.4f,"
                 "\"img_per_s\":%.2f,\"gpu_mem_mib\":%zu}",
-                B, st.p50, st.p90, st.p99, sp.p50, si.p50, s2.p50, sd.p50, imgs_per_s, used_mib);
+                B, graph_exec ? "true" : "false", st.p50, st.mean, st.p90, st.p99, sp.p50, si.p50,
+                s2.p50, sd.p50, imgs_per_s, used_mib);
             json += buf;
         }
         json += "],\"peak_gpu_mem_mib\":" + std::to_string(peak_used_mib) + "}\n";
         std::printf("peak GPU mem (engine+buffers): %zu MiB / %zu total\n", peak_used_mib,
                     total_mem / (1024 * 1024));
 
-        cudaEventDestroy(e0);
-        cudaEventDestroy(e1);
-        cudaEventDestroy(e2);
-        cudaEventDestroy(e3);
         if (!json_out.empty()) {
             std::ofstream jf(json_out);
+            if (!jf) throw std::runtime_error("cannot open JSON output: " + json_out.string());
             jf << json;
+            jf.close();
+            if (!jf) {
+                throw std::runtime_error("failed to write JSON output: " + json_out.string());
+            }
             std::printf("wrote %s\n", json_out.c_str());
         }
     } catch (const std::exception& e) {

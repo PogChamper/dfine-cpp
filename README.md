@@ -94,18 +94,19 @@ Correctness is gated at each boundary:
 | Hardware | Reproducible validation report |
 
 The default `slim` recipe is full-val lossless on all five published sizes: N 0.4272, S 0.5060,
-M 0.5500, L 0.5723, and X 0.5926 AP. Released D-FINE-M `slim` steady-state pipeline throughput
-(preprocess, TensorRT, transfer, and CPU decode; p50):
+M 0.5500, L 0.5723, and X 0.5926 AP. D-FINE-M FP16 throughput after surgical conversion, measured
+as medians of three interleaved 500-iteration rounds (steady-state pipeline p50; preprocess,
+TensorRT, transfer, and CPU decode):
 
-| GPU | Run | b1 img/s | b8 img/s |
+| GPU | Recipe | b1 img/s | b8 img/s |
 |---|---|---:|---:|
-| RTX 3090 | Median of 3 × 500 iterations | 310 | 487 |
-| RTX 4070 Ti SUPER | 200-iteration compatibility report | 279.5 | 506.1 |
-| RTX 5080 | Median of 3 × 500 iterations | 456 | 676 |
+| RTX 3090 | `slim` | 310 | 487 |
+| RTX 4070 Ti SUPER | `surgical` | 288 | 526 |
+| RTX 5080 | `slim` | 456 | 676 |
 
-The Ada compatibility report, Ampere and Blackwell benchmark matrices, and exact methodology are in
-[Validation](docs/VALIDATION.md). Accuracy-traded presets and closed FP8, INT8, BF16, and plugin
-experiments remain in the [research matrix](docs/RESEARCH_MATRIX.md).
+The Ampere and Blackwell matrices and Ada compatibility report are in
+[Validation](docs/VALIDATION.md). The Ada full-methodology ladder, accuracy-traded presets, and
+closed FP8, INT8, BF16, and plugin experiments are in the [research matrix](docs/RESEARCH_MATRIX.md).
 
 ## Supported contract
 

@@ -13,19 +13,19 @@ dataset validation, and releases.
 
 ## Release wheel
 
-The latest published wheel is v0.3.3. It contains the Python package, CLI, `libdfine.so`, and the engine builder. The native library targets `sm_89` with forward PTX; it is validated on Ada and Blackwell. Turing and Ampere use the [source build](#source-build). Source-tree changes awaiting the next tag are listed under [Unreleased](releases/UNRELEASED.md).
+The latest published wheel is v0.4.0. It contains the Python package, CLI, `libdfine.so`, and the engine builder. The native library targets `sm_89` with forward PTX; it is validated on Ada and Blackwell. Turing and Ampere use the [source build](#source-build). Source-tree changes awaiting the next tag are listed under [Unreleased](releases/UNRELEASED.md).
 
 ```sh
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install "dfine[cli,tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine-0.3.3-py3-none-linux_x86_64.whl"
+python -m pip install "dfine[cli,tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/dfine-0.4.0-py3-none-linux_x86_64.whl"
 ```
 
 Download one ONNX artifact: the graph and its sidecar are a pair.
 
 ```sh
-curl -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine_m_slim.onnx \
-     -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine_m_slim.json
+curl -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/dfine_m_slim.onnx \
+     -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/dfine_m_slim.json
 dfine doctor
 dfine build --model m --onnx dfine_m_slim.onnx --output dfine_m_slim.engine
 ```
@@ -37,7 +37,7 @@ curl -fLo image.jpg http://images.cocodataset.org/val2017/000000039769.jpg
 dfine predict --engine dfine_m_slim.engine --image image.jpg
 ```
 
-Reference output on the validated v0.3.3 stack:
+Reference output on the validated v0.4.0 stack:
 
 ```text
 cat              0.961  [11.9, 53.6, 316.9, 472.9]
@@ -54,7 +54,7 @@ should agree. Engine compilation normally takes 1–3 minutes. Subsequent infere
 Verify the downloaded pair against the release manifest when the artifacts enter a build or release pipeline:
 
 ```sh
-curl -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/SHA256SUMS
+curl -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/SHA256SUMS
 awk '
   $2 == "dfine_m_slim.onnx" { graph++; print }
   $2 == "dfine_m_slim.json" { sidecar++; print }

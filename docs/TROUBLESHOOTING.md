@@ -14,7 +14,7 @@ bug reports.
 
 ### `tensorrt-cu13-libs` or a CUDA 13 dependency conflict
 
-The unqualified `tensorrt` metapackage may resolve to the CUDA-13 build. The published v0.3.3 wheel and current v0.4.0 source use CUDA 12:
+The unqualified `tensorrt` metapackage may resolve to the CUDA-13 build. The published v0.4.0 wheel and source use CUDA 12:
 
 ```sh
 python -m pip uninstall -y tensorrt tensorrt-cu13 tensorrt-cu13-libs tensorrt-cu13-bindings

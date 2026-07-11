@@ -4,7 +4,7 @@ The reference accuracy and research campaign ran on an RTX 4070 Ti SUPER (Ada, S
 
 TensorRT engines are compiled on the target stack. `validation_report.py` records environment facts, artifact hashes, the exact engine recipe, and steady-state batch-1/batch-8 throughput in a comparable report. The published rows below are maintainer-run; external reports are welcome and identified separately when submitted.
 
-The v0.3.1, v0.3.2, and v0.3.3 model artifacts are byte-identical. Rows produced with v0.3.2 therefore validate the current graph recipe; the `dfine` column records the tooling version used for each report.
+The v0.3.1 through v0.4.0 model artifacts are byte-identical. Rows produced with v0.3.2 therefore validate the current graph recipe; the `dfine` column records the tooling version used for each report.
 
 ## Generate a compatibility report
 
@@ -17,9 +17,9 @@ the build is recorded as failed.
 ```sh
 git clone https://github.com/PogChamper/dfine-cpp && cd dfine-cpp
 python -m pip install "tensorrt-cu12==10.13.*"
-curl -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine_m_slim.onnx \
-     -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine_m_slim.json \
-     -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/SHA256SUMS
+curl -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/dfine_m_slim.onnx \
+     -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/dfine_m_slim.json \
+     -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/SHA256SUMS
 python trt-files/scripts/validation_report.py --onnx dfine_m_slim.onnx \
     --check-sums SHA256SUMS --out validation
 ```

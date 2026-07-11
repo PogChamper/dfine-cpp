@@ -28,22 +28,22 @@ The fix uses standard ONNX and TensorRT operations: no custom plugin and no Pyth
 
 ## Quickstart
 
-This path uses the latest published release, v0.3.3: the Linux x86_64 wheel and the D-FINE-M ONNX artifact. It requires CUDA 12, TensorRT 10.13, and an Ada or Blackwell GPU; build from source on Turing or Ampere. TensorRT engines are compiled locally for the target GPU.
+This path uses the latest published release, v0.4.0: the Linux x86_64 wheel and the D-FINE-M ONNX artifact. It requires CUDA 12, TensorRT 10.13, and an Ada or Blackwell GPU; build from source on Turing or Ampere. TensorRT engines are compiled locally for the target GPU.
 
 `pip` installs the released `dfine` wheel. Maintainer model tooling, dataset validation, and release
 workflows use the root `uv.lock`.
 
 ```sh
 python -m venv .venv && source .venv/bin/activate
-python -m pip install "dfine[cli,tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine-0.3.3-py3-none-linux_x86_64.whl"
-curl -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine_m_slim.onnx \
-     -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine_m_slim.json
+python -m pip install "dfine[cli,tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/dfine-0.4.0-py3-none-linux_x86_64.whl"
+curl -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/dfine_m_slim.onnx \
+     -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/dfine_m_slim.json
 dfine doctor
 dfine build --model m --onnx dfine_m_slim.onnx --output dfine_m_slim.engine
 dfine predict --engine dfine_m_slim.engine --image image.jpg --out result.jpg
 ```
 
-Use any JPEG or PNG as `image.jpg`. The build is a one-time operation and normally takes 1–3 minutes. For source builds, C++ integration, custom checkpoints, and artifact verification, see [Getting started](docs/GETTING_STARTED.md). Changes present in the source tree but not in v0.3.3 are listed under [Unreleased](docs/releases/UNRELEASED.md).
+Use any JPEG or PNG as `image.jpg`. The build is a one-time operation and normally takes 1–3 minutes. For source builds, C++ integration, custom checkpoints, and artifact verification, see [Getting started](docs/GETTING_STARTED.md). What changed in this release is in the [v0.4.0 notes](docs/releases/v0.4.0.md).
 
 ## Build correctly
 

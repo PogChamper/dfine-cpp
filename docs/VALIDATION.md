@@ -6,7 +6,7 @@ TensorRT engines are compiled on the target stack. `validation_report.py` record
 
 The v0.3.1, v0.3.2, and v0.3.3 model artifacts are byte-identical. Rows produced with v0.3.2 therefore validate the current graph recipe; the `dfine` column records the tooling version used for each report.
 
-## Run it
+## Generate a compatibility report
 
 Requirements: a repository checkout and Python ≥3.10. The engine build also needs `tensorrt-cu12==10.13.*`. Without TensorRT or a GPU, the script still records the environment and marks the build as skipped.
 
@@ -22,6 +22,20 @@ python trt-files/scripts/validation_report.py --onnx dfine_m_slim.onnx \
 
 The report uses the production engine recipe: strong typing, TF32 disabled, and max batch 8. Build `dfine_bench` with `./build.sh` before running the report to include throughput; otherwise the engine and environment sections remain useful.
 
+## Run full COCO accuracy
+
+Build `dfine_coco_eval`, then point the scorer at COCO val2017:
+
+```sh
+mkdir -p validation
+uv run python trt-files/scripts/cpp_coco_eval.py \
+    --binary build/dfine_coco_eval \
+    --engine dfine_m_slim.engine \
+    --images /path/to/coco/val2017 \
+    --ann /path/to/coco/annotations/instances_val2017.json \
+    --batch 8 --limit 0 --out validation/coco_detections.json
+```
+
 ## Submit
 
 Review the generated files, then attach both `validation/report.md` and `validation/report.json` (`schema: 1`) to a GitHub issue titled:
@@ -29,6 +43,35 @@ Review the generated files, then attach both `validation/report.md` and `validat
     validation: <GPU> / TRT <version>
 
 For example, `validation: RTX 3060 / TRT 10.9`. The report includes `nvidia-smi` and `platform.uname()` output; inspect it before posting.
+
+## v0.4.0 release-candidate gate
+
+The unreleased runtime was revalidated on 2026-07-11 on the reference RTX 4070 Ti SUPER stack.
+Full COCO val2017 used the same engine bytes as the recorded v0.3.3 reference, batch 8, and the
+complete C++ preprocessing/decode path. A direct N old/new control reproduced the reference. AP is
+rounded to the report precision.
+
+| Artifact | Queries | v0.3.3 AP | v0.4.0 RC AP |
+|---|---:|---:|---:|
+| `slim` N | 300 | 0.428 | 0.428 |
+| `slim` S | 300 | 0.506 | 0.506 |
+| `slim` M | 300 | 0.550 | 0.550 |
+| `slim` L | 300 | 0.572 | 0.572 |
+| `slim` X | 300 | 0.593 | 0.593 |
+| reduced-query N | 100 | 0.423 | 0.423 |
+| reduced-query M | 100 | 0.545 | 0.545 |
+
+The reduced-query rows use the historical fast graph: Q200 followed by cascade `1:100`, producing
+Q=100 outputs. Throughput used the v0.3.3 and RC binaries against the same engine files in three
+interleaved rounds: batches 1/2/4/8, 30 warmups, 500 iterations, and the median paired delta. All five
+`slim` engines stayed within normal run-to-run variation. TensorRT inference time was also unchanged
+for the reduced-query engines; the larger fixed decode candidate set adds the measured end-to-end
+cost below.
+
+| Artifact | Batch 1 img/s | Batch 8 img/s |
+|---|---:|---:|
+| reduced-query N | 492 → 481 (-2.3%) | 1582 → 1496 (-5.4%) |
+| reduced-query M | 295 → 289 (-1.8%) | 582 → 571 (-1.9%) |
 
 ## Results
 
@@ -50,7 +93,8 @@ comparable to the README's full-val numbers. Cells are `p50 ms / img/s`.
 
 The fast/max rows predate the fixed `min(300, Q×C)` runtime decode limit and used `K=Q` for
 reduced-query artifacts. Their VRAM measurements still describe the same engines; treat throughput
-and subset mAP as historical until the end-to-end runs are repeated with the current decoder.
+and subset mAP as historical. The Ada release-candidate gate above quantifies the current N/M
+reduced-query behavior; the rented-hardware rows below have not been repeated.
 
 ### RTX 3090 — Ampere SM 8.6, driver 550.107.02, TRT 10.13.3.9, Ubuntu 22.04 native
 

@@ -25,7 +25,17 @@ The detector validates the TensorRT interface when it loads an engine:
 | Boxes | Device, linear FP32 or FP16 `[B,Q,4]` with the same `Q` |
 | Profile | Exactly one profile; a dynamic engine may vary only input batch |
 
-`H`, `W`, `Q`, and `C` are engine facts. When a sidecar is present, the runtime cross-checks its names, dimensions, query/class counts, and batch profile. Preprocessing fields are validated before they are applied. An explicit sidecar path is strict. Automatic discovery probes `<engine>.json` before `<stem>.json`.
+Additional outputs are allowed only when `logits` and `boxes` have their canonical names or are named
+explicitly by the sidecar as `[logits, boxes]`. Shape-only fallback requires exactly two outputs, and
+boxes must be the only tensor whose last dimension is 4. Every additional output must be a
+device-resident, linear execution tensor with a shape resolved by the selected input shape;
+data-dependent output shapes are not supported.
+
+`H`, `W`, `Q`, and `C` are engine facts. When a sidecar is present, the runtime cross-checks its names,
+dimensions, and query/class counts. It also cross-checks profile fields from an engine sidecar; an
+ONNX sidecar carries only an export-time build recommendation. Preprocessing fields are validated
+before they are applied. An explicit sidecar path is strict. Automatic discovery probes
+`<engine>.json` before `<stem>.json`.
 
 The sidecar also provides variant and class names. Without custom labels, an 80-class model uses COCO-80 names; other models fall back to `class_<id>`.
 
@@ -85,6 +95,8 @@ The published D-FINE weights use:
 | Mean/std | `[0,0,0]` / `[1,1,1]` |
 
 Do not add ImageNet normalization. It changes the model input contract and collapses accuracy.
+`color_order` in metadata describes model input and must be `RGB`; `ImageU8::is_bgr` describes the
+source pixels.
 
 Letterbox is available for applications that require aspect-preserving geometry:
 

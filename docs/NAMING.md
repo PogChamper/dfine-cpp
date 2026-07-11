@@ -9,7 +9,8 @@ runtime treats TensorRT engine IO and profile data as execution truth.
 |---|---|
 | Checkpoint | Trained PyTorch weights |
 | ONNX artifact | One ONNX graph and its same-stem JSON sidecar |
-| Engine | Target-local TensorRT plan and its engine sidecar |
+| Engine | Target-local TensorRT plan; its sidecar is optional at runtime |
+| Engine artifact | One engine and its matching engine sidecar |
 | Runtime | `libdfine`, which executes an engine |
 | Model pack | Published ONNX artifacts for one or more model sizes/recipes |
 | Preset | Named graph/build recipe with an explicit accuracy/performance contract |
@@ -20,7 +21,7 @@ Do not use *model* alone when the distinction affects a command or compatibility
 
 | Axis | Question | Source of truth |
 |---|---|---|
-| Model contract | What does the artifact compute? | Engine IO plus ONNX sidecar |
+| Model contract | What does the artifact compute? | Engine IO plus its matching ONNX or engine sidecar |
 | Conversion recipe | How are graph operations and precision represented? | ONNX sidecar |
 | Engine build | For which TensorRT/GPU/profile was it compiled? | Engine plus engine sidecar |
 | Runtime invocation | How is this call executed? | Detector options and call arguments |
@@ -54,9 +55,12 @@ CLI cache entries use:
 dfine_<size>_<precision>-<fingerprint>-b1-<opt>-<max>-sm<arch>-trt<version>.engine
 ```
 
-The CLI assembles this spelling in one function. It is useful for discovery and inspection, but the runtime obtains the real batch profile from the engine and cross-checks the engine sidecar.
+The CLI assembles this spelling in one function. It is useful for discovery and inspection, but the
+runtime obtains the real batch profile from the engine and cross-checks engine-owned profile facts.
 
-Explicit output paths and development builds may use any filename. A conventional local name is:
+The maintained Python producers require `.onnx` graph inputs/outputs and `.engine` engine outputs;
+those suffixes reserve unambiguous sidecar and staging namespaces. The runtime can open an explicitly
+named engine with another suffix. A conventional local name is:
 
 ```text
 <onnx-stem>.engine
@@ -122,8 +126,12 @@ The ONNX sidecar owns model and conversion facts:
 - input/output names, shapes, box format, and score activation;
 - preprocessing and resize geometry;
 - checkpoint load status and SHA-256;
-- model-source provenance, exporter hash, simplification result, and tool versions;
+- model-source provenance, exporter/converter hashes, source-graph hash, simplification result, and
+  tool versions;
 - opset, deform core, precision, and precision recipe.
+
+It carries `artifact_kind: "onnx"`. Its `max_batch` is an export-time build recommendation, not an
+engine profile fact.
 
 The production Python builder carries those fields forward and adds build facts:
 
@@ -132,6 +140,11 @@ The production Python builder carries those fields forward and adds build facts:
 - min/opt/max batch;
 - auxiliary-stream and graph-compatibility facts;
 - source ONNX SHA-256.
+
+Builders change `artifact_kind` to `"engine"`. The runtime cross-checks profile fields only for
+engine metadata; the TensorRT profile remains authoritative. For legacy untagged metadata,
+`trt_version` plus `min_batch` or `opt_batch` identifies engine-owned profile fields; `max_batch`
+alone does not.
 
 The FP32-only C++ builder records tensor/profile facts, TensorRT version, `tf32: false`, and
 `max_aux_streams` (`0` for `--cuda-graph`, otherwise `null`). It uses weak network typing and omits
@@ -155,6 +168,9 @@ An absent source hash cannot be verified independently; an engine whose source O
 
 ## Schema evolution
 
-Engine sidecars use `schema_version: 1`. Readers accept absent optional fields and reject a schema newer than they support. Existing fields retain their meaning; compatible additions do not require renaming artifacts.
+ONNX and engine sidecars use `schema_version: 1` and identify their owner with `artifact_kind`.
+Readers accept legacy sidecars without that field, accept absent optional fields, and reject a schema
+newer than they support. Existing fields retain their meaning; compatible additions do not require
+renaming artifacts.
 
 Changes that alter tensor semantics, preprocessing, or output meaning require a new artifact contract and validation, even when the JSON schema can represent them without a version bump.

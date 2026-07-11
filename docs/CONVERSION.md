@@ -59,12 +59,24 @@ git -C ../D-FINE-seg checkout "$(cat trt-files/DFINE_SEG_REVISION)"
 uv sync --frozen --extra gpu --extra torch
 ```
 
+Standard detection checkpoints are hosted in `ArgoSA/D-FINE-seg`. Use
+`dfine_{s,m,l,x}_obj2coco.pt`; nano has no `obj2coco` checkpoint, so use
+`dfine_n_coco.pt`. From the D-FINE-cpp checkout, download a missing standard file with the upstream
+helper:
+
+```sh
+PYTHONPATH=../D-FINE-seg uv run --with huggingface-hub==1.13.0 python -c \
+    'from src.d_fine.utils import ensure_pretrained; print(ensure_pretrained("../D-FINE-seg/pretrained/dfine_m_obj2coco.pt"))'
+```
+
+Custom checkpoint names are not downloaded and must already exist.
+
 Export the FP32 base:
 
 ```sh
 uv run python trt-files/scripts/export_dfine_onnx.py \
     --model-name m \
-    --checkpoint /path/to/checkpoint.pt \
+    --checkpoint ../D-FINE-seg/pretrained/dfine_m_obj2coco.pt \
     --dfine-src ../D-FINE-seg \
     --opset 19 \
     --output dfine_m_op19.onnx
@@ -90,7 +102,11 @@ uv run python trt-files/scripts/convert_fp16_surgical.py \
     --slim
 ```
 
-The converter carries the sidecar forward and updates its precision recipe. It keeps the FDR box-decoder scopes and deform coordinate/index chain in FP32; backbone, encoder, decoder compute, and deform data flow use FP16. Graph outputs remain FP32, preserving one output contract for CPU decode and the optional GPU/graph paths.
+The converter carries the sidecar forward, updates its precision recipe, and records the source-graph
+and converter SHA-256 plus the `onnxconverter-common` version. It keeps the FDR box-decoder scopes and
+deform coordinate/index chain in FP32; backbone, encoder, decoder compute, and deform data flow use
+FP16. Graph outputs remain FP32, preserving one output contract for CPU decode and the optional
+GPU/graph paths.
 
 The CLI runs the same sequence from a repository checkout:
 
@@ -140,14 +156,16 @@ The current exporter records:
   source hash;
 - D-FINE source repository, commit, and dirty state when exported from a Git checkout.
 
-The production Python builder carries that contract forward and adds the TensorRT version, GPU
-architecture, network typing, TF32 mode, auxiliary-stream setting, optimization profile, and source
-ONNX hash. The FP32-only C++ builder uses weak network typing with TF32 disabled and records its
-profile and auxiliary-stream setting, but omits GPU architecture and the source ONNX hash. The
-runtime validates engine IO and the batch profile, cross-checks sidecar dimensions and names, and
-validates preprocessing before applying it. An explicit sidecar path must exist, and any present
-sidecar must agree with the engine. When automatic discovery finds no sidecar, dimensions and names
-come from the engine and preprocessing uses the documented defaults.
+The exporter marks its sidecar `artifact_kind: "onnx"`. The production Python builder carries the
+model contract forward, changes the kind to `engine`, and adds the TensorRT version, GPU architecture,
+network typing, TF32 mode, auxiliary-stream setting, optimization profile, and source ONNX hash. The
+FP32-only C++ builder records engine tensor/profile facts, weak network typing, disabled TF32, and its
+auxiliary-stream setting; it omits GPU architecture and the source ONNX hash.
+
+The runtime validates engine IO, cross-checks model facts in either sidecar kind, and cross-checks
+batch fields only when they describe the compiled engine. TensorRT profile data is authoritative. An
+explicit sidecar path must exist. Without a discovered sidecar, dimensions and names come from the
+engine and preprocessing uses the documented defaults.
 
 Names are discovery labels, not identity. The exact rules and cache fingerprint are defined in [Artifact naming and identity](NAMING.md).
 

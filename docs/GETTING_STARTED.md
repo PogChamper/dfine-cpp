@@ -1,6 +1,7 @@
 # Getting started
 
-D-FINE-cpp has two installation paths. Both consume the same ONNX artifacts and produce the same target-local TensorRT engine.
+D-FINE-cpp has two installation paths. Both consume the same ONNX artifacts and produce target-local
+TensorRT engines with the same runtime contract.
 
 | Path | Use it when | Requirements |
 |---|---|---|
@@ -26,10 +27,28 @@ curl -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine
      -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine_m_slim.json
 dfine doctor
 dfine build --model m --onnx dfine_m_slim.onnx --output dfine_m_slim.engine
-dfine predict --engine dfine_m_slim.engine --image image.jpg --out result.jpg
 ```
 
-`image.jpg` may be any JPEG or PNG. Engine compilation normally takes 1–3 minutes. Subsequent inference loads `dfine_m_slim.engine` directly.
+For a reproducible smoke test, use the COCO two-cats image:
+
+```sh
+curl -fLo image.jpg http://images.cocodataset.org/val2017/000000039769.jpg
+dfine predict --engine dfine_m_slim.engine --image image.jpg
+```
+
+Reference output on the validated v0.3.3 stack:
+
+```text
+cat              0.961  [11.9, 53.6, 316.9, 472.9]
+couch            0.955  [0.6, 2.1, 639.4, 474.1]
+cat              0.949  [346.4, 24.1, 639.8, 371.7]
+remote           0.928  [40.1, 73.1, 175.8, 117.7]
+remote           0.883  [333.1, 76.6, 370.6, 187.8]
+```
+
+Small last-digit differences across TensorRT tactics are acceptable; classes, ordering, and boxes
+should agree. Engine compilation normally takes 1–3 minutes. Subsequent inference loads
+`dfine_m_slim.engine` directly. Any JPEG or PNG can be used after this check.
 
 Verify the downloaded pair against the release manifest when the artifacts enter a build or release pipeline:
 
@@ -44,7 +63,7 @@ grep -E '  dfine_m_slim\.(onnx|json)$' SHA256SUMS | sha256sum -c -
 
 | Dependency | Supported version | Used for |
 |---|---|---|
-| NVIDIA driver | CUDA-12-capable | Build and runtime |
+| NVIDIA driver | CUDA-12-capable; Blackwell requires R570+ | Build and runtime |
 | CUDA toolkit | 12.x | Native build |
 | TensorRT | 10.x; validated on 10.13 | Native build, engine build, runtime |
 | CMake | ≥3.24 for `native`; ≥3.20 with an explicit arch | Native build |
@@ -186,7 +205,7 @@ docker run --rm --gpus all -v "$PWD:/data" dfine-cpp \
 | WSL2 Ubuntu guest | Validated | Same as Linux |
 | Ampere (`sm_86`) | Validated | Source build |
 | Ada (`sm_89`) | Validated | Wheel or source |
-| Blackwell (`sm_120`) | Validated | Wheel through PTX or source with CUDA ≥12.8 |
+| Blackwell (`sm_120`) | Validated | R570+; wheel through PTX or source with CUDA ≥12.8 |
 | Turing (`sm_75`) | Expected; not yet validated | Source build |
 | Jetson Orin (`sm_87`) | Expected; not yet validated | JetPack TensorRT and source build |
 | Windows native | Not supported | Use WSL2 |

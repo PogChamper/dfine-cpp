@@ -120,7 +120,11 @@ The complete execution and frozen-memory contracts are in [Runtime](../docs/RUNT
 
 A context manager is preferred. `close()` releases the native detector explicitly; repeated `close()` calls are safe. The wrapper also releases native result sets after every call.
 
-Construction errors include the native `dfine_last_error()` message. A supplied `meta_path` is strict: it must exist, parse, and agree with the engine. Set `DFINE_LIBRARY` only when selecting an exact native library; an invalid explicit path never falls through to another copy.
+Construction errors include the native `dfine_last_error()` message. In the current source tree, a
+supplied `meta_path` is strict: it must exist, parse, and agree with the engine. Published v0.3.3
+falls back to the same-stem sidecar, then metadata-free defaults, when that explicit path is missing;
+see [v0.4.0 changes](../docs/releases/UNRELEASED.md). Set `DFINE_LIBRARY` only when selecting an
+exact native library; an invalid explicit path never falls through to another copy.
 
 ## CLI
 

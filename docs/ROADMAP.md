@@ -15,20 +15,20 @@ D-FINE-cpp has one maintained product path: convert a D-FINE checkpoint without 
 
 The excluded items are possible integration lanes, not promises.
 
-## Unreleased hardening
+## v0.4.0 hardening
 
 The source branch contains the following changes beyond v0.3.3:
 
 | Change | State |
 |---|---|
-| Runtime teardown, engine IO validation, and profile-derived batch limits | Implemented; release gates pending |
-| Source revision, dirty state, checkpoint hash, and tool versions in exported metadata | Implemented; release gates pending |
-| Native wheel metadata, LICENSE/NOTICE, and outside-checkout loading | Implemented; release gates pending |
-| One quickstart with separate conversion, runtime, validation, and research references | Implemented; release gates pending |
+| Runtime teardown, engine IO validation, and profile-derived batch limits | Implemented; local RC gates passed |
+| Source revision, dirty state, checkpoint hash, and tool versions in exported metadata | Implemented; final artifact gate pending |
+| Native wheel metadata, LICENSE/NOTICE, and outside-checkout loading | Implemented; local wheel gate passed |
+| One quickstart with separate conversion, runtime, validation, and research references | Implemented; final review pending |
 
-These changes remain unreleased until GPU recovery, compute-sanitizer, engine batches 1/2/8,
-Python/C++ parity, clean-machine wheel installation, and release-asset verification pass on the
-final bytes. See [Unreleased changes](releases/UNRELEASED.md) for the branch contract.
+The local Ada release candidate passes runtime, sanitizer, wheel, throughput, and full-COCO gates.
+The release remains pending until final review and release-asset verification pass on the committed
+bytes. See [Unreleased changes](releases/UNRELEASED.md) for the branch contract.
 
 No model re-export is required when the graph recipe is unchanged. A fresh export adds the new
 provenance fields to its sidecar.

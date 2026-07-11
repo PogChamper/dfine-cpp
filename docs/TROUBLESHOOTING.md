@@ -14,7 +14,7 @@ bug reports.
 
 ### `tensorrt-cu13-libs` or a CUDA 13 dependency conflict
 
-The unqualified `tensorrt` metapackage may resolve to the CUDA-13 build. D-FINE-cpp v0.3.3 uses CUDA 12:
+The unqualified `tensorrt` metapackage may resolve to the CUDA-13 build. The published v0.3.3 wheel and current v0.4.0 source use CUDA 12:
 
 ```sh
 python -m pip uninstall -y tensorrt tensorrt-cu13 tensorrt-cu13-libs tensorrt-cu13-bindings
@@ -137,23 +137,25 @@ Do not copy an engine across incompatible TensorRT versions or GPU targets. Copy
 
 ### `meta sidecar contradicts the engine`
 
-The JSON belongs to another graph, engine build, or batch profile. Keep these pairs together:
+The JSON belongs to another graph or engine build. Keep these pairs together:
 
 ```text
 dfine_m_slim.onnx + dfine_m_slim.json
 dfine_m_slim.engine + dfine_m_slim.engine.json
 ```
 
-Rebuild the engine from the intended ONNX artifact. Do not edit dimensions, class counts, or profile fields to suppress the error.
+Current sidecars identify themselves as `onnx` or `engine`. ONNX batch bounds are build recommendations;
+engine sidecars are checked against the compiled profile. Rebuild the engine from the intended ONNX
+artifact. Do not edit dimensions, class counts, or engine profile fields to suppress the error.
 
 An explicit `meta_path` must exist and agree with the engine. Omit it to use normal sidecar discovery.
 
 ### `incompatible D-FINE engine`
 
 The runtime requires a linear FP32 input `[B,3,H,W]` with static `B=1` or dynamic batch,
-logits `[B,Q,C]`, and boxes `[B,Q,4]`. Inspect the engine and rebuild it from the raw
-two-output D-FINE ONNX artifact. A fused-postprocessing or differently typed export is not
-interchangeable.
+logits `[B,Q,C]`, and boxes `[B,Q,4]`. Additional outputs require canonical or explicit names for
+the two detection tensors. Inspect the engine and rebuild it from a raw D-FINE ONNX artifact. A
+fused-postprocessing or differently typed export is not interchangeable.
 
 ### A batch exceeds `max_batch`
 
@@ -234,6 +236,9 @@ The exporter is strict. Select the correct `--model-name`, `--num-classes`, and 
 
 ## Driver
 
-If `nvidia-smi` fails, fix the host driver before debugging D-FINE-cpp. RTX 50-series systems require a recent open NVIDIA driver and CUDA toolkit capable of compiling `sm_120`. Driver replacement is host-specific; preserve the package-manager and kernel error logs rather than applying an unconditional purge recipe.
+If `nvidia-smi` fails, fix the host driver before debugging D-FINE-cpp. RTX 50-series systems require
+an R570+ NVIDIA driver; native `sm_120` builds require CUDA 12.8 or newer. Driver replacement is
+host-specific; preserve the package-manager and kernel error logs rather than applying an
+unconditional purge recipe.
 
 If the problem remains, open an issue with `dfine doctor`, the failing command, the complete error, and the ONNX/engine sidecar where relevant.

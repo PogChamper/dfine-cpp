@@ -54,7 +54,7 @@ checkpoint
   → target-local TensorRT engine
 ```
 
-The exporter verifies dynamic batch in ONNX Runtime. The surgical converter keeps only D-FINE's precision-sensitive FDR and deform-coordinate math in FP32. Project-produced artifacts carry JSON sidecars with model, preprocessing, precision, and profile facts; the production builder also records the source ONNX hash.
+The exporter verifies dynamic batch in ONNX Runtime. The surgical converter keeps only D-FINE's precision-sensitive FDR and deform-coordinate math in FP32. ONNX sidecars record model, preprocessing, precision, and an export-time batch recommendation; the production Python builder adds the compiled profile and source ONNX hash to the engine sidecar.
 
 Released model packs contain FP32 and `slim` FP16 ONNX artifacts for D-FINE-N/S/M/L/X. A model pack is not an engine: engines remain local build products because TensorRT compatibility depends on the target stack. See [Conversion](docs/CONVERSION.md) and [artifact identity](docs/NAMING.md).
 
@@ -100,7 +100,7 @@ Ampere, Ada, and Blackwell results and exact methodology are in [Validation](doc
 |---|---|
 | Platform | Linux; x86_64 validated, Jetson/aarch64 not yet validated |
 | GPU | NVIDIA Turing or newer build target; Ampere, Ada, and Blackwell validated |
-| Stack | CUDA 12; TensorRT 10.x, validated on 10.13 |
+| Stack | CUDA 12; TensorRT 10.x, validated on 10.13; Blackwell requires R570+ and CUDA ≥12.8 |
 | Input | Host RGB/BGR, HWC `uint8`, 3 channels |
 | Shapes | Dynamic batch 1–8 by default; fixed engine H/W |
 | Preprocess | Stretch and `/255` by default; optional letterbox |

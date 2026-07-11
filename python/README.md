@@ -4,6 +4,9 @@
 
 ## Install
 
+This document covers the distributable `dfine` package. Maintainer model tooling, dataset validation,
+and release workflows use the root `uv.lock` instead.
+
 The latest published wheel is v0.3.3. It targets Linux x86_64 and contains an `sm_89` native
 library with forward PTX, validated on Ada and Blackwell:
 

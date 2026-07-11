@@ -7,6 +7,10 @@
 
 TensorRT engines are build outputs, not portable model files. Build each engine on the target TensorRT/GPU stack from a released or locally exported ONNX artifact.
 
+Python environments are split by purpose: `pip` installs the released or editable `dfine` package
+and the minimal TensorRT builder dependency; maintainers use the root `uv.lock` for model tooling,
+dataset validation, and releases.
+
 ## Release wheel
 
 The latest published wheel is v0.3.3. It contains the Python package, CLI, `libdfine.so`, and the engine builder. The native library targets `sm_89` with forward PTX; it is validated on Ada and Blackwell. Turing and Ampere use the [source build](#source-build). Source-tree changes awaiting the next tag are listed under [Unreleased](releases/UNRELEASED.md).
@@ -71,7 +75,11 @@ awk '
 | C++ compiler | C++17; supported by the installed CUDA toolkit | Native build |
 | Python | ≥3.9 for bindings; ≥3.11 for the locked conversion tools | Tooling and bindings |
 
-The native build needs TensorRT headers as well as runtime libraries. `tensorrt-cu12` from pip supplies the Python builder and runtime libraries but not the C++ headers. `./build.sh` detects missing headers and prints the supported apt, tarball, and container routes. See [Troubleshooting](TROUBLESHOOTING.md#building-from-source) for exact packages.
+The native build needs TensorRT headers as well as runtime libraries. The `tensorrt-cu12` Python
+wheel, installed directly or through the root `gpu` extra, supplies the Python builder and runtime
+libraries but not the C++ headers. `./build.sh` detects missing headers and prints the supported apt,
+tarball, and container routes. See [Troubleshooting](TROUBLESHOOTING.md#building-from-source) for
+exact packages.
 
 ### Build and test
 
@@ -104,7 +112,7 @@ hints. Plain CMake does not promote `third_party/tensorrt`; pass `-DTENSORRT_DIR
 
 ### Build an engine
 
-Install the TensorRT Python package into the environment used for the builder, then compile the released typed ONNX:
+Install TensorRT into the active Python environment, then compile the released typed ONNX:
 
 ```sh
 python -m pip install "tensorrt-cu12==10.13.*"
@@ -126,7 +134,8 @@ Run the native app:
 If TensorRT lives in a Python environment, its library directory may need to be visible at runtime:
 
 ```sh
-export LD_LIBRARY_PATH="$(python -c 'import os,tensorrt_libs; print(os.path.dirname(tensorrt_libs.__file__))'):${LD_LIBRARY_PATH}"
+TRT_LIBS="$(python -c 'import os,tensorrt_libs; print(os.path.dirname(tensorrt_libs.__file__))')"
+export LD_LIBRARY_PATH="$TRT_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ```
 
 ## Use the C++ package
@@ -147,6 +156,8 @@ target_link_libraries(your_app PRIVATE dfine::dfine)
 Configure the consumer with `-DCMAKE_PREFIX_PATH="$HOME/.local"` when the prefix is not searched by default. [`examples/consumer`](../examples/consumer/CMakeLists.txt) is the complete out-of-tree example used by CI. Runtime behavior and API contracts are in [Runtime](RUNTIME.md).
 
 ## Use the Python package from a source build
+
+The bindings are a separate Python project and are not part of the root tools lock:
 
 ```sh
 python -m pip install -e "python[cli]"

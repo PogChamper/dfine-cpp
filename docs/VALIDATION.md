@@ -8,7 +8,11 @@ The v0.3.1, v0.3.2, and v0.3.3 model artifacts are byte-identical. Rows produced
 
 ## Generate a compatibility report
 
-Requirements: a repository checkout and Python ≥3.10. The engine build also needs `tensorrt-cu12==10.13.*`. Without TensorRT, the report records the environment and marks the build skipped. If TensorRT is present but no GPU is usable, the build is recorded as failed.
+The compatibility report requires a repository checkout, Python ≥3.10, and
+`tensorrt-cu12==10.13.*` for the engine build. It deliberately uses a minimal standalone environment;
+dataset validation below uses the root `uv.lock` and Python ≥3.11. Without TensorRT, the report
+records the environment and marks the build skipped. If TensorRT is present but no GPU is usable,
+the build is recorded as failed.
 
 ```sh
 git clone https://github.com/PogChamper/dfine-cpp && cd dfine-cpp
@@ -31,7 +35,7 @@ Build `dfine_coco_eval`, then point the scorer at COCO val2017:
 : "${COCO_ANN:?set COCO_ANN to instances_val2017.json}"
 : "${TRTLIB:?set TRTLIB to the directory containing libnvinfer.so.10}"
 mkdir -p validation
-uv run python trt-files/scripts/cpp_coco_eval.py \
+uv run --frozen python trt-files/scripts/cpp_coco_eval.py \
     --binary build/dfine_coco_eval \
     --engine dfine_m_slim.engine \
     --images "$COCO_IMAGES" \
@@ -61,7 +65,7 @@ The reduced-query rows use the fast graph: Q200 followed by cascade `1:100`, pro
 outputs. Interleaved v0.3.3/RC checks kept all five `slim` engines within normal run-to-run variation
 and found unchanged TensorRT inference time for the reduced-query engines.
 
-## Results
+## Compatibility report results
 
 | GPU | SM | TRT | Driver | OS | dfine | build ok | b1 img/s | b8 img/s | submitted-by |
 |-----|----|-----|--------|----|-------|----------|----------|----------|--------------|

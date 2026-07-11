@@ -33,6 +33,23 @@ CUDA_ARCH=89 ./build.sh     # explicit SM (CI/cross builds; 'native' needs CMake
 conda-`ld` workaround is applied only for conda toolchains. Plain CMake works too:
 `cmake -B build -S . -DCMAKE_CUDA_ARCHITECTURES=native && cmake --build build -j`.
 
+## Python environments
+
+The root `uv.lock` defines the environment for model tooling, dataset validation, and release
+scripts. Prepare that environment with:
+
+```sh
+uv sync --frozen --extra gpu --extra torch --group release
+```
+
+The distributable bindings under `python/` are a separate project. Test them in an isolated
+environment so their Python range remains independent of the root lock:
+
+```sh
+uv run --isolated --no-project --with-editable ./python --with pytest --with pillow \
+    python -m pytest python/tests
+```
+
 ## Style
 
 - **C++17.** The whole tree is formatted with the repo `.clang-format` and CI gates on it
@@ -49,8 +66,7 @@ Fast tests run everywhere; accuracy validation is empirical against the model:
 - **`ctest` green.** CPU coverage includes image layout, decode limits, sidecar parsing, constructor
   options, and the no-engine C ABI smoke. GPU tests cover shape transitions and detector recovery;
   they skip without a GPU. Set `DFINE_TEST_ENGINE` and optionally `DFINE_TEST_ENGINE_G0` to run
-  them. For Python, run `python -m pip install -e "python[dev]"`, then
-  `python -m pytest python/tests` (the CPU subset needs no GPU).
+  them. The binding command above runs its CPU subset without a GPU.
 - **Build clean** with `WERROR=ON`.
 - **Default-path mAP unchanged** for changes to export, build, or decode:
   `uv run --frozen --extra gpu --extra torch python trt-files/scripts/profile.py --backends trt cpp

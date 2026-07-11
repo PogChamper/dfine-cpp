@@ -30,6 +30,9 @@ The fix uses standard ONNX and TensorRT operations: no custom plugin and no Pyth
 
 This path uses the latest published release, v0.3.3: the Linux x86_64 wheel and the D-FINE-M ONNX artifact. It requires CUDA 12, TensorRT 10.13, and an Ada or Blackwell GPU; build from source on Turing or Ampere. TensorRT engines are compiled locally for the target GPU.
 
+`pip` installs the released `dfine` wheel. Maintainer model tooling, dataset validation, and release
+workflows use the root `uv.lock`.
+
 ```sh
 python -m venv .venv && source .venv/bin/activate
 python -m pip install "dfine[cli,tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine-0.3.3-py3-none-linux_x86_64.whl"
@@ -90,9 +93,19 @@ Correctness is gated at each boundary:
 | Release | Asset grammar, SHA-256 manifest, clean-machine install |
 | Hardware | Reproducible validation report |
 
-The default `slim` recipe is full-val lossless on all five published sizes: N 0.4272, S 0.5060, M 0.5500, L 0.5723, and X 0.5926 AP. The released D-FINE-M graph measured 279.5 img/s at batch 1 and 506.1 img/s at batch 8 on the reference RTX 4070 Ti SUPER system. Accuracy-traded presets and closed FP8, INT8, BF16, and plugin experiments remain in the [research matrix](docs/RESEARCH_MATRIX.md).
+The default `slim` recipe is full-val lossless on all five published sizes: N 0.4272, S 0.5060,
+M 0.5500, L 0.5723, and X 0.5926 AP. Released D-FINE-M `slim` steady-state pipeline throughput
+(preprocess, TensorRT, transfer, and CPU decode; p50):
 
-Ampere, Ada, and Blackwell results and exact methodology are in [Validation](docs/VALIDATION.md).
+| GPU | Run | b1 img/s | b8 img/s |
+|---|---|---:|---:|
+| RTX 3090 | Median of 3 × 500 iterations | 310 | 487 |
+| RTX 4070 Ti SUPER | 200-iteration compatibility report | 279.5 | 506.1 |
+| RTX 5080 | Median of 3 × 500 iterations | 456 | 676 |
+
+The Ada compatibility report, Ampere and Blackwell benchmark matrices, and exact methodology are in
+[Validation](docs/VALIDATION.md). Accuracy-traded presets and closed FP8, INT8, BF16, and plugin
+experiments remain in the [research matrix](docs/RESEARCH_MATRIX.md).
 
 ## Supported contract
 

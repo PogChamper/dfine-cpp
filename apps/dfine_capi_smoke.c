@@ -58,6 +58,30 @@ static void run_selftests(void) {
           "create(bad path) -> NULL");
     check(dfine_last_error()[0] != '\0', "  ... sets last_error");
 
+    {
+        dfine_options_t opts;
+        memset(&opts, 0, sizeof opts);
+        opts.struct_size = sizeof opts;
+        opts.resize = 2;
+        opts.letterbox_pad = 256;
+        check(dfine_detector_create_ex("/nonexistent/does_not_exist.engine", NULL, &opts) == NULL,
+              "create_ex rejects letterbox_pad > 255");
+        check(strstr(dfine_last_error(), "letterbox_pad") != NULL, "  ... reports letterbox_pad");
+
+        opts.letterbox_pad = -1;
+        check(dfine_detector_create_ex("/nonexistent/does_not_exist.engine", NULL, &opts) == NULL,
+              "create_ex accepts negative letterbox_pad sentinel");
+        check(strstr(dfine_last_error(), "letterbox_pad") == NULL,
+              "  ... proceeds to engine loading");
+
+        memset(&opts, 0, sizeof opts);
+        opts.struct_size = sizeof opts;
+        opts.threshold = 1.1f;
+        check(dfine_detector_create_ex("/nonexistent/does_not_exist.engine", NULL, &opts) == NULL,
+              "create_ex rejects threshold > 1");
+        check(strstr(dfine_last_error(), "threshold") != NULL, "  ... reports threshold");
+    }
+
     /* Introspection on NULL returns safe defaults. */
     check(strcmp(dfine_detector_variant(NULL), "") == 0, "variant(NULL) == \"\"");
     check(dfine_detector_input_width(NULL) == 0, "input_width(NULL) == 0");

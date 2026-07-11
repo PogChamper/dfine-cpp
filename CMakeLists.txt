@@ -184,6 +184,9 @@ endforeach()
 if(DFINE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+  if(TARGET dfine_capi_smoke)
+    add_test(NAME c_api_smoke COMMAND dfine_capi_smoke)
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -204,7 +207,7 @@ install(EXPORT dfineTargets NAMESPACE dfine::
 configure_package_config_file(cmake/dfineConfig.cmake.in
   ${CMAKE_CURRENT_BINARY_DIR}/dfineConfig.cmake
   INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dfine)
-# SameMinorVersion: pre-1.0, 0.3.x consumers accept any 0.3.y, 0.4 breaks.
+# Before 1.0, compatibility is limited to releases within the same minor version.
 write_basic_package_version_file(
   ${CMAKE_CURRENT_BINARY_DIR}/dfineConfigVersion.cmake
   COMPATIBILITY SameMinorVersion)

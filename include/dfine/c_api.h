@@ -130,7 +130,8 @@ typedef struct dfine_image_s {
  */
 typedef struct dfine_options_s {
     size_t struct_size;     /* = sizeof(dfine_options_t); versioning anchor  */
-    float threshold;        /* default score threshold; <=0 keeps 0.5        */
+    float threshold;        /* finite default threshold; <=0 keeps 0.5;      */
+                            /*   positive values must not exceed 1            */
     int use_cuda_graph;     /* 0/1: opt-in CUDA-graph replay of the engine.  */
                             /*   Cuts batch-1 launch overhead on single-     */
                             /*   stream (--max-aux-streams 0) engines; a safe */
@@ -142,7 +143,8 @@ typedef struct dfine_options_s {
     int own_device_memory;   /* 0/1: detector-owned TRT activation block      */
     int full_pipeline_graph; /* 0/1: one cudaGraphLaunch per frame; implies   */
                              /*   gpu_decode; capture happens inside          */
-                             /*   dfine_detector_freeze() (0-aux engine only) */
+                             /*   dfine_detector_freeze() and requires FP32   */
+                             /*   outputs from a 0-aux-stream engine          */
 
     /* --- preprocessing geometry (stretch is the training convention) -------- */
     int resize;               /* 0 = auto (engine sidecar), 1 = stretch,       */
@@ -243,8 +245,8 @@ DFINE_API void dfine_set_log_callback(dfine_log_fn_t callback);
 DFINE_API dfine_detector_t* dfine_detector_create(const char* engine_path, const char* meta_path);
 
 /*
- * Like dfine_detector_create() but with construction options (threshold,
- * CUDA-graph). `opts` may be NULL (equivalent to dfine_detector_create()).
+ * Like dfine_detector_create() but with construction options. `opts` may be
+ * NULL (equivalent to dfine_detector_create()).
  */
 DFINE_API dfine_detector_t* dfine_detector_create_ex(const char* engine_path, const char* meta_path,
                                                      const dfine_options_t* opts);
@@ -271,16 +273,17 @@ DFINE_API int dfine_detector_max_batch(const dfine_detector_t* det);
  * ---------------------------------------------------------------------- */
 
 /*
- * Warm every grow-only buffer to peak and lock the memory footprint (zero
- * steady-state device allocation). With options.full_pipeline_graph set, this
- * is also where the full-pipeline CUDA graph is captured for the spec's batch/
- * source size. spec may be NULL (engine defaults). Re-freezing with the same
- * resolved configuration is a no-op; a different one fails. Returns 0 on
- * success, -1 on failure (see dfine_last_error).
+ * Warm grow-only buffers and lock engine/decode capacity. Positive src_w/src_h
+ * also lock preprocessing staging, providing zero steady-state device allocation
+ * within the declared bounds. NULL or zero source dimensions leave staging
+ * unbounded. With options.full_pipeline_graph set, this also captures the graph
+ * for the resolved batch/source configuration. Re-freezing with the same resolved
+ * configuration is a no-op; a different one fails. Returns 0 on success, -1 on
+ * failure (see dfine_last_error).
  */
 DFINE_API int dfine_detector_freeze(dfine_detector_t* det, const dfine_freeze_spec_t* spec);
 
-/* 1 once freeze() captured the full-pipeline graph; 0 = split path in effect. */
+/* 1 once freeze() captured the full-pipeline graph; 0 = fallback path in effect. */
 DFINE_API int dfine_detector_full_graph_active(const dfine_detector_t* det);
 
 /*
@@ -303,7 +306,8 @@ DFINE_API int dfine_detector_last_timings(const dfine_detector_t* det, dfine_tim
  * step      : row stride in bytes; pass <=0 for tightly packed (width*channels).
  * channels  : must be 3.
  * is_bgr    : 0 for RGB channel order, non-zero for BGR (e.g. straight from OpenCV).
- * threshold : score threshold in [0,1]; pass < 0 to use the detector's default.
+ * threshold : finite score threshold in [0,1]; pass a finite value < 0 to use
+ *             the detector's default.
  *
  * Returns a heap-allocated dfine_detections_t* on success (may have count == 0),
  * or NULL on failure. Free the result with dfine_detections_free().
@@ -313,7 +317,8 @@ DFINE_API dfine_detections_t* dfine_detector_detect(dfine_detector_t* det, const
                                                     int is_bgr, float threshold);
 
 /*
- * Batch detection. Requires an engine built with max_batch >= count.
+ * Batch detection. count must be positive and within the engine profile and
+ * frozen bound. threshold has the same finite-value contract as detect().
  *
  * Returns a heap-allocated array of `count` result-set pointers (results[i]
  * corresponds to images[i] and is never NULL within the array), or NULL on

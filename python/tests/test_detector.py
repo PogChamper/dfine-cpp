@@ -31,6 +31,34 @@ def test_bad_engine_raises(lib):
         dfine.Detector("/nonexistent/does_not_exist.engine")
 
 
+@pytest.mark.parametrize("threshold", [-0.1, 1.1, float("nan"), float("inf"), float("-inf")])
+def test_constructor_rejects_invalid_threshold_before_library_load(monkeypatch, threshold):
+    from dfine import detector as detector_module
+
+    def unexpected_library_load():
+        raise AssertionError("native library load must follow threshold validation")
+
+    monkeypatch.setattr(detector_module, "get_lib", unexpected_library_load)
+    with pytest.raises(ValueError, match=r"finite and within \[0, 1\]"):
+        detector_module.Detector("unused.engine", threshold=threshold)
+
+
+def test_per_call_none_uses_constructor_threshold():
+    detector = object.__new__(dfine.Detector)
+    detector._threshold = 0.4
+
+    assert detector._resolve_threshold(None) == pytest.approx(0.4)
+
+
+@pytest.mark.parametrize("threshold", [-0.1, 1.1, float("nan"), float("inf"), float("-inf")])
+def test_detect_rejects_invalid_threshold_before_native_call(threshold):
+    detector = object.__new__(dfine.Detector)
+    detector._threshold = 0.4
+
+    with pytest.raises(ValueError, match=r"finite and within \[0, 1\]"):
+        detector.detect(None, threshold=threshold)
+
+
 # ----- construction / introspection ---------------------------------------- #
 
 
@@ -186,7 +214,6 @@ def test_parity_with_cpp_dfine_detect(detector, engine_path, coco_image, repo_ro
     py_rows = _format_py(detector.detect(arr, threshold=thr))
 
     assert cpp_rows, "reference produced no parseable detections"
-    assert py_rows == cpp_rows, (
-        f"\npython-only: {sorted(py_rows - cpp_rows)}\n"
-        f"cpp-only:    {sorted(cpp_rows - py_rows)}"
-    )
+    assert (
+        py_rows == cpp_rows
+    ), f"\npython-only: {sorted(py_rows - cpp_rows)}\ncpp-only:    {sorted(cpp_rows - py_rows)}"

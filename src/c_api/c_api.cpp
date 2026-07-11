@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <exception>
@@ -187,6 +188,10 @@ dfine_detector_t* dfine_detector_create_ex(const char* engine_path, const char* 
             // about; fields appended after its build stay zero (= defaults).
             dfine_options_t o{};
             std::memcpy(&o, opts, std::min(opts->struct_size, sizeof(dfine_options_t)));
+            if (!std::isfinite(o.threshold)) {
+                set_error("dfine_detector_create: options.threshold must be finite");
+                return nullptr;
+            }
             if (o.threshold > 0.0f) dopts.threshold = o.threshold;
             dopts.use_cuda_graph = (o.use_cuda_graph != 0);
             if (o.graph_warmup_iters > 0) dopts.graph_warmup_iters = o.graph_warmup_iters;
@@ -197,8 +202,13 @@ dfine_detector_t* dfine_detector_create_ex(const char* engine_path, const char* 
             if (o.resize == 2) {
                 dopts.preprocess.resize = dfine::PreprocessSpec::Resize::kLetterbox;
                 dopts.preprocess.anchor_topleft = (o.letterbox_topleft != 0);
-                dopts.preprocess.pad_value =
-                    o.letterbox_pad < 0 ? 114 : std::min(o.letterbox_pad, 255);
+                if (o.letterbox_pad > 255) {
+                    set_error(
+                        "dfine_detector_create: options.letterbox_pad must be in 0..255 or "
+                        "negative for the default");
+                    return nullptr;
+                }
+                dopts.preprocess.pad_value = o.letterbox_pad < 0 ? 114 : o.letterbox_pad;
                 dopts.preprocess.allow_upscale = (o.letterbox_no_upscale == 0);
             }
         }

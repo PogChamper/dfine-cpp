@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 
 #include <unistd.h>
 #include <cstring>
@@ -129,6 +130,20 @@ int main() {
         Frame packed = make_frame(512, 384);
         Frame padded = make_frame(512, 384, /*row_pad=*/13);
         DFINE_CHECK(equal(det.detect(packed.view, kThr), det.detect(padded.view, kThr)));
+    }
+
+    // --- per-call threshold validation is side-effect free ---------------------
+    {
+        DFineDetector det(engine);
+        Frame f = make_frame(512, 384);
+        const Detections base = det.detect(f.view);
+        std::vector<ImageU8> one{f.view};
+
+        DFINE_EXPECT_THROW((void)det.detect(f.view, 1.1F), "0..1");
+        DFINE_EXPECT_THROW((void)det.detect_batch(one, std::numeric_limits<float>::quiet_NaN()),
+                           "finite");
+        DFINE_CHECK(equal(det.detect(f.view, -1.0F), base));
+        DFINE_CHECK(equal(det.detect_batch(one, -1.0F).front(), base));
     }
 
     // --- FreezeSpec validation is side-effect free ------------------------------
@@ -266,6 +281,15 @@ int main() {
     // --- full-pipeline graph: rejected call neither replays nor corrupts -------
     if (const char* g0 = std::getenv("DFINE_TEST_ENGINE_G0"); g0 && *g0) {
         Frame f = make_frame(512, 384);
+        {
+            DetectorOptions o;
+            o.use_cuda_graph = true;
+            DFineDetector det(g0, o);
+            const Detections first = det.detect(f.view, kThr);
+            DFINE_CHECK(det.cuda_graph_replays() == 0);
+            DFINE_CHECK(equal(first, det.detect(f.view, kThr)));
+            DFINE_CHECK(det.cuda_graph_replays() == 1);
+        }
         {
             DetectorOptions o;
             o.full_pipeline_graph = true;

@@ -15,6 +15,7 @@ the C-side result set is freed after every call and the detector on close.
 from __future__ import annotations
 
 import ctypes
+import math
 from dataclasses import dataclass
 from typing import Callable, Optional, Sequence
 
@@ -22,6 +23,13 @@ from . import _ffi
 from ._ffi import _Detections, _FreezeSpec, _Image, _Options, _Timings, get_lib, last_error
 
 __all__ = ["Box", "Detection", "Detector", "set_log_callback"]
+
+
+def _validated_threshold(value: float) -> float:
+    threshold = float(value)
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("threshold must be finite and within [0, 1]")
+    return threshold
 
 
 @dataclass(frozen=True)
@@ -77,10 +85,13 @@ class Detector:
         Explicit ``.json`` sidecar. When omitted, the runtime probes
         ``<engine>.json`` and then the same-stem JSON.
     threshold : float
-        Default score threshold (overridable per :meth:`detect` call).
+        Default score threshold. Must be finite and within ``[0, 1]``.
     use_cuda_graph : bool
         Opt-in CUDA-graph replay (helps batch-1 latency on 0-aux-stream engines;
         a safe no-op otherwise).
+    graph_warmup_iters : int
+        Warmup iterations before graph capture. Values at or below 0 use the
+        default (3); 1 is raised to 2.
     gpu_decode : bool
         GPU decode: fixed top-K records cross PCIe instead of full logits/boxes.
         Requires FP32 engine outputs (falls back to the CPU decode otherwise).
@@ -90,9 +101,10 @@ class Detector:
     full_pipeline_graph : bool
         One ``cudaGraphLaunch`` per matching call covering H2D -> preprocess ->
         infer -> decode -> D2H. Implies ``gpu_decode``; capture happens inside
-        :meth:`freeze` and needs a ``--max-aux-streams 0`` engine. Calls that do
-        not match the frozen batch/source size/channel order fall back to the
-        split path.
+        :meth:`freeze` and needs an engine built with ``dfine build
+        --cuda-graph`` or ``--max-aux-streams 0``. Calls that do not match the
+        frozen batch/source size/channel order use split GPU decode with FP32
+        outputs, or CPU decode otherwise.
     letterbox : bool
         Aspect-preserving preprocessing instead of the default stretch (the
         training convention — letterbox costs ~1.7-2.0 AP on the published
@@ -128,10 +140,11 @@ class Detector:
         is_bgr: bool = False,
         class_names: Optional[Sequence[str]] = None,
     ) -> None:
+        threshold = _validated_threshold(threshold)
         self._lib = get_lib()
         self._handle: Optional[int] = None  # set below; None once closed
         self._default_is_bgr = bool(is_bgr)
-        self._threshold = float(threshold)  # per-call default (forwarded explicitly)
+        self._threshold = threshold  # per-call default (forwarded explicitly)
         self._class_names = list(class_names) if class_names is not None else None
 
         # These bindings speak C ABI v2 (struct_size-versioned options). A
@@ -151,7 +164,7 @@ class Detector:
 
         opts = _Options(
             struct_size=ctypes.sizeof(_Options),
-            threshold=float(threshold),
+            threshold=threshold,
             use_cuda_graph=1 if use_cuda_graph else 0,
             graph_warmup_iters=int(graph_warmup_iters),
             gpu_decode=1 if gpu_decode else 0,
@@ -272,10 +285,12 @@ class Detector:
         """Detect on one HWC uint8 image (numpy array, shape ``(H, W, 3)``).
 
         Returns a list of :class:`Detection`. ``threshold=None`` uses the
-        detector default.
+        detector default; an explicit threshold must be finite and within
+        ``[0, 1]``.
         """
         import numpy as np
 
+        score_threshold = self._resolve_threshold(threshold)
         arr = np.asarray(image)
         if arr.ndim != 3 or arr.shape[2] != 3:
             raise ValueError(f"expected an HWC image with 3 channels, got shape {arr.shape}")
@@ -301,7 +316,7 @@ class Detector:
             step,
             3,
             self._resolve_bgr(is_bgr),
-            self._resolve_threshold(threshold),
+            score_threshold,
         )
         if not res:
             raise RuntimeError(f"detect failed: {last_error()}")
@@ -314,10 +329,16 @@ class Detector:
     def detect_batch(
         self, images: Sequence, *, threshold: Optional[float] = None, is_bgr: Optional[bool] = None
     ) -> list:
-        """Detect on a list of HWC uint8 images. Requires an engine built with
-        ``max_batch >= len(images)``. Returns a list-of-lists of :class:`Detection`."""
+        """Detect on a list of HWC uint8 images.
+
+        An empty input returns an empty list. Otherwise the count must be within
+        the engine profile and frozen bound. Results remain in input order.
+        ``threshold=None`` uses the detector default; an explicit threshold
+        must be finite and within ``[0, 1]``.
+        """
         import numpy as np
 
+        score_threshold = self._resolve_threshold(threshold)
         if len(images) == 0:
             return []
 
@@ -345,9 +366,7 @@ class Detector:
             c_images[i].channels = 3
             c_images[i].is_bgr = bgr
 
-        res = self._lib.dfine_detector_detect_batch(
-            self._require(), c_images, n, self._resolve_threshold(threshold)
-        )
+        res = self._lib.dfine_detector_detect_batch(self._require(), c_images, n, score_threshold)
         if not res:
             raise RuntimeError(f"detect_batch failed: {last_error()}")
         try:
@@ -385,11 +404,7 @@ class Detector:
         return self._handle
 
     def _resolve_threshold(self, threshold: Optional[float]) -> float:
-        # Forward the per-call threshold, or the detector's construction default.
-        # The C ABI treats >= 0 literally (so a stored 0.0 keeps all detections)
-        # and < 0 as "use the engine default", so passing our own stored default
-        # avoids the C-side create-time "<=0 => 0.5" promotion.
-        return self._threshold if threshold is None else float(threshold)
+        return self._threshold if threshold is None else _validated_threshold(threshold)
 
     def _resolve_bgr(self, is_bgr: Optional[bool]) -> int:
         return int(self._default_is_bgr if is_bgr is None else bool(is_bgr))

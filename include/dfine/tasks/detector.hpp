@@ -28,7 +28,7 @@ struct PreprocessSpec {
 };
 
 struct DetectorOptions {
-    float threshold{0.5f};  // default score threshold; override per detect() call
+    float threshold{0.5f};  // finite default score threshold in [0,1]
 
     // Opt-in CUDA-graph replay of the engine (enqueueV3 + output D2H). Captures one
     // graph per batch size after warm-up and replays it, cutting per-frame launch
@@ -52,8 +52,8 @@ struct DetectorOptions {
     // Implies gpu_decode. The capture happens inside freeze(FreezeSpec) (before the
     // allocation lock) and requires a 0-aux-stream engine with FP32 outputs. After
     // freeze, calls whose batch/source-resolution/channel-order match the FreezeSpec
-    // replay the graph; other valid calls use the split gpu_decode path. Unsupported
-    // capture configurations also use the split path. Runtime failures still throw.
+    // replay the graph. Other valid calls and recoverable capture failures use split
+    // GPU decode with FP32 outputs, or CPU decode otherwise. Execution failures throw.
     // The score threshold remains configurable per call.
     bool full_pipeline_graph{false};
 
@@ -99,12 +99,13 @@ class DFineDetector {
     DFineDetector(DFineDetector&&) noexcept;
     DFineDetector& operator=(DFineDetector&&) noexcept;
 
-    // Detect on one HWC uint8 image. `threshold` overrides the constructor option
-    // (pass < 0 to use the default).
+    // Detect on one HWC uint8 image. A finite threshold in [0,1] overrides the
+    // constructor option; pass a finite negative value to use the default.
     [[nodiscard]] Detections detect(const ImageU8& image, float threshold = -1.0f);
 
-    // Batch detect. Requires an engine built with max_batch >= images.size().
-    // results[i] holds the detections for images[i].
+    // Batch detect with the same threshold contract as detect(). An empty input returns
+    // an empty result. Otherwise the count must be within the engine profile and frozen
+    // bound. results[i] corresponds to images[i].
     [[nodiscard]] std::vector<Detections> detect_batch(const std::vector<ImageU8>& images,
                                                        float threshold = -1.0f);
 
@@ -124,11 +125,13 @@ class DFineDetector {
     void freeze(const FreezeSpec& spec);
 
     // True once freeze(FreezeSpec) captured the full-pipeline graph. Matching calls
-    // then run as one cudaGraphLaunch; other calls use the split path.
+    // then run as one cudaGraphLaunch; other calls use the configured fallback path.
     [[nodiscard]] bool full_pipeline_graph_active() const noexcept;
     // Number of calls served by full-graph replay so far (observability: a frozen
     // fixed-resolution pipeline should show this equal to its frame count).
     [[nodiscard]] std::uint64_t full_graph_replays() const noexcept;
+    // Number of calls served by enqueue-plus-output-copy CUDA Graph replay.
+    [[nodiscard]] std::uint64_t cuda_graph_replays() const noexcept;
 
     [[nodiscard]] const std::string& variant() const noexcept;
     [[nodiscard]] int input_h() const noexcept;

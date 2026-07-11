@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -92,6 +93,7 @@ struct DFineDetector::Impl {
     bool graph_supported_{false};  // FP32 outputs and no aux streams
     bool graph_disabled_{false};   // a capture attempt failed unrecoverably; stop trying
     bool graph_warned_{false};
+    std::uint64_t graph_replays_{0};
 
     // --- GPU decode state (opt-in via DetectorOptions.gpu_decode) ------------------
     // Kernels read the engine's FP32 logits/boxes on-device and emit only the compact
@@ -687,6 +689,7 @@ struct DFineDetector::Impl {
         const auto td2 = std::chrono::steady_clock::now();
         dispatch_ms = ms_(td0, td1);
         wait_ms = ms_(td1, td2);  // sync + pinned->host copies (matches the plain path)
+        ++graph_replays_;
         return true;
     }
 
@@ -1102,16 +1105,20 @@ struct DFineDetector::Impl {
             full_src_w_ = sw;
             full_src_h_ = sh;
             full_is_bgr_ = spec.src_is_bgr;
-            if (!gpu_decode_supported_ || session.num_aux_streams() != 0) {
+            if (!gpu_decode_supported_) {
                 log_message(LogSeverity::kWarning,
                             "dfine: full_pipeline_graph set but the engine is not capturable "
-                            "(needs FP32 outputs and a --max-aux-streams 0 build); "
-                            "split gpu_decode path in effect");
+                            "(needs FP32 outputs); CPU decode path in effect");
+            } else if (session.num_aux_streams() != 0) {
+                log_message(LogSeverity::kWarning,
+                            "dfine: full_pipeline_graph set but the engine uses auxiliary "
+                            "streams (rebuild with --max-aux-streams 0); "
+                            "split GPU decode path in effect");
             } else if (!capture_full_graph_(b)) {
                 session.require_ready("full-pipeline graph capture");
                 log_message(LogSeverity::kWarning,
                             "dfine: full-pipeline graph capture failed; "
-                            "split gpu_decode path in effect");
+                            "split GPU decode path in effect");
             }
         }
 
@@ -1221,7 +1228,13 @@ struct DFineDetector::Impl {
         using Clock = std::chrono::steady_clock;
         const auto t0 = Clock::now();
 
+        if (!std::isfinite(threshold)) {
+            throw std::invalid_argument("dfine: threshold must be finite");
+        }
         const float thr = (threshold >= 0.0f) ? threshold : opts.threshold;
+        if (thr > 1.0f) {
+            throw std::invalid_argument("dfine: threshold must be in 0..1");
+        }
 
         // When the frozen full-pipeline graph matches this call, pack the frames into
         // the pinned slab and replay without TensorRT or preprocessing host dispatch.
@@ -1349,6 +1362,13 @@ DFineDetector::DFineDetector(const std::filesystem::path& engine_path,
 void DFineDetector::init_(const std::filesystem::path& engine_path,
                           const std::filesystem::path& meta_path, bool explicit_meta,
                           const DetectorOptions& opts) {
+    if (!std::isfinite(opts.threshold) || opts.threshold < 0.0f || opts.threshold > 1.0f) {
+        throw std::invalid_argument("dfine: threshold must be in 0..1");
+    }
+    if (opts.preprocess.resize == PreprocessSpec::Resize::kLetterbox &&
+        (opts.preprocess.pad_value < 0 || opts.preprocess.pad_value > 255)) {
+        throw std::invalid_argument("dfine: letterbox pad_value must be in 0..255");
+    }
     impl_ = std::make_unique<Impl>(engine_path, meta_path, explicit_meta, opts);
 }
 
@@ -1391,6 +1411,10 @@ bool DFineDetector::full_pipeline_graph_active() const noexcept {
 
 std::uint64_t DFineDetector::full_graph_replays() const noexcept {
     return impl_ ? impl_->full_replays_ : 0;
+}
+
+std::uint64_t DFineDetector::cuda_graph_replays() const noexcept {
+    return impl_ ? impl_->graph_replays_ : 0;
 }
 
 // The noexcept accessors return inert defaults on a moved-from object instead of

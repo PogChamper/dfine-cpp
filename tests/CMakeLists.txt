@@ -24,6 +24,14 @@ target_link_libraries(dfine_test_engine_meta
   PRIVATE dfine::dfine dfine_warnings TensorRT::Runtime CUDA::cudart)
 add_test(NAME engine_meta COMMAND dfine_test_engine_meta)
 
+# CPU-only: constructor options are rejected before engine loading.
+add_executable(dfine_test_detector_options test_detector_options.cpp)
+target_include_directories(dfine_test_detector_options
+  PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(dfine_test_detector_options
+  PRIVATE dfine::dfine dfine_warnings TensorRT::Runtime CUDA::cudart)
+add_test(NAME detector_options COMMAND dfine_test_detector_options)
+
 # GPU: TrtSession shape-transition recovery (frozen rejects, failpoint faults).
 add_executable(dfine_test_shape_transitions test_shape_transitions.cpp)
 target_include_directories(dfine_test_shape_transitions

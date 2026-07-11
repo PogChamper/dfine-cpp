@@ -128,6 +128,9 @@ class TrtSession {
     // (`stream()`) so the writes are visible to `infer()`.
     void* device_buffer(std::string_view name);
     const void* device_buffer(std::string_view name) const;
+    // Changes whenever any binding's device address changes. CUDA Graph users
+    // must invalidate captures that predate the current generation.
+    [[nodiscard]] std::uint64_t buffer_generation() const noexcept { return buffer_generation_; }
 
     cudaStream_t stream() const noexcept { return stream_.get(); }
     void synchronize(const char* operation);
@@ -187,6 +190,7 @@ class TrtSession {
     std::vector<DevPtr> device_buffers_;        // RAII cudaMalloc, parallel to bindings_
     std::vector<HostPtr> host_buffers_;         // RAII cudaMallocHost (pinned)
     std::vector<std::size_t> buffer_capacity_;  // current allocation in bytes
+    std::uint64_t buffer_generation_{0};        // committed device-buffer address set
     std::vector<int> input_indices_;
     std::vector<int> output_indices_;
 

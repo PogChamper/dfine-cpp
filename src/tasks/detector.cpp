@@ -54,6 +54,7 @@ struct DFineDetector::Impl {
     std::string input_name;
     const BindingInfo* b_logits{nullptr};
     const BindingInfo* b_boxes{nullptr};
+    bool outputs_named_{false};
     int N{0};  // num_queries
     int C{0};  // num_classes
     int K{0};  // top-k detections per image
@@ -80,6 +81,7 @@ struct DFineDetector::Impl {
         void* d_boxes{nullptr};
         void* p_logits{nullptr};
         void* p_boxes{nullptr};
+        std::uint64_t buffer_generation{0};
     };
     std::unordered_map<int, GraphEntry> graphs_;
     HostPtr pinned_logits_;
@@ -200,9 +202,21 @@ struct DFineDetector::Impl {
             }
         }
 
-        if (session.output_indices().size() != 2) {
+        if (session.output_indices().size() < 2) {
             contract_error_("expected logits and boxes outputs, got " +
                             std::to_string(session.output_indices().size()));
+        }
+        if (session.output_indices().size() != 2 && !outputs_named_) {
+            contract_error_("extra outputs require explicit logits and boxes tensor names");
+        }
+        if (!profile.dynamic) {
+            for (const BindingInfo& binding : session.bindings()) {
+                if (binding.element_count <= 0) {
+                    contract_error_("tensor '" + binding.name +
+                                    "' has an unresolved static shape; data-dependent output "
+                                    "shapes are not supported");
+                }
+            }
         }
         if (!b_logits || !b_boxes || b_logits == b_boxes || b_logits->is_input ||
             b_boxes->is_input) {
@@ -321,19 +335,16 @@ struct DFineDetector::Impl {
                     "dfine: meta sidecar has " + std::to_string(meta.class_names.size()) +
                     " class_names but the engine has " + std::to_string(C) + " classes");
             }
-            if (meta_doc.has_dynamic_batch && meta.dynamic_batch != profile.dynamic) {
-                throw std::runtime_error(
-                    "dfine: meta sidecar contradicts the engine: dynamic_batch = " +
-                    std::string(meta.dynamic_batch ? "true" : "false") + " but profile 0 is " +
-                    (profile.dynamic ? "dynamic" : "static"));
-            }
-            if (meta_doc.has_min_batch) conflict("min_batch", meta.min_batch, profile.min);
-            if (meta_doc.has_opt_batch) conflict("opt_batch", meta.opt_batch, profile.opt);
-            if (meta_doc.has_max_batch) conflict("max_batch", meta.max_batch, profile.max);
-            if (meta.color_order != "RGB") {
-                throw std::runtime_error(
-                    "dfine: meta sidecar requests BGR model input; the D-FINE runtime contract "
-                    "requires RGB model input (ImageU8::is_bgr describes the source image)");
+            if (meta_doc.batch_facts_describe_engine()) {
+                if (meta_doc.has_dynamic_batch && meta.dynamic_batch != profile.dynamic) {
+                    throw std::runtime_error(
+                        "dfine: meta sidecar contradicts the engine: dynamic_batch = " +
+                        std::string(meta.dynamic_batch ? "true" : "false") + " but profile 0 is " +
+                        (profile.dynamic ? "dynamic" : "static"));
+                }
+                if (meta_doc.has_min_batch) conflict("min_batch", meta.min_batch, profile.min);
+                if (meta_doc.has_opt_batch) conflict("opt_batch", meta.opt_batch, profile.opt);
+                if (meta_doc.has_max_batch) conflict("max_batch", meta.max_batch, profile.max);
             }
         }
 
@@ -417,12 +428,14 @@ struct DFineDetector::Impl {
                 throw std::runtime_error("dfine: meta sidecar names missing boxes tensor '" +
                                          meta.output_names[1] + "'");
             }
+            outputs_named_ = true;
             return;
         }
         b_logits = session.find("logits");
         b_boxes = session.find("boxes");
         if (b_logits && b_logits->is_input) b_logits = nullptr;
         if (b_boxes && b_boxes->is_input) b_boxes = nullptr;
+        outputs_named_ = b_logits != nullptr && b_boxes != nullptr;
         if (!b_logits || !b_boxes) {
             const auto& outs = session.output_indices();
             if (outs.size() < 2) throw std::runtime_error("dfine: engine has fewer than 2 outputs");
@@ -553,10 +566,12 @@ struct DFineDetector::Impl {
         return true;
     }
 
-    // A cached graph is stale once any baked device/host address moves (a grow-only
-    // buffer realloc after a larger batch was seen). Cheap 5-pointer check per replay.
+    // A cached graph is stale once any baked device/host address moves. The session
+    // generation covers every IO binding, including additional outputs not consumed
+    // by the detector; the pointer checks cover detector-owned pinned buffers.
     bool graph_stale_(const GraphEntry& g) const {
-        return g.d_input != session.device_buffer(input_name) ||
+        return g.buffer_generation != session.buffer_generation() ||
+               g.d_input != session.device_buffer(input_name) ||
                g.d_logits != session.device_buffer(b_logits->name) ||
                g.d_boxes != session.device_buffer(b_boxes->name) ||
                g.p_logits != pinned_logits_.get() || g.p_boxes != pinned_boxes_.get();
@@ -627,6 +642,7 @@ struct DFineDetector::Impl {
         e.d_boxes = d_boxes;
         e.p_logits = pinned_logits_.get();
         e.p_boxes = pinned_boxes_.get();
+        e.buffer_generation = session.buffer_generation();
         graphs_[B] = std::move(e);
         return true;
     }

@@ -95,6 +95,23 @@ int main() {
         return dfine::testing::kSkipExitCode;
     }
 
+    // Every committed device-buffer replacement advances one session-wide
+    // generation. CUDA Graph caches use it to cover all bindings, including
+    // additional outputs whose addresses are not otherwise inspected.
+    {
+        auto s = make_session(engine);
+        const Io io = resolve_io(*s);
+        (void)run(*s, io, 1);
+        const std::uint64_t b1_generation = s->buffer_generation();
+        (void)run(*s, io, 1);
+        DFINE_CHECK(s->buffer_generation() == b1_generation);
+        (void)run(*s, io, 4);
+        DFINE_CHECK(s->buffer_generation() > b1_generation);
+        const std::uint64_t b4_generation = s->buffer_generation();
+        (void)run(*s, io, 1);
+        DFINE_CHECK(s->buffer_generation() == b4_generation);
+    }
+
     // --- frozen violation is rejected with zero side effects -------------------
     {
         auto s = make_session(engine);

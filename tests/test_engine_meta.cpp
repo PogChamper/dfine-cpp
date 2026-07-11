@@ -101,6 +101,17 @@ int main(int argc, char** argv) {
     DFINE_EXPECT_THROW(
         (void)EngineMeta::from_json_file(write_json(dir, R"({"color_order": "BRG"})")),
         "color_order");
+    DFINE_EXPECT_THROW(
+        (void)EngineMeta::from_json_file(write_json(dir, R"({"color_order": "BGR"})")),
+        "model input must be RGB");
+    DFINE_EXPECT_THROW(
+        (void)EngineMeta::from_json_file(write_json(dir, R"({"artifact_kind": "plan"})")),
+        "artifact_kind");
+    DFINE_EXPECT_THROW((void)EngineMeta::from_json_file(write_json(dir, R"({"trt_version": ""})")),
+                       "trt_version");
+    DFINE_EXPECT_THROW(
+        (void)EngineMeta::from_json_file(write_json(dir, R"({"trt_version": null})")),
+        "trt_version");
     // A PRESENT mean/std of the wrong shape is an error, not a silent default.
     DFINE_EXPECT_THROW((void)EngineMeta::from_json_file(write_json(dir, R"({"mean": [1.0, 2.0]})")),
                        "3-element");
@@ -128,6 +139,7 @@ int main(int argc, char** argv) {
         const fs::path roundtrip = write_json(dir, "{}");
         labels_only.meta.to_json_file(roundtrip);
         DFINE_CHECK(EngineMeta::from_json_file(roundtrip).class_names.size() == 3);
+        DFINE_CHECK(dfine::detail::load_engine_meta(roundtrip).batch_facts_describe_engine());
     }
 
     // Partial batch declarations stay coherent without asserting absent fields.
@@ -165,6 +177,37 @@ int main(int argc, char** argv) {
         DFINE_CHECK(full.meta.has_num_classes && !full.meta.has_num_queries);
         const auto doc = dfine::detail::load_engine_meta(write_json(dir, "{}"));
         DFINE_CHECK(!doc.has_dynamic_batch && !doc.has_max_batch);
+    }
+
+    // Batch fields on an ONNX sidecar describe export bounds, not the profile
+    // selected later by an engine builder. Explicit engine metadata and legacy
+    // sidecars with TensorRT plus min/opt profile facts describe the engine.
+    {
+        using dfine::detail::MetaArtifactKind;
+        const auto onnx = dfine::detail::load_engine_meta(
+            write_json(dir, R"({"artifact_kind": "onnx", "trt_version": "10.13",
+                               "min_batch": 1, "max_batch": 8})"));
+        DFINE_CHECK(onnx.artifact_kind == MetaArtifactKind::kOnnx);
+        DFINE_CHECK(!onnx.batch_facts_describe_engine());
+
+        const auto engine = dfine::detail::load_engine_meta(
+            write_json(dir, R"({"artifact_kind": "engine", "min_batch": 1, "max_batch": 16})"));
+        DFINE_CHECK(engine.artifact_kind == MetaArtifactKind::kEngine);
+        DFINE_CHECK(engine.batch_facts_describe_engine());
+
+        const auto legacy = dfine::detail::load_engine_meta(
+            write_json(dir, R"({"trt_version": "10.13", "min_batch": 1, "max_batch": 4})"));
+        DFINE_CHECK(legacy.artifact_kind == MetaArtifactKind::kUnknown);
+        DFINE_CHECK(legacy.batch_facts_describe_engine());
+
+        const auto trt_ambiguous = dfine::detail::load_engine_meta(
+            write_json(dir, R"({"trt_version": "10.13", "max_batch": 8})"));
+        DFINE_CHECK(!trt_ambiguous.batch_facts_describe_engine());
+
+        const auto ambiguous =
+            dfine::detail::load_engine_meta(write_json(dir, R"({"max_batch": 8})"));
+        DFINE_CHECK(ambiguous.artifact_kind == MetaArtifactKind::kUnknown);
+        DFINE_CHECK(!ambiguous.batch_facts_describe_engine());
     }
 
     fs::remove_all(dir);

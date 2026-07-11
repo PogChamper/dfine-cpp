@@ -223,8 +223,27 @@ int main() {
         std::ofstream(dir / "stale.json") << R"({"class_names": ["a", "b", "c"]})";
         DFINE_EXPECT_THROW((void)DFineDetector(eng), "class_names");
 
-        std::ofstream(dir / "stale.json") << "{\"max_batch\": " << engine_max + 1 << "}";
+        std::ofstream(dir / "stale.json")
+            << "{\"artifact_kind\": \"engine\", \"max_batch\": " << engine_max + 1 << "}";
         DFINE_EXPECT_THROW((void)DFineDetector(eng), "max_batch");
+
+        // A same-stem ONNX sidecar carries export bounds. A different profile
+        // may be selected by trtexec or another builder, so those bounds are not
+        // engine assertions.
+        std::ofstream(dir / "stale.json")
+            << "{\"artifact_kind\": \"onnx\", \"max_batch\": " << engine_max + 1 << "}";
+        DFINE_CHECK(DFineDetector(eng).max_batch() == engine_max);
+
+        // Legacy ONNX sidecars have no artifact_kind or TensorRT build facts.
+        std::ofstream(dir / "stale.json") << "{\"max_batch\": " << engine_max + 1 << "}";
+        DFINE_CHECK(DFineDetector(eng).max_batch() == engine_max);
+
+        // Engine sidecars emitted before artifact_kind remain strict when their
+        // TensorRT build facts identify them unambiguously.
+        std::ofstream(dir / "stale.json")
+            << "{\"trt_version\": \"10.13\", \"min_batch\": " << engine_max + 1
+            << ", \"max_batch\": " << engine_max + 1 << "}";
+        DFINE_EXPECT_THROW((void)DFineDetector(eng), "min_batch");
 
         std::ofstream(dir / "stale.json")
             << R"({"input_names": ["missing"], "max_batch": )" << engine_max << "}";
@@ -235,7 +254,8 @@ int main() {
         DFINE_EXPECT_THROW((void)DFineDetector(eng), "missing logits");
 
         // A partial sidecar asserts only the fields it contains.
-        std::ofstream(dir / "stale.json") << "{\"max_batch\": " << engine_max << "}";
+        std::ofstream(dir / "stale.json")
+            << "{\"artifact_kind\": \"engine\", \"max_batch\": " << engine_max << "}";
         {
             DFineDetector ok(eng);
             DFINE_CHECK(ok.max_batch() == engine_max);

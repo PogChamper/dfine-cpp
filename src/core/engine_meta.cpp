@@ -56,8 +56,9 @@ void validate_meta(const EngineMeta& m, bool has_num_classes, const std::filesys
                      "normalization to inf)");
         }
     }
-    if (m.color_order != "RGB" && m.color_order != "BGR") {
-        bad_meta(path, "color_order '" + m.color_order + "' (RGB or BGR)");
+    if (m.color_order != "RGB") {
+        bad_meta(path, "color_order '" + m.color_order +
+                           "' (D-FINE model input must be RGB; source images may be marked BGR)");
     }
     if (m.resize != "stretch" && m.resize != "letterbox") {
         bad_meta(path, "resize '" + m.resize + "' (stretch or letterbox)");
@@ -92,6 +93,26 @@ detail::EngineMetaDocument detail::load_engine_meta(const std::filesystem::path&
 
     EngineMetaDocument doc;
     EngineMeta& m = doc.meta;
+    if (j.contains("artifact_kind")) {
+        if (!j["artifact_kind"].is_string()) {
+            bad_meta(path, "artifact_kind must be 'onnx' or 'engine'");
+        }
+        const std::string kind = j["artifact_kind"].get<std::string>();
+        if (kind == "onnx") {
+            doc.artifact_kind = MetaArtifactKind::kOnnx;
+        } else if (kind == "engine") {
+            doc.artifact_kind = MetaArtifactKind::kEngine;
+        } else {
+            bad_meta(path, "artifact_kind '" + kind + "' (expected onnx or engine)");
+        }
+    }
+    if (j.contains("trt_version")) {
+        if (!j["trt_version"].is_string() ||
+            j["trt_version"].get_ref<const std::string&>().empty()) {
+            bad_meta(path, "trt_version must be a non-empty string");
+        }
+        doc.has_trt_version = true;
+    }
     m.schema_version = j.value("schema_version", kEngineMetaSchemaVersion);
     m.variant = j.value("variant", std::string{});
     m.task = j.value("task", std::string{"detect"});
@@ -177,6 +198,7 @@ EngineMeta EngineMeta::from_json_file(const std::filesystem::path& path) {
 void EngineMeta::to_json_file(const std::filesystem::path& path) const {
     json j = {
         {"schema_version", schema_version},
+        {"artifact_kind", "engine"},
         {"variant", variant},
         {"task", task},
         {"input_h", input_h},

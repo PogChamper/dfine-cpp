@@ -38,7 +38,7 @@ struct DetectorOptions {
     bool use_cuda_graph{false};
     int graph_warmup_iters{3};  // full enqueue cycles before capture (TRT needs >=2)
 
-    // Decode on the GPU so only the retained detections are copied to the host.
+    // Decode on the GPU and copy fixed top-K records instead of full logits/boxes.
     // Requires FP32 outputs; otherwise the detector uses CPU decode. Scores can
     // differ from CPU decode by one ULP. Takes precedence over use_cuda_graph.
     bool gpu_decode{false};

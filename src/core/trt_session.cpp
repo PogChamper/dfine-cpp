@@ -360,8 +360,12 @@ void TrtSession::set_input_shape(std::string_view name, const nvinfer1::Dims& di
         Staged& s = staged[i];
         s.shape = context_->getTensorShape(bindings_[i].name.c_str());
         s.elems = volume(s.shape);
-        s.bytes =
-            s.elems > 0 ? static_cast<std::size_t>(s.elems) * dtype_bytes(bindings_[i].dtype) : 0;
+        if (s.elems <= 0) {
+            throw std::runtime_error("dfine: tensor '" + bindings_[i].name +
+                                     "' has unresolved shape after selecting the input shape; "
+                                     "data-dependent output shapes are not supported");
+        }
+        s.bytes = static_cast<std::size_t>(s.elems) * dtype_bytes(bindings_[i].dtype);
         if (s.bytes > buffer_capacity_[i]) {
             // Outputs normally grow together with the input (caught by the
             // pre-check above); this covers engines where they do not.
@@ -415,6 +419,7 @@ void TrtSession::set_input_shape(std::string_view name, const nvinfer1::Dims& di
 
     // Commit — nothing below throws. Swapping the staged buffers in frees the
     // old ones; the cache becomes the context's mirror again.
+    bool addresses_changed = false;
     for (std::size_t i = 0; i < bindings_.size(); ++i) {
         BindingInfo& b = bindings_[i];
         b.shape = staged[i].shape;
@@ -424,8 +429,10 @@ void TrtSession::set_input_shape(std::string_view name, const nvinfer1::Dims& di
             device_buffers_[i] = std::move(staged[i].dev);
             host_buffers_[i] = std::move(staged[i].host);
             buffer_capacity_[i] = staged[i].bytes;
+            addresses_changed = true;
         }
     }
+    if (addresses_changed) ++buffer_generation_;
     shape_state_ = ShapeState::kClean;
 }
 

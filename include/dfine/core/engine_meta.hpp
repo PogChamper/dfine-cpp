@@ -58,6 +58,7 @@ struct EngineMeta {
     bool has_num_queries{false};
 
     [[nodiscard]] static EngineMeta from_json_file(const std::filesystem::path& path);
+    // Writes an engine sidecar. ONNX metadata is produced by the export pipeline.
     void to_json_file(const std::filesystem::path& path) const;
 };
 

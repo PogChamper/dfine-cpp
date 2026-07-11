@@ -82,7 +82,7 @@ class Detector:
         Opt-in CUDA-graph replay (helps batch-1 latency on 0-aux-stream engines;
         a safe no-op otherwise).
     gpu_decode : bool
-        GPU decode: only surviving detections cross PCIe.
+        GPU decode: fixed top-K records cross PCIe instead of full logits/boxes.
         Requires FP32 engine outputs (falls back to the CPU decode otherwise).
     own_device_memory : bool
         Detector-owned TensorRT activation block (part of the frozen-memory
@@ -246,19 +246,17 @@ class Detector:
         t = _Timings(struct_size=ctypes.sizeof(_Timings))
         if self._lib.dfine_detector_last_timings(self._require(), ctypes.byref(t)) != 0:
             raise RuntimeError(f"last_timings failed: {last_error()}")
-        return {
-            name: getattr(t, name)
-            for name, _ in _Timings._fields_
-            if name != "struct_size"
-        }
+        return {name: getattr(t, name) for name, _ in _Timings._fields_ if name != "struct_size"}
 
     def class_name(self, class_id: int) -> str:
         # Explicit constructor override wins; then the model-aware C call (engine
         # sidecar class_names -> COCO-80 for 80-class engines -> "class_<id>");
         # then the static COCO table for libdfine builds predating that call.
         if self._class_names is not None:
-            return self._class_names[class_id] if 0 <= class_id < len(self._class_names) else str(
-                class_id
+            return (
+                self._class_names[class_id]
+                if 0 <= class_id < len(self._class_names)
+                else str(class_id)
             )
         if self._handle is not None and hasattr(self._lib, "dfine_detector_class_name"):
             # Authoritative: "" means out of range for THIS model — do not fall

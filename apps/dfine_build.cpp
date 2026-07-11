@@ -21,13 +21,20 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <exception>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 namespace {
 
@@ -137,6 +144,119 @@ std::filesystem::path normalized_path(const std::filesystem::path& path) {
     return std::filesystem::weakly_canonical(std::filesystem::absolute(path));
 }
 
+std::pair<std::filesystem::path, std::filesystem::path> adjacent_temp_paths(
+    const std::filesystem::path& engine, const std::filesystem::path& meta) {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::string suffix = ".tmp." + std::to_string(::getpid()) + "." + std::to_string(nonce);
+    return {engine.string() + suffix, meta.string() + suffix};
+}
+
+void write_file_checked(const std::filesystem::path& path, const char* data, std::size_t size) {
+    if (size > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())) {
+        throw std::runtime_error("staged artifact is too large: " + path.string());
+    }
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) throw std::runtime_error("cannot open staged artifact: " + path.string());
+
+    out.write(data, static_cast<std::streamsize>(size));
+    if (!out) throw std::runtime_error("cannot write staged artifact: " + path.string());
+
+    out.flush();
+    if (!out) throw std::runtime_error("cannot flush staged artifact: " + path.string());
+
+    out.close();
+    if (!out) throw std::runtime_error("cannot close staged artifact: " + path.string());
+}
+
+void rename_checked(const std::filesystem::path& from, const std::filesystem::path& to) {
+    std::error_code error;
+    std::filesystem::rename(from, to, error);
+    if (error) {
+        throw std::runtime_error("cannot publish " + to.string() + ": " + error.message());
+    }
+}
+
+void validate_output_file_path(const std::filesystem::path& path) {
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (error == std::errc::no_such_file_or_directory) return;
+    if (error) {
+        throw std::runtime_error("cannot inspect output " + path.string() + ": " + error.message());
+    }
+    if (std::filesystem::exists(status) && !std::filesystem::is_regular_file(status) &&
+        !std::filesystem::is_symlink(status)) {
+        throw std::runtime_error("output is not a regular file: " + path.string());
+    }
+}
+
+void publish_engine_pair(const std::filesystem::path& engine, const void* plan,
+                         std::size_t plan_size, const std::filesystem::path& meta,
+                         const std::string& meta_text) {
+    validate_output_file_path(engine);
+    validate_output_file_path(meta);
+
+    const auto [engine_tmp, meta_tmp] = adjacent_temp_paths(engine, meta);
+    const std::filesystem::path engine_backup = engine_tmp.string() + ".previous";
+    const auto cleanup = [&] {
+        std::error_code ignored;
+        std::filesystem::remove(engine_tmp, ignored);
+        ignored.clear();
+        std::filesystem::remove(meta_tmp, ignored);
+    };
+
+    bool engine_backed_up = false;
+    bool engine_published = false;
+    try {
+        write_file_checked(engine_tmp, static_cast<const char*>(plan), plan_size);
+        write_file_checked(meta_tmp, meta_text.data(), meta_text.size());
+        std::error_code status_error;
+        const auto engine_status = std::filesystem::symlink_status(engine, status_error);
+        if (status_error != std::errc::no_such_file_or_directory && status_error) {
+            throw std::runtime_error("cannot inspect output " + engine.string() + ": " +
+                                     status_error.message());
+        }
+        if (!status_error && std::filesystem::exists(engine_status)) {
+            std::error_code backup_error;
+            if (std::filesystem::is_symlink(engine_status)) {
+                std::filesystem::copy_symlink(engine, engine_backup, backup_error);
+            } else {
+                std::filesystem::create_hard_link(engine, engine_backup, backup_error);
+            }
+            if (backup_error) {
+                throw std::runtime_error("cannot preserve previous engine " + engine.string() +
+                                         ": " + backup_error.message());
+            }
+            engine_backed_up = true;
+        }
+        rename_checked(engine_tmp, engine);
+        engine_published = true;
+        rename_checked(meta_tmp, meta);
+    } catch (...) {
+        const std::exception_ptr original = std::current_exception();
+        std::error_code rollback_error;
+        if (engine_backed_up) {
+            std::filesystem::rename(engine_backup, engine, rollback_error);
+        } else if (engine_published) {
+            std::filesystem::remove(engine, rollback_error);
+        }
+        cleanup();
+        if (rollback_error) {
+            throw std::runtime_error("engine publication failed and rollback also failed: " +
+                                     rollback_error.message());
+        }
+        std::rethrow_exception(original);
+    }
+    if (engine_backed_up) {
+        std::error_code remove_error;
+        std::filesystem::remove(engine_backup, remove_error);
+        if (remove_error) {
+            std::fprintf(stderr, "warning: cannot remove previous engine %s: %s\n",
+                         engine_backup.c_str(), remove_error.message().c_str());
+        }
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -177,6 +297,8 @@ int main(int argc, char** argv) {
             throw std::runtime_error("timing-cache output would overwrite an artifact: " +
                                      timing_cache.string());
         }
+        validate_output_file_path(args.engine);
+        validate_output_file_path(args.meta_out);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
@@ -189,12 +311,28 @@ int main(int argc, char** argv) {
             std::ifstream mi(args.meta_in);
             mi >> source_meta;
             have_source_meta = true;
+            const std::string artifact_kind = source_meta.value("artifact_kind", "onnx");
+            if (artifact_kind != "onnx") {
+                std::fprintf(stderr,
+                             "error: source sidecar %s declares artifact_kind='%s'; expected "
+                             "'onnx'\n",
+                             args.meta_in.c_str(), artifact_kind.c_str());
+                return 1;
+            }
             const std::string declared = source_meta.value("precision", "fp32");
             if (declared != "fp32") {
                 std::fprintf(stderr,
                              "error: %s is a %s export per its sidecar %s; dfine_build builds "
                              "fp32 only — use the Python pipeline (build_engine.py)\n",
                              args.onnx.c_str(), declared.c_str(), args.meta_in.c_str());
+                return 1;
+            }
+            const std::string color_order = source_meta.value("color_order", "RGB");
+            if (color_order != "RGB") {
+                std::fprintf(stderr,
+                             "error: %s declares %s model input in %s; D-FINE engines require "
+                             "RGB model input\n",
+                             args.onnx.c_str(), color_order.c_str(), args.meta_in.c_str());
                 return 1;
             }
         } catch (const std::exception& e) {
@@ -234,8 +372,9 @@ int main(int argc, char** argv) {
         if (network->getNbInputs() != 1) {
             throw std::runtime_error("D-FINE runtime requires exactly one input");
         }
-        if (network->getNbOutputs() != 2) {
-            throw std::runtime_error("D-FINE runtime requires exactly two outputs");
+        const int output_count = network->getNbOutputs();
+        if (output_count < 2) {
+            throw std::runtime_error("D-FINE runtime requires logits and boxes outputs");
         }
         nvinfer1::ITensor* input = network->getInput(0);
         if (args.input_name != input->getName()) {
@@ -265,13 +404,15 @@ int main(int argc, char** argv) {
         } else {
             logits = find_output("logits");
             boxes = find_output("boxes");
-            if (logits && !boxes)
+            if (output_count == 2 && logits && !boxes) {
                 boxes =
                     network->getOutput(0) == logits ? network->getOutput(1) : network->getOutput(0);
-            if (boxes && !logits)
+            }
+            if (output_count == 2 && boxes && !logits) {
                 logits =
                     network->getOutput(0) == boxes ? network->getOutput(1) : network->getOutput(0);
-            if (!logits && !boxes) {
+            }
+            if (output_count == 2 && !logits && !boxes) {
                 nvinfer1::ITensor* first = network->getOutput(0);
                 nvinfer1::ITensor* second = network->getOutput(1);
                 const auto last_dim = [](const nvinfer1::ITensor& tensor) {
@@ -288,9 +429,10 @@ int main(int argc, char** argv) {
             }
         }
         if (!logits || !boxes || logits == boxes) {
-            throw std::runtime_error(
-                "cannot identify logits and boxes outputs; name them in the ONNX graph or "
-                "provide output_names in its sidecar");
+            const std::string prefix = output_count > 2 ? "extra outputs require " : "";
+            throw std::runtime_error(prefix +
+                                     "explicit logits and boxes tensor names in the ONNX graph "
+                                     "or output_names in its sidecar");
         }
 
         nvinfer1::Dims in_dims = input->getDimensions();
@@ -378,13 +520,6 @@ int main(int argc, char** argv) {
                     std::chrono::duration<double>(t1 - t0).count(),
                     static_cast<double>(plan->size()) / (1024.0 * 1024.0));
 
-        std::ofstream out(args.engine, std::ios::binary | std::ios::trunc);
-        if (!out) throw std::runtime_error("cannot open engine output: " + args.engine.string());
-        out.write(static_cast<const char*>(plan->data()),
-                  static_cast<std::streamsize>(plan->size()));
-        out.close();
-        std::printf("[dfine_build] wrote %s\n", args.engine.c_str());
-
         // Persist the (now-populated) timing cache for faster subsequent rebuilds.
         if (timing_cache) {
             std::unique_ptr<nvinfer1::IHostMemory> cache_out{timing_cache->serialize()};
@@ -407,6 +542,7 @@ int main(int argc, char** argv) {
         j["input_h"] = in_h;
         j["input_w"] = in_w;
         j["schema_version"] = 1;
+        j["artifact_kind"] = "engine";
         j["precision"] = args.precision;
         j["network_typing"] = "weak";
         j["tf32"] = false;
@@ -431,29 +567,24 @@ int main(int argc, char** argv) {
             throw std::runtime_error("refusing to overwrite the ONNX sidecar: " +
                                      args.meta_out.string());
         }
-        {
-            std::ofstream mo(args.meta_out);
-            if (!mo) {
-                throw std::runtime_error("cannot write meta sidecar: " + args.meta_out.string());
-            }
-            mo << j.dump(2) << '\n';
-            if (!mo) {
-                throw std::runtime_error("cannot finish meta sidecar: " + args.meta_out.string());
-            }
-        }
-
-        const std::filesystem::path appended = normalized_path(args.engine.string() + ".json");
-        std::filesystem::path same_stem = args.engine;
-        same_stem.replace_extension(".json");
-        same_stem = normalized_path(same_stem);
-        if (meta_out == appended || meta_out == same_stem) {
-            const std::filesystem::path twin = meta_out == appended ? same_stem : appended;
-            if (twin != meta_in && twin != onnx_sidecar && std::filesystem::is_regular_file(twin)) {
-                std::filesystem::remove(twin);
-                std::printf("[dfine_build] removed stale sidecar %s\n", twin.c_str());
-            }
-        }
+        const std::filesystem::path appended_path = args.engine.string() + ".json";
+        const std::filesystem::path appended = normalized_path(appended_path);
+        std::filesystem::path same_stem_path = args.engine;
+        same_stem_path.replace_extension(".json");
+        const std::filesystem::path same_stem = normalized_path(same_stem_path);
+        const std::string meta_text = j.dump(2) + '\n';
+        publish_engine_pair(args.engine, plan->data(), plan->size(), args.meta_out, meta_text);
+        std::printf("[dfine_build] wrote %s\n", args.engine.c_str());
         std::printf("[dfine_build] wrote %s\n", args.meta_out.c_str());
+
+        // An appended sidecar wins discovery without touching a same-stem JSON,
+        // which may belong to an ONNX artifact. A same-stem publication must
+        // remove an appended engine sidecar because that stale twin would shadow it.
+        if (meta_out == same_stem && appended != meta_in && appended != onnx_sidecar &&
+            std::filesystem::is_regular_file(appended_path)) {
+            std::filesystem::remove(appended_path);
+            std::printf("[dfine_build] removed stale sidecar %s\n", appended_path.c_str());
+        }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;

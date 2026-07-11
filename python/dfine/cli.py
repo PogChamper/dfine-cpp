@@ -18,6 +18,7 @@ import argparse
 import ctypes
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -40,6 +41,13 @@ _CHECKPOINTS = {
     "l": "pretrained/dfine_l_obj2coco.pt",
     "x": "pretrained/dfine_x_obj2coco.pt",
 }
+
+
+def _probability(value: str) -> float:
+    threshold = float(value)
+    if not math.isfinite(threshold) or threshold < 0.0 or threshold > 1.0:
+        raise argparse.ArgumentTypeError("must be finite and within [0,1]")
+    return threshold
 
 
 def _default_checkpoint(seg: Path, model: str) -> Path:
@@ -176,11 +184,18 @@ def _cache_engine_name(model: str, precision: str, fingerprint: str, profile: st
 
 
 def _cache_engine_path(
-    model: str, precision: str, fingerprint: str, opt_batch: int, max_batch: int
+    model: str,
+    precision: str,
+    fingerprint: str,
+    opt_batch: int,
+    max_batch: int,
+    *,
+    cuda_graph: bool = False,
 ) -> Path:
-    return _cache_dir() / _cache_engine_name(
-        model, precision, fingerprint, f"b1-{opt_batch}-{max_batch}"
-    )
+    profile = f"b1-{opt_batch}-{max_batch}"
+    if cuda_graph:
+        profile += "-g0"
+    return _cache_dir() / _cache_engine_name(model, precision, fingerprint, profile)
 
 
 def _same_artifact_engines(model: str, precision: str, fingerprint: str) -> list:
@@ -270,9 +285,8 @@ def _resolve_engine(
         cached = _cache_engine_path(model, precision, fp, opt_batch, max_batch)
         if cached in others:
             return cached
-        # Same artifact, different batch profile (e.g. the user ran
-        # `dfine build --opt-batch 8`): still the right model — the profile only
-        # shapes performance. Prefer the largest max-batch entry deterministically.
+        # Alternate profiles and graph policies remain valid for inference.
+        # Prefer the largest max-batch entry deterministically.
         if others:
             # Largest max-batch profile serves every smaller request. The engine
             # sidecar records the profile; the filename is only a fallback for
@@ -281,18 +295,18 @@ def _resolve_engine(
                 mb = _engine_meta(p).get("max_batch")
                 if isinstance(mb, int) and mb > 0:
                     return mb
-                m = re.search(r"-b1-\d+-(\d+)-sm", p.name)
+                m = re.search(r"-b1-\d+-(\d+)(?:-g0)?-sm", p.name)
                 return int(m.group(1)) if m else 0
 
             others.sort(key=profile_max)
             pick = others[-1]
             if len(others) > 1:
                 _log(
-                    f"[dfine] {len(others)} engines for this artifact with different "
-                    f"batch profiles; using {pick.name}"
+                    f"[dfine] {len(others)} engines for this artifact with different build "
+                    f"configurations; using {pick.name}"
                 )
             else:
-                _log(f"[dfine] using {pick.name} (same artifact, different batch profile)")
+                _log(f"[dfine] using {pick.name} (same artifact, alternate build configuration)")
             return pick
         if allow_build:
             _log(
@@ -402,7 +416,13 @@ def _validate_batch_profile(opt_batch: int, max_batch: int) -> None:
 
 
 def _build_engine(
-    onnx: Path, output: Path, precision: str, max_batch: int, opt_batch: int = 1
+    onnx: Path,
+    output: Path,
+    precision: str,
+    max_batch: int,
+    opt_batch: int = 1,
+    *,
+    cuda_graph: bool = False,
 ) -> Path:
     _validate_batch_profile(opt_batch, max_batch)
     if not _have_tensorrt():
@@ -425,6 +445,8 @@ def _build_engine(
     if precision == "fp16":
         # ONNX is already FP16-typed (convert_fp16.py / convert_fp16_surgical.py output)
         cmd += ["--strongly-typed"]
+    if cuda_graph:
+        cmd += ["--cuda-graph"]
     _log("[dfine] $", " ".join(cmd))
     subprocess.run(cmd, check=True, stdout=sys.stderr)
     if not output.exists():
@@ -606,14 +628,29 @@ def cmd_build(args) -> int:
     onnx = _find_onnx(args.model, args.precision, args.onnx)
     if onnx is None:
         raise SystemExit(
-            f"no ONNX for model '{args.model}' ({args.precision}); pass --onnx or run `dfine export`"
+            f"no ONNX for model '{args.model}' ({args.precision}); "
+            "pass --onnx or run `dfine export`"
         )
     if args.output:
         out = Path(args.output)
     else:
         fp = _artifact_fingerprint(onnx)
-        out = _cache_engine_path(args.model, args.precision, fp, args.opt_batch, args.max_batch)
-    _build_engine(onnx, out, args.precision, args.max_batch, args.opt_batch)
+        out = _cache_engine_path(
+            args.model,
+            args.precision,
+            fp,
+            args.opt_batch,
+            args.max_batch,
+            cuda_graph=args.cuda_graph,
+        )
+    _build_engine(
+        onnx,
+        out,
+        args.precision,
+        args.max_batch,
+        args.opt_batch,
+        cuda_graph=args.cuda_graph,
+    )
     print(f"built {out}")
     return 0
 
@@ -801,7 +838,7 @@ def build_parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("predict", help="detect objects in an image")
     _add_common(pr)
     pr.add_argument("--image", required=True)
-    pr.add_argument("--threshold", type=float, default=0.5)
+    pr.add_argument("--threshold", type=_probability, default=0.5)
     pr.add_argument("--out", help="write an annotated image here (needs pillow)")
     pr.add_argument("--json", action="store_true", help="print detections as JSON")
     pr.set_defaults(func=cmd_predict)
@@ -812,15 +849,30 @@ def build_parser() -> argparse.ArgumentParser:
     pi.set_defaults(func=cmd_info)
 
     pb = sub.add_parser("build", help="build a .engine from an ONNX (into the cache)")
-    _add_common(pb, engine=False)
+    pb.add_argument(
+        "--model",
+        choices=MODELS,
+        help="model size for ONNX discovery and cache naming",
+    )
+    pb.add_argument(
+        "--precision",
+        choices=("fp32", "fp16"),
+        default="fp16",
+        help="expected ONNX precision (default: fp16)",
+    )
+    pb.add_argument("--onnx", help="ONNX input path (overrides model-based discovery)")
     pb.add_argument("--output", help="engine output path (default: cache)")
-    pb.add_argument("--max-batch", type=int, default=8)
+    pb.add_argument("--max-batch", type=int, default=8, help="maximum batch size (default: 8)")
     pb.add_argument(
         "--opt-batch",
         type=int,
         default=1,
-        help="batch size TRT optimizes tactics for (8 for batch serving; "
-        "1, the default, for lowest single-image latency)",
+        help="TensorRT optimization batch (default: 1; use 8 for batch serving)",
+    )
+    pb.add_argument(
+        "--cuda-graph",
+        action="store_true",
+        help="disable TensorRT auxiliary streams for CUDA Graph capture",
     )
     pb.set_defaults(func=cmd_build)
 

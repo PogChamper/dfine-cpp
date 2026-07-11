@@ -41,7 +41,7 @@ struct EngineMeta {
     int min_batch{1};
     int opt_batch{1};
     int max_batch{1};
-    bool cuda_graph_compat{false};  // advisory: engine built/labelled as graph-capturable
+    bool cuda_graph_compat{false};  // advisory: FP32 outputs and zero auxiliary streams
 
     // Engine IO tensor names (raw D-FINE contract).
     std::vector<std::string> input_names{"images"};

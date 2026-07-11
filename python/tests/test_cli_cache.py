@@ -108,7 +108,7 @@ def test_same_artifact_other_profile_is_still_served(env, capsys):
     built = cli._cache_engine_path("m", "fp16", fp, 8, 16)
     built.write_bytes(b"engine")
     assert cli._resolve_engine("m", None, "fp16", None, allow_build=False) == built
-    assert "batch profile" in capsys.readouterr().err
+    assert "alternate build configuration" in capsys.readouterr().err
     # An exact-profile entry (predict's default 1/8) wins over any other...
     exact = cli._cache_engine_path("m", "fp16", fp, 1, 8)
     exact.write_bytes(b"engine")
@@ -118,6 +118,69 @@ def test_same_artifact_other_profile_is_still_served(env, capsys):
     exact.unlink()
     cli._cache_engine_path("m", "fp16", fp, 2, 8).write_bytes(b"engine")
     assert cli._resolve_engine("m", None, "fp16", None, allow_build=False) == built
+
+
+def test_cuda_graph_policy_has_a_distinct_cache_entry(env):
+    d, _ = env
+    onnx = onnx_file(d, "dfine_m_slim.onnx", b"graph")
+    fp = cli._artifact_fingerprint(onnx)
+    regular = cli._cache_engine_path("m", "fp16", fp, 1, 8)
+    graph = cli._cache_engine_path("m", "fp16", fp, 1, 8, cuda_graph=True)
+
+    assert regular != graph
+    assert "-b1-1-8-g0-sm89-" in graph.name
+
+    graph.write_bytes(b"engine")
+    assert cli._resolve_engine("m", None, "fp16", None, allow_build=False) == graph
+
+
+def test_build_command_propagates_cuda_graph_policy(env, monkeypatch):
+    d, _ = env
+    onnx = onnx_file(d, "dfine_m_slim.onnx", b"graph")
+    calls = []
+
+    def fake_build(source, output, precision, max_batch, opt_batch=1, cuda_graph=False):
+        calls.append((source, output, precision, max_batch, opt_batch, cuda_graph))
+        return output
+
+    monkeypatch.setattr(cli, "_build_engine", fake_build)
+
+    assert cli.main(["build", "--model", "m", "--cuda-graph"]) == 0
+    assert calls == [
+        (
+            onnx,
+            cli._cache_engine_path(
+                "m",
+                "fp16",
+                cli._artifact_fingerprint(onnx),
+                1,
+                8,
+                cuda_graph=True,
+            ),
+            "fp16",
+            8,
+            1,
+            True,
+        )
+    ]
+
+
+@pytest.mark.parametrize("cuda_graph", [False, True])
+def test_engine_builder_forwards_cuda_graph_alias(monkeypatch, tmp_path, cuda_graph):
+    onnx = onnx_file(tmp_path, "model.onnx", b"graph")
+    engine = tmp_path / "model.engine"
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        engine.write_bytes(b"engine")
+
+    monkeypatch.setattr(cli, "_have_tensorrt", lambda: True)
+    monkeypatch.setattr(cli, "_build_engine_script", lambda: tmp_path / "build_engine.py")
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert cli._build_engine(onnx, engine, "fp16", 8, cuda_graph=cuda_graph) == engine
+    assert ("--cuda-graph" in calls[0]) is cuda_graph
 
 
 def test_orphaned_engines_are_never_picked_silently(env, capsys):
@@ -194,6 +257,22 @@ def test_info_and_bench_have_no_dead_onnx_flag():
     for sub in ("info", "bench"):
         with pytest.raises(SystemExit):
             parser.parse_args([sub, "--model", "m", "--onnx", "x.onnx"])
+
+
+@pytest.mark.parametrize("threshold", ["-0.1", "1.1", "nan", "inf"])
+def test_predict_parser_rejects_invalid_threshold(threshold):
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            [
+                "predict",
+                "--engine",
+                "model.engine",
+                "--image",
+                "frame.jpg",
+                "--threshold",
+                threshold,
+            ]
+        )
 
 
 @pytest.mark.parametrize(("opt_batch", "max_batch"), [(0, 8), (1, 0), (9, 8)])

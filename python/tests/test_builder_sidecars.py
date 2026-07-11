@@ -20,6 +20,7 @@ def build_engine(monkeypatch):
         ASSERTION=2,
         IDENTITY=3,
     )
+    trt.DataType = types.SimpleNamespace(FLOAT="float")
     monkeypatch.setitem(sys.modules, "tensorrt", trt)
 
     spec = importlib.util.spec_from_file_location(
@@ -177,11 +178,11 @@ def test_onnx_metadata_rejects_engine_sidecar(build_engine, tmp_path):
 @pytest.mark.parametrize(
     ("max_aux_streams", "cuda_graph_alias", "expected"),
     [
-        (None, False, {"max_aux_streams": None, "cuda_graph_compat": False}),
-        (0, False, {"max_aux_streams": 0, "cuda_graph_compat": True}),
-        (3, False, {"max_aux_streams": 3, "cuda_graph_compat": False}),
-        (None, True, {"max_aux_streams": 0, "cuda_graph_compat": True}),
-        (0, True, {"max_aux_streams": 0, "cuda_graph_compat": True}),
+        (None, False, {"max_aux_streams": None}),
+        (0, False, {"max_aux_streams": 0}),
+        (3, False, {"max_aux_streams": 3}),
+        (None, True, {"max_aux_streams": 0}),
+        (0, True, {"max_aux_streams": 0}),
     ],
 )
 def test_graph_policy(build_engine, max_aux_streams, cuda_graph_alias, expected):
@@ -242,12 +243,39 @@ def test_graph_policy_applies_config_and_metadata(
         max_batch=8,
     )
     monkeypatch.setattr(build_engine, "_sm_arch", lambda: "89")
-    facts = build_engine._engine_build_facts(args, "a" * 64, policy)
+    facts = build_engine._engine_build_facts(args, "a" * 64, policy, outputs_fp32=True)
 
     assert facts["artifact_kind"] == "engine"
     assert facts["max_aux_streams"] == limit
     assert facts["cuda_graph_compat"] is (limit == 0)
     assert facts["onnx_sha256"] == "a" * 64
+
+    fp16_facts = build_engine._engine_build_facts(args, "a" * 64, policy, outputs_fp32=False)
+    assert fp16_facts["cuda_graph_compat"] is False
+
+
+def test_graph_compat_ignores_unconsumed_outputs(build_engine):
+    class Network:
+        def __init__(self, outputs):
+            self.outputs = outputs
+            self.num_outputs = len(outputs)
+
+        def get_output(self, index):
+            return self.outputs[index]
+
+    def tensor(name, dtype, shape):
+        return types.SimpleNamespace(name=name, dtype=dtype, shape=shape)
+
+    network = Network(
+        [
+            tensor("logits", "float", (-1, 300, 80)),
+            tensor("boxes", "float", (-1, 300, 4)),
+            tensor("debug", "half", (-1, 1)),
+        ]
+    )
+
+    assert build_engine._graph_outputs_are_fp32(network, {})
+    assert not build_engine._graph_outputs_are_fp32(network, {"output_names": ["logits", "debug"]})
 
 
 def test_failed_engine_publish_preserves_stale_sidecar(build_engine, tmp_path):

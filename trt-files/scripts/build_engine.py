@@ -319,17 +319,14 @@ def _load_onnx_artifact(onnx_path: Path) -> tuple[Path, dict, bool, bytes]:
 
 
 def _graph_policy(max_aux_streams: int | None, cuda_graph_alias: bool) -> dict:
-    """Resolve builder stream settings and the matching runtime capability."""
+    """Resolve the TensorRT auxiliary-stream policy."""
     if max_aux_streams is not None and max_aux_streams < 0:
         raise SystemExit("--max-aux-streams must be non-negative")
     if cuda_graph_alias:
         if max_aux_streams not in (None, 0):
             raise SystemExit("--cuda-graph conflicts with --max-aux-streams > 0")
         max_aux_streams = 0
-    return {
-        "max_aux_streams": max_aux_streams,
-        "cuda_graph_compat": max_aux_streams == 0,
-    }
+    return {"max_aux_streams": max_aux_streams}
 
 
 def _validate_batch_profile(min_batch: int, opt_batch: int, max_batch: int) -> None:
@@ -349,7 +346,30 @@ def _apply_graph_policy(config, policy: dict) -> int | None:
     return max_aux_streams
 
 
-def _engine_build_facts(args: argparse.Namespace, onnx_sha256: str, graph_policy: dict) -> dict:
+def _graph_outputs_are_fp32(network, meta: dict) -> bool:
+    outputs = [network.get_output(index) for index in range(network.num_outputs)]
+    by_name = {tensor.name: tensor for tensor in outputs}
+    selected = None
+
+    names = meta.get("output_names")
+    if isinstance(names, list) and len(names) == 2 and names[0] != names[1]:
+        if all(name in by_name for name in names):
+            selected = [by_name[name] for name in names]
+    elif "logits" in by_name and "boxes" in by_name:
+        selected = [by_name["logits"], by_name["boxes"]]
+    elif len(outputs) == 2:
+        boxes = [
+            tensor for tensor in outputs if tuple(tensor.shape) and tuple(tensor.shape)[-1] == 4
+        ]
+        if len(boxes) == 1:
+            selected = outputs
+
+    return selected is not None and all(tensor.dtype == trt.DataType.FLOAT for tensor in selected)
+
+
+def _engine_build_facts(
+    args: argparse.Namespace, onnx_sha256: str, graph_policy: dict, outputs_fp32: bool
+) -> dict:
     """Return metadata owned by the TensorRT build step."""
     return {
         "artifact_kind": "engine",
@@ -363,6 +383,7 @@ def _engine_build_facts(args: argparse.Namespace, onnx_sha256: str, graph_policy
         "max_batch": args.max_batch,
         "onnx_sha256": onnx_sha256,
         **graph_policy,
+        "cuda_graph_compat": graph_policy["max_aux_streams"] == 0 and outputs_fp32,
     }
 
 
@@ -524,7 +545,8 @@ def build(args: argparse.Namespace) -> None:
     )
     config.add_optimization_profile(profile)
     print(
-        f"[build] profile {inp.name}: min={args.min_batch} opt={args.opt_batch} max={args.max_batch} (CHW={c}x{h}x{w})"
+        f"[build] profile {inp.name}: min={args.min_batch} opt={args.opt_batch} "
+        f"max={args.max_batch} (CHW={c}x{h}x{w})"
     )
 
     if (args.fp16 or args.fp16_decoder_fp32) and not builder.platform_has_fast_fp16:
@@ -627,7 +649,8 @@ def build(args: argparse.Namespace) -> None:
                 "precision_mode",
                 "fp32" if meta["precision"] == "fp32" else "strongly_typed_unknown",
             )
-    meta.update(_engine_build_facts(args, onnx_sha256, graph_policy))
+    outputs_fp32 = _graph_outputs_are_fp32(network, meta)
+    meta.update(_engine_build_facts(args, onnx_sha256, graph_policy, outputs_fp32))
     # Revalidate the resolved destinations after the build so a path change cannot
     # redirect publication. The ONNX sidecar namespace remains reserved whether or
     # not a source sidecar existed in the input snapshot.
@@ -702,13 +725,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--strongly-typed",
         action="store_true",
-        help="strongly-typed network (pin FP32 by ONNX types)",
+        help=(
+            "derive TensorRT computation types from ONNX tensor types; required for typed FP16 "
+            "artifacts"
+        ),
     )
     p.add_argument(
         "--tactic", default=None, help="restrict tactic sources, e.g. 'cublas' or 'cublas,edge,jit'"
     )
     p.add_argument(
-        "--cuda-graph", action="store_true", help="compatibility alias for --max-aux-streams 0"
+        "--cuda-graph", action="store_true", help="set --max-aux-streams 0 for CUDA Graph capture"
     )
     p.add_argument(
         "--max-aux-streams",

@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
-"""Stage and verify GitHub release assets, replacing the hand-run SHA256SUMS ritual.
+"""Validate, stage, and verify GitHub release assets.
 
-``assemble`` validates the 20 model files against the release grammar
-  dfine_{n,s,m,l,x}_{op19,slim}.{onnx,json}
-before anything is staged: every graph paired with its sidecar (and vice versa),
-sidecar parseable, sidecar precision matching the name's recipe suffix (_slim =
-fp16, _op19 = fp32 — the same contract the CLI's _check_onnx_precision enforces),
-opset 19 on BOTH recipes (the v0.3 surgical fp16 hard-requires an opset-19 base),
-and no stray dfine_* files (typo protection). It then copies the models plus the
-gated wheel into --out and writes SHA256SUMS over all 21 payload files — the
-wheel is hashed too, because the v0.3.1 audit caught it missing from the
-hand-assembled manifest.
-
-``verify`` downloads a published release with ``gh release download`` and runs
-``sha256sum -c SHA256SUMS`` on it, additionally refusing assets the manifest
-does not cover (a failure mode ``sha256sum -c`` alone cannot see).
+``assemble`` requires the complete N/S/M/L/X opset-19 FP32/slim model pack and
+the native wheel, then writes a manifest over every payload. ``verify`` downloads
+a published release, checks the manifest, and rejects uncovered assets.
 """
 
 from __future__ import annotations
@@ -22,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -29,12 +19,29 @@ from pathlib import Path
 
 SIZES = ("n", "s", "m", "l", "x")
 RECIPES = {"op19": "fp32", "slim": "fp16"}  # recipe suffix -> precision its sidecar must carry
+WHEEL_NAME = re.compile(r"dfine-[0-9][A-Za-z0-9_.+!]*-py3-none-linux_x86_64[.]whl")
+
+
+def _require_empty_output(out: Path) -> None:
+    if not out.exists():
+        return
+    if not out.is_dir():
+        raise SystemExit(f"--out is not a directory: {out}")
+    try:
+        first_entry = next(out.iterdir(), None)
+    except OSError as e:
+        raise SystemExit(f"cannot inspect --out {out}: {e}") from e
+    if first_entry is not None:
+        raise SystemExit(
+            f"--out must be new or empty: {out} contains {first_entry.name}; "
+            "refusing to mix staged and existing files"
+        )
 
 
 def _validate_sidecar(sidecar: Path, precision: str) -> None:
     # Same contract as the CLI's _check_onnx_precision: the sidecar records what
     # the converter produced (no key = legacy fp32 export), and an unparseable
-    # sidecar must not silently DISABLE the check.
+    # sidecar must not disable the check.
     try:
         meta = json.loads(sidecar.read_text())
     except (OSError, ValueError) as e:
@@ -55,6 +62,13 @@ def assemble(args: argparse.Namespace) -> None:
     wheel = Path(args.wheel).resolve()
     if not wheel.is_file():
         raise SystemExit(f"wheel not found: {wheel}")
+    if not WHEEL_NAME.fullmatch(wheel.name):
+        raise SystemExit(
+            f"wheel name does not match the release grammar: {wheel.name} "
+            "(expected dfine-<version>-py3-none-linux_x86_64.whl)"
+        )
+    out = Path(args.out).resolve()
+    _require_empty_output(out)
 
     expected = {f"dfine_{s}_{r}.{ext}" for s in SIZES for r in RECIPES for ext in ("onnx", "json")}
     present = {p.name for p in input_dir.glob("dfine_*") if p.is_file()}
@@ -70,8 +84,8 @@ def assemble(args: argparse.Namespace) -> None:
         for recipe, precision in RECIPES.items():
             _validate_sidecar(input_dir / f"dfine_{size}_{recipe}.json", precision)
 
-    out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    _require_empty_output(out)
     for name in sorted(expected):
         shutil.copy2(input_dir / name, out / name)
     shutil.copy2(wheel, out / wheel.name)
@@ -108,9 +122,8 @@ def verify(args: argparse.Namespace) -> None:
             print(f"[verify] {line}")
         if chk.stderr.strip():
             print(f"[verify] {chk.stderr.strip()}")
-        # `sha256sum -c` only checks files the manifest NAMES — an uploaded asset
-        # missing from SUMS (how the v0.3.1 wheel nearly shipped) passes silently,
-        # so coverage is checked explicitly.
+        # `sha256sum -c` only checks files named by the manifest, so verify
+        # coverage separately.
         covered = {ln.split("  ", 1)[1] for ln in sums.read_text().splitlines() if "  " in ln}
         uncovered = sorted(p.name for p in Path(td).iterdir()
                            if p.name != "SHA256SUMS" and p.name not in covered)
@@ -133,7 +146,8 @@ def parse_args() -> argparse.Namespace:
                    help="directory holding dfine_{n,s,m,l,x}_{op19,slim}.{onnx,json}")
     a.add_argument("--wheel", required=True,
                    help="the gated wheel (staged and hashed into SHA256SUMS with the models)")
-    a.add_argument("--out", required=True, help="staging directory for the upload")
+    a.add_argument("--out", required=True,
+                   help="new or empty staging directory for the upload")
     v = sub.add_parser("verify",
                        help="download a published release and run sha256sum -c on it")
     v.add_argument("--tag", required=True, help="release tag, e.g. v0.3.1")

@@ -8,7 +8,7 @@ the C++ decode actually emits: the surviving top-K detections (sigmoid + top-k o
 query*class), aligned by (query, class), reporting score agreement and box L1 for
 the high-confidence set — the same approach as D-FINE-seg's parity self-check.
 
-Uses the M0 preprocessing contract (stretch to 640, /255, RGB, NCHW, no mean/std).
+Uses the runtime preprocessing contract (stretch to 640, /255, RGB, NCHW, no mean/std).
 """
 
 from __future__ import annotations

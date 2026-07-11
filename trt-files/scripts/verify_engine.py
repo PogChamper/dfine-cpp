@@ -3,8 +3,8 @@
 
 For each requested batch size it sets the input shape, binds torch CUDA tensors as
 the I/O buffers, runs one ``execute_async_v3``, and prints the resolved output
-shapes/dtypes. This is the Python analogue of the C++ ``dfine_smoke`` app and the
-M0 done-criterion: the engine must bind and run at N=1 and N=max.
+shapes/dtypes. This is the Python analogue of the C++ ``dfine_smoke`` app: the
+engine must bind and run at N=1 and N=max.
 """
 
 from __future__ import annotations

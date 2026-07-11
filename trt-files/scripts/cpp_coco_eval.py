@@ -115,11 +115,11 @@ def parse_args():
     p.add_argument("--tmpdir", default="")
     p.add_argument("--ld-library-path", default=DEFAULT_LD)
     p.add_argument("--cuda-graph", action="store_true", help="pass --cuda-graph to the binary")
-    p.add_argument("--gpu-decode", action="store_true", help="pass --gpu-decode (Zero-D2H) to the binary")
+    p.add_argument("--gpu-decode", action="store_true", help="decode engine outputs on the GPU")
     p.add_argument("--own-device-memory", action="store_true", help="pass --own-device-memory")
     p.add_argument("--freeze", action="store_true", help="pass --freeze (frozen-memory contract)")
     p.add_argument("--full-graph", action="store_true",
-                   help="pass --full-graph (P3 single-launch pipeline; pair with --filter-res)")
+                   help="use the full-pipeline graph; pair with --filter-res")
     p.add_argument("--filter-res", default="",
                    help="WxH: eval only images of exactly this size (fixed-resolution regime)")
     p.add_argument("--batch", type=int, default=1, help="pass --batch to the binary")

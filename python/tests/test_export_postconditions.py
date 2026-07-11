@@ -5,7 +5,11 @@ CPU-only; skips without onnx/onnxruntime."""
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -82,6 +86,87 @@ def test_tool_versions_fingerprint(exporter):
     v = exporter._tool_versions()
     assert {"python", "torch", "onnx"} <= v.keys()
     assert all(isinstance(s, str) and s for s in v.values())
+
+
+def test_exporter_and_validated_source_fingerprints(exporter):
+    script = REPO / "trt-files/scripts/export_dfine_onnx.py"
+    assert exporter._exporter_sha256() == hashlib.sha256(script.read_bytes()).hexdigest()
+    assert exporter._validated_source_revision() == "f5a46697b9c3c6dc435b6c86718cc18452ae9baf"
+
+
+def test_source_provenance_records_git_identity(exporter, tmp_path):
+    source = tmp_path / "D-FINE-seg"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.com"],
+                   check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+    (source / "model.py").write_text("MODEL = 1\n")
+    subprocess.run(["git", "-C", str(source), "add", "model.py"], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "initial"], check=True)
+    subprocess.run([
+        "git", "-C", str(source), "remote", "add", "origin",
+        "git@github.com:ArgoHA/D-FINE-seg.git",
+    ], check=True)
+
+    provenance = exporter._source_provenance(source)
+    commit = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert provenance == {
+        "name": "D-FINE-seg",
+        "commit": commit,
+        "dirty": False,
+        "repository": "https://github.com/ArgoHA/D-FINE-seg",
+    }
+    metadata = exporter._model_source_metadata(source)
+    assert metadata["validated_commit"] == "f5a46697b9c3c6dc435b6c86718cc18452ae9baf"
+    assert metadata["matches_validated_revision"] is False
+
+    (source / "model.py").write_text("MODEL = 2\n")
+    assert exporter._source_provenance(source)["dirty"] is True
+
+
+def test_source_provenance_accepts_non_git_tree(exporter, tmp_path):
+    source = tmp_path / "unpacked-source"
+    source.mkdir()
+    assert exporter._source_provenance(source) == {"name": "unpacked-source"}
+    metadata = exporter._model_source_metadata(source)
+    assert metadata == {
+        "name": "unpacked-source",
+        "validated_commit": "f5a46697b9c3c6dc435b6c86718cc18452ae9baf",
+    }
+
+
+def test_source_remote_strips_credentials(exporter):
+    remote = "https://build-user:secret@github.com/ArgoHA/D-FINE-seg.git?token=secret"
+    assert exporter._canonical_remote(remote) == "https://github.com/ArgoHA/D-FINE-seg"
+    scp_remote = "git@github.com:ArgoHA/D-FINE-seg.git?token=secret"
+    assert exporter._canonical_remote(scp_remote) == "https://github.com/ArgoHA/D-FINE-seg"
+    assert exporter._canonical_remote("file:///home/user/D-FINE-seg") is None
+
+
+def test_simplification_status_is_recordable(exporter, tmp_path, monkeypatch):
+    graph = tiny_graph(tmp_path, bake_batch=False)
+    assert exporter._run_simplification(graph, disabled=True) == "disabled"
+
+    onnxsim = types.ModuleType("onnxsim")
+
+    def simplify_ok(model):
+        return model, True
+
+    onnxsim.simplify = simplify_ok
+    monkeypatch.setitem(sys.modules, "onnxsim", onnxsim)
+    assert exporter._run_simplification(graph, disabled=False) == "applied"
+
+    def simplify_rejected(model):
+        return model, False
+
+    onnxsim.simplify = simplify_rejected
+    assert exporter._run_simplification(graph, disabled=False) == "rejected"
 
 
 def test_dynamic_graph_passes(exporter, tmp_path):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export a D-FINE detection model to a RAW two-output ONNX graph for D-FINE-cpp.
+"""Export a D-FINE detector to the raw two-output D-FINE-cpp ONNX contract.
 
 The exported graph takes a single ``images`` input and returns the decoder's raw
 ``logits`` (pre-sigmoid, [N, num_queries, num_classes]) and ``boxes`` (normalized
@@ -14,12 +14,10 @@ Optional accuracy/speed sliders (``--num-queries``, ``--eval-idx``, ``--cascade`
 reshape the decoder before deploy/tracing; the measured cost/gain of each (and of the
 composed ``fast``/``max`` presets) is tabulated in docs/RESEARCH_MATRIX.md.
 
-A JSON sidecar with the same stem describes the engine contract (input geometry,
-normalization, per-variant constants) so the C++ runtime stays model-generic.
+A JSON sidecar with the same stem records the runtime contract and provenance.
 
 Model construction uses the D-FINE-seg package, whose detection subnetwork is
-architecturally identical to authorial D-FINE;
-the resulting graph is representative of either repo.
+compatible with the official D-FINE detection architecture.
 """
 
 from __future__ import annotations
@@ -28,14 +26,16 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 # This script lives in trt-files/scripts alongside profile.py, whose name shadows the
 # stdlib `profile` module that cProfile (pulled in by torchvision -> torch._dynamo)
 # imports. Drop the scripts dir from the front of sys.path so stdlib wins; this script
-# imports no sibling module, so removing it is safe. (Not an issue pre-M1 when there was
-# no profile.py to shadow.)
+# imports no sibling module, so removing it is safe.
 _scripts_dir = str(Path(__file__).resolve().parent)
 sys.path[:] = [p for p in sys.path if p not in ("", _scripts_dir)]
 
@@ -62,13 +62,10 @@ class RawDetect(nn.Module):
         return out["pred_logits"], out["pred_boxes"]
 
 
-# --- Explicit gather-bilinear deformable-attention core -----------------------------
-# Replaces F.grid_sample in the deformable cross-attention with an explicit
-# gather-bilinear of grid_sample(bilinear, zeros, align_corners=False). Same math, but
-# expressed as Gather + arithmetic, which TensorRT executes in exact FP32. The native
-# GridSample node is bit-exact in isolation but is compiled divergently IN CONTEXT by
-# TRT, costing ~10 AP on D-FINE's FDR decode (docs/impl/M0_STATUS.md). This is the fix,
-# and it needs no TensorRT plugin.
+# Explicit gather-bilinear deformable-attention core.
+# This expresses grid_sample(bilinear, zeros, align_corners=False) as Gather and
+# arithmetic. It avoids the context-dependent TensorRT GridSample regression without
+# requiring a plugin. See docs/CONVERSION.md for the validated conversion recipe.
 
 def _bilinear_gather(value_l, grid_l, h, w):
     M, c = value_l.shape[0], value_l.shape[1]
@@ -76,10 +73,14 @@ def _bilinear_gather(value_l, grid_l, h, w):
     gx, gy = grid_l[..., 0], grid_l[..., 1]
     ix = (gx + 1) * w / 2 - 0.5   # align_corners=False unnormalize
     iy = (gy + 1) * h / 2 - 0.5
-    x0 = torch.floor(ix); y0 = torch.floor(iy)
-    x1 = x0 + 1; y1 = y0 + 1
-    wx1 = ix - x0; wx0 = 1 - wx1
-    wy1 = iy - y0; wy0 = 1 - wy1
+    x0 = torch.floor(ix)
+    y0 = torch.floor(iy)
+    x1 = x0 + 1
+    y1 = y0 + 1
+    wx1 = ix - x0
+    wx0 = 1 - wx1
+    wy1 = iy - y0
+    wy0 = 1 - wy1
     vflat = value_l.reshape(M, c, h * w)
 
     def _clip(t, hi):
@@ -285,6 +286,96 @@ def _tool_versions() -> dict:
     return versions
 
 
+def _exporter_sha256() -> str:
+    """Hash the exporter source that defines the emitted graph and metadata."""
+    return hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()
+
+
+def _validated_source_revision() -> str:
+    """Return the D-FINE-seg revision used to validate the release recipe."""
+    revision_file = Path(__file__).resolve().parents[1] / "DFINE_SEG_REVISION"
+    revision = revision_file.read_text().strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise RuntimeError(f"invalid D-FINE source revision in {revision_file}")
+    return revision
+
+
+def _canonical_remote(url: str) -> str | None:
+    url = url.strip()
+    match = re.fullmatch(r"git@([^:]+):(.+)", url)
+    if match:
+        url = f"https://{match.group(1)}/{match.group(2)}"
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https", "ssh", "git"} or not parsed.hostname:
+        return None
+    host = parsed.hostname
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if port:
+        host = f"{host}:{port}"
+    scheme = "https" if parsed.scheme == "ssh" else parsed.scheme
+    path = parsed.path.rstrip("/").removesuffix(".git")
+    return urlunsplit((scheme, host, path, "", ""))
+
+
+def _source_provenance(source: Path) -> dict:
+    """Describe the model source tree without requiring it to be a Git checkout."""
+    source = source.expanduser().resolve()
+    provenance: dict[str, object] = {"name": source.name}
+
+    def git(*args: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(source), *args],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return None
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    root = git("rev-parse", "--show-toplevel")
+    commit = git("rev-parse", "HEAD")
+    if root is None or commit is None:
+        return provenance
+
+    git_root = Path(root).resolve()
+    provenance["name"] = git_root.name
+    if source != git_root:
+        try:
+            provenance["subdirectory"] = str(source.relative_to(git_root))
+        except ValueError:
+            pass
+    provenance["commit"] = commit
+    status = git("status", "--porcelain", "--untracked-files=normal")
+    if status is not None:
+        provenance["dirty"] = bool(status)
+    remote = git("remote", "get-url", "origin")
+    if remote is None:
+        remotes = git("remote")
+        first_remote = remotes.splitlines()[0] if remotes else None
+        if first_remote:
+            remote = git("remote", "get-url", first_remote)
+    if remote:
+        canonical_remote = _canonical_remote(remote)
+        if canonical_remote:
+            provenance["repository"] = canonical_remote
+    return provenance
+
+
+def _model_source_metadata(source: Path) -> dict:
+    """Add the validated source reference without restricting custom exports."""
+    provenance = _source_provenance(source)
+    reference = _validated_source_revision()
+    provenance["validated_commit"] = reference
+    if "commit" in provenance:
+        provenance["matches_validated_revision"] = provenance["commit"] == reference
+    return provenance
+
+
 def _collect_meta(model: nn.Module, args: argparse.Namespace) -> dict:
     """Read engine-contract constants off the built (deployed) model."""
     dec = model.decoder
@@ -335,6 +426,8 @@ def _collect_meta(model: nn.Module, args: argparse.Namespace) -> dict:
         "trace_batch": args.trace_batch,
         "opset": args.opset,
         "tool_versions": _tool_versions(),
+        "exporter_sha256": _exporter_sha256(),
+        "model_source": _model_source_metadata(Path(args.dfine_src)),
         # Always present so no downstream tool ever has to GUESS the compute
         # types: the FP16 converters overwrite both fields with their recipe.
         "precision": "fp32",
@@ -367,10 +460,9 @@ def _select_state(raw: dict) -> tuple[dict, str]:
 
 # Size-derived buffers build_model regenerates for the requested --img-size.
 # D-FINE-seg registers them persistent, so they ride along in checkpoints. At
-# the TRAINING size the checkpoint's copies are authoritative (they differ from
-# a fresh regeneration by float noise up to ~2e-4, and the gated v0.3.0 assets
-# embed exactly the checkpoint values — loading them keeps exports
-# byte-reproducible). At any OTHER --img-size the shapes cannot match and the
+# the training size the checkpoint's copies are authoritative: they differ from
+# a fresh regeneration by float noise up to ~2e-4, so loading them preserves
+# byte reproducibility. At any other --img-size the shapes cannot match and the
 # freshly generated geometry is the correct one, so a shape mismatch here is a
 # retarget, not a checkpoint error.
 _REGENERATED_SUFFIXES = ("decoder.anchors", "decoder.valid_mask")
@@ -539,6 +631,11 @@ def export(args: argparse.Namespace) -> None:
     if load_report["mode"] == "partial":
         meta["checkpoint_missing_count"] = load_report["missing"]
         meta["checkpoint_shape_mismatch_count"] = load_report["shape_mismatch"]
+    if meta["model_source"].get("matches_validated_revision") is False:
+        print(
+            "[export] note: D-FINE source commit differs from the validated revision; "
+            "the export will continue and record both commits"
+        )
     print(f"[export] meta: {json.dumps({k: meta[k] for k in ('variant','num_queries','reg_max','reg_scale','num_decoder_layers','eval_idx','num_levels','hidden_dim','feat_strides')})}")
 
     onnx_path = Path(args.output).resolve()
@@ -565,8 +662,9 @@ def export(args: argparse.Namespace) -> None:
             torch.onnx.export(wrapped, (dummy,), str(tmp_path), **export_kwargs)
         print(f"[export] staged {tmp_path}")
 
-        if not args.no_simplify:
-            _simplify(tmp_path, args)
+        meta["onnx_simplification"] = _run_simplification(
+            tmp_path, disabled=args.no_simplify
+        )
 
         _verify_graph(tmp_path, meta)
     except BaseException:
@@ -585,7 +683,7 @@ def export(args: argparse.Namespace) -> None:
     print(f"[export] wrote sidecar {sidecar}")
 
 
-def _simplify(onnx_path: Path, args: argparse.Namespace) -> None:
+def _simplify(onnx_path: Path) -> str:
     """Best-effort onnxsim pass. The onnxsim API differs across versions and can
     specialize a dynamic axis; any failure leaves the un-simplified graph in place,
     and _verify_graph re-checks that the batch axis stayed symbolic."""
@@ -594,18 +692,24 @@ def _simplify(onnx_path: Path, args: argparse.Namespace) -> None:
         from onnxsim import simplify
     except Exception as exc:  # noqa: BLE001
         print(f"[export] onnxsim unavailable ({exc}); skipping")
-        return
+        return "unavailable"
     model = onnx.load(str(onnx_path))
     try:
         simplified, ok = simplify(model)
     except Exception as exc:  # noqa: BLE001
         print(f"[export] onnxsim raised ({exc}); keeping unsimplified graph")
-        return
+        return "failed"
     if not ok:
         print("[export] onnxsim validation returned False; keeping unsimplified graph")
-        return
+        return "rejected"
     onnx.save(simplified, str(onnx_path))
     print("[export] onnxsim simplified")
+    return "applied"
+
+
+def _run_simplification(onnx_path: Path, *, disabled: bool) -> str:
+    """Return the sidecar status for the requested simplification policy."""
+    return "disabled" if disabled else _simplify(onnx_path)
 
 
 def _verify_graph(onnx_path: Path, meta: dict) -> None:
@@ -751,12 +855,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--letterbox-anchor", choices=["center", "topleft"], default="center")
     p.add_argument("--letterbox-pad", type=int, default=114)
     p.add_argument("--no-letterbox-upscale", action="store_true",
-                   help="paste 1:1 when the frame already fits (production smart_resize)")
+                   help="do not upscale an image that already fits the engine canvas")
     p.add_argument("--dfine-src",
                    default=os.environ.get("DFINE_SEG_SRC",
-                                          "/home/dxdxxd/projects/custom-dfine/D-FINE-seg"),
+                                          os.environ.get("DFINE_SEG_DIR",
+                                                         str(repo.parent / "D-FINE-seg"))),
                    help="root of the D-FINE-seg source (github.com/ArgoHA/D-FINE-seg) providing "
-                        "build_model; or set $DFINE_SEG_SRC")
+                        "build_model; or set $DFINE_SEG_SRC/$DFINE_SEG_DIR")
     p.add_argument("--output", default=str(repo / "trt-files" / "onnx" / "dfine_m.onnx"))
     p.add_argument("--device", default="cuda")
     p.add_argument("--no-simplify", action="store_true")

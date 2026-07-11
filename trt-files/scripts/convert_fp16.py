@@ -4,7 +4,7 @@
 This is the *strongly-typed* path to FP16, and it exists because the weakly-typed
 `config.set_flag(kFP16)` route degrades D-FINE by ~6.8 AP even with every compute
 layer pinned FP32 — TRT inserts uncontrolled FP16 reformats on the FDR's
-precision-critical data path (docs/HANDOFF M2.1). Here the precision is baked into
+precision-critical data path. Here the precision is baked into
 the ONNX tensor types instead: onnxconverter_common casts backbone+encoder tensors to
 FP16 and inserts explicit Cast nodes at the decoder boundary, and the decoder
 (block-listed by name) stays FP32. Build the result with `build_engine.py

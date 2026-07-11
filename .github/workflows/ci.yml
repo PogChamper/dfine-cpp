@@ -4,11 +4,12 @@ name: CI
 #   lint          — ruff / shellcheck / clang-format (static checks only)
 #   compile-cuda  — full C++/CUDA compile + link in the NGC TensorRT container,
 #                   plus the app --help paths (no CUDA calls executed)
+#   install-consumer — installed CMake package consumed outside the checkout
 #   python-nogpu  — the pytest subset whose fixtures don't need libdfine/engine/GPU
 #   wheel         — builds libdfine.so and packages the dfine wheel artifact
 # GPU-dependent behavior (inference, mAP, benchmarks, CUDA graphs, sanitizer
-# runs) is NOT verified here — see CONTRIBUTING.md / docs/HANDOFF.md for the
-# local validation workflow, and the disabled self-hosted stub at the bottom.
+# runs) is NOT verified here — see CONTRIBUTING.md and docs/VALIDATION.md for
+# the local validation workflow and the disabled self-hosted stub below.
 
 on:
   push:
@@ -88,7 +89,6 @@ jobs:
           V=10.13.3.9-1+cuda12.9
           apt-get install -y --no-install-recommends \
             "libnvinfer10=$V" "libnvinfer-headers-dev=$V" "libnvinfer-dev=$V" \
-            "libnvinfer-plugin10=$V" "libnvinfer-headers-plugin-dev=$V" "libnvinfer-plugin-dev=$V" \
             "libnvonnxparsers10=$V" "libnvonnxparsers-dev=$V"
       - name: Configure
         # CMAKE_CUDA_ARCHITECTURES must be an explicit SM here: build.sh's
@@ -111,9 +111,9 @@ jobs:
         # dfine_detect and dfine_bench return 0 from -h/--help before any CUDA
         # or TensorRT API call (apps/dfine_detect.cpp:28, apps/dfine_bench.cpp:247)
         # — this only exercises linking/loading of libdfine + libnvinfer +
-        # libcudart. dfine_inspect is deliberately NOT run: it has no --help
+        # libcudart. dfine_inspect is deliberately not run: it has no --help
         # path (argv[1] is unconditionally an engine path, so "--help" exits
-        # nonzero — see apps/dfine_inspect.cpp and the Dockerfile CMD note).
+        # nonzero; see apps/dfine_inspect.cpp).
         run: |
           export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
           ./build/dfine_detect --help
@@ -121,8 +121,7 @@ jobs:
       - name: ctest (CPU suites; GPU suites skip via 77)
         # image_layout and engine_meta are CPU-only and must PASS here; the
         # shape-transition/recovery suites need a GPU + DFINE_TEST_ENGINE and
-        # report SKIP_RETURN_CODE 77 on hosted runners. Building the test
-        # binaries without ever running ctest was a v0.3.1-review finding.
+        # report SKIP_RETURN_CODE 77 on hosted runners.
         run: |
           export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
           ctest --test-dir build --output-on-failure
@@ -130,9 +129,8 @@ jobs:
   install-consumer:
     name: cmake --install + out-of-tree consumer
     runs-on: ubuntu-latest
-    # Same container recipe as compile-cuda: install needs the full link
-    # toolchain, and the consumer must resolve TensorRT::TensorRT through the
-    # SHIPPED FindTensorRT.cmake, not the checkout's copy.
+    # The library build needs TensorRT/CUDA headers. The installed consumer
+    # must not discover either development package through dfineConfig.cmake.
     container: nvidia/cuda:12.9.1-devel-ubuntu22.04
     steps:
       - uses: actions/checkout@v4
@@ -142,9 +140,7 @@ jobs:
           apt-get install -y --no-install-recommends cmake build-essential nlohmann-json3-dev
           V=10.13.3.9-1+cuda12.9
           apt-get install -y --no-install-recommends \
-            "libnvinfer10=$V" "libnvinfer-headers-dev=$V" "libnvinfer-dev=$V" \
-            "libnvinfer-plugin10=$V" "libnvinfer-headers-plugin-dev=$V" "libnvinfer-plugin-dev=$V" \
-            "libnvonnxparsers10=$V" "libnvonnxparsers-dev=$V"
+            "libnvinfer10=$V" "libnvinfer-headers-dev=$V" "libnvinfer-dev=$V"
       - name: Build + install to a prefix
         run: |
           cmake -B build -S . \
@@ -163,19 +159,17 @@ jobs:
           readelf -d "$lib" | grep -E 'RPATH|RUNPATH' && exit 1
           readelf -d "$lib" | grep -E '/home/|workspace' && exit 1
           readelf -d "$lib" | grep -q 'SONAME.*libdfine.so.1'
-          # The config package must be self-contained: targets + version +
-          # the TensorRT find module it depends on.
-          for f in dfineConfig.cmake dfineConfigVersion.cmake dfineTargets.cmake FindTensorRT.cmake; do
+          for f in dfineConfig.cmake dfineConfigVersion.cmake dfineTargets.cmake; do
             test -f "/tmp/dfine-prefix/lib/cmake/dfine/$f"
           done
+          ! grep -RE 'TensorRT|CUDA::|nvonnxparser' /tmp/dfine-prefix/lib/cmake/dfine
       - name: Build consumer OUTSIDE the checkout
         # Copy examples/ elsewhere so a leaked build-tree path in the config
         # package cannot be satisfied by the checkout lying around.
         run: |
           cp -r examples /tmp/consumer-src
           cmake -B /tmp/consumer-build -S /tmp/consumer-src/consumer \
-            -DCMAKE_PREFIX_PATH=/tmp/dfine-prefix \
-            -DCUDAToolkit_ROOT=/usr/local/cuda
+            -DCMAKE_PREFIX_PATH=/tmp/dfine-prefix
           cmake --build /tmp/consumer-build -j"$(nproc)"
       - name: Run consumer (no-args usage path; loads libdfine + TRT)
         run: |
@@ -197,8 +191,7 @@ jobs:
       - name: Install package + test deps
         # Beyond the dev extra: CPU torch + onnx/onnxruntime so the release-gate
         # suites (strict checkpoint loading, the mandatory ORT N=1/2 dynamic-batch
-        # postcondition) actually EXECUTE here instead of importorskip-ping away —
-        # a v0.3.1-review finding: CI was green with those gates never run.
+        # postcondition) execute here instead of being skipped by optional imports.
         run: |
           pip install -e "python/[dev]"
           pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -235,9 +228,7 @@ jobs:
             python3-pip python3-venv unzip
           V=10.13.3.9-1+cuda12.9
           apt-get install -y --no-install-recommends \
-            "libnvinfer10=$V" "libnvinfer-headers-dev=$V" "libnvinfer-dev=$V" \
-            "libnvinfer-plugin10=$V" "libnvinfer-headers-plugin-dev=$V" "libnvinfer-plugin-dev=$V" \
-            "libnvonnxparsers10=$V" "libnvonnxparsers-dev=$V"
+            "libnvinfer10=$V" "libnvinfer-headers-dev=$V" "libnvinfer-dev=$V"
       - name: Build libdfine.so
         # sm_89 SASS + compute_89 PTX: runs on Ada as-is and JIT-compiles on
         # newer arches; older GPUs (sm_75/86) need a rebuild with their arch.
@@ -251,13 +242,10 @@ jobs:
           cmake --build build --target dfine -j"$(nproc)"
       - name: Package wheel
         id: package_wheel
-        # THE release packaging path (python/build_wheel.sh, SKIP_BUILD reuses
-        # the .so built above) — CI must test the same artifact users install,
-        # not a hand-rolled approximation. v0.3.0 shipped exactly that bug: the
-        # CI wheel silently lacked the bundled build_engine.py.
+        # Release packaging uses python/build_wheel.sh; SKIP_BUILD reuses
+        # the .so built above) — CI tests the same artifact users install.
         run: |
-          # wheel >= 0.40 for the `tags` subcommand (the container's wheel predates it)
-          python3 -m pip install build 'wheel>=0.40'
+          python3 -m pip install build
           SKIP_BUILD=1 ./python/build_wheel.sh
           version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' python/pyproject.toml)
           shopt -s nullglob
@@ -274,6 +262,9 @@ jobs:
           unzip -l "$DFINE_WHEEL" | grep -q "dfine/libdfine.so"
           unzip -l "$DFINE_WHEEL" | grep -q "dfine/_scripts/build_engine.py"
           mkdir -p /tmp/whl-audit && unzip -q -o "$DFINE_WHEEL" -d /tmp/whl-audit
+          grep -q '^Root-Is-Purelib: false$' /tmp/whl-audit/dfine-*.dist-info/WHEEL
+          test -f /tmp/whl-audit/dfine-*.dist-info/licenses/LICENSE
+          test -f /tmp/whl-audit/dfine-*.dist-info/licenses/NOTICE
           # No RPATH/RUNPATH (a baked build-machine path would hijack TensorRT
           # resolution on any host where it happens to exist) and no absolute
           # build paths anywhere in the dynamic section.
@@ -282,23 +273,24 @@ jobs:
           fi
           readelf -d /tmp/whl-audit/dfine/libdfine.so | grep -q 'SONAME.*libdfine.so.1'
       - name: Smoke-install outside the checkout (wheel-only contract)
-        # A wheel-only user has no repo: the CLI must still find the bundled
-        # engine-build script through its real resolution path. `build --help`
-        # is NOT sufficient (argparse exits before script resolution runs).
+        # Verify both native loading and the bundled engine-builder path without
+        # relying on files from the checkout.
         env:
           DFINE_WHEEL: ${{ steps.package_wheel.outputs.wheel }}
         run: |
           python3 -m pip install "$DFINE_WHEEL"
           cd /tmp
+          export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
           python3 - <<'EOF'
           import pathlib
           import dfine
           from dfine.cli import _build_engine_script
           lib = pathlib.Path(dfine.__file__).parent / "libdfine.so"
           assert lib.is_file(), lib
+          assert dfine.library_version() == dfine.__version__
           script = _build_engine_script()
           assert script.is_file() and "_scripts" in str(script), script
-          print("wheel-only contract OK:", dfine.__version__, script)
+          print("wheel-only contract OK:", dfine.library_version(), script)
           EOF
       - uses: actions/upload-artifact@v4
         with:
@@ -309,7 +301,7 @@ jobs:
   # gpu-build:
   #   name: build.sh WERROR=ON + dfine_smoke
   #   # Requires a self-hosted runner with an NVIDIA GPU, TensorRT 10.13, and
-  #   # CUDA 12 installed (see docs/HANDOFF.md "Environment"). GitHub-hosted
+  #   # CUDA 12 installed. GitHub-hosted
   #   # runners have no GPU, so this job is disabled here and left as a stub
   #   # for whenever a self-hosted [self-hosted, gpu] runner is wired up.
   #   runs-on: [self-hosted, gpu]

@@ -1,4 +1,4 @@
-"""`dfine` — a zero-setup command line for the D-FINE-cpp TensorRT runtime.
+"""Command-line interface for D-FINE-cpp artifacts and inference.
 
     dfine predict --model m --image dog.jpg          # detect + print (+ --out to draw)
     dfine info    --model m                           # engine introspection
@@ -26,15 +26,10 @@ from typing import Optional
 
 MODELS = ("n", "s", "m", "l", "x")
 _ENGINE_SUFFIX = {"fp32": "fp32", "fp16": "fp16_st"}
-# The recipe-suffix vocabulary (docs/NAMING.md). These two constants are the only
-# spellings — discovery, export defaults and stem-stripping all reference them.
-_SLIM_SUFFIX = "_slim"        # v0.3 production surgical FP16
-_LEGACY_SUFFIX = "_fp16_st"   # v0.2 legacy decoder-FP32 tier
-# ONNX stem suffixes tried per precision, in preference order. `_slim` first: it is
-# both the v0.3 release surgical FP16 asset name AND what `dfine export --precision
-# fp16` writes since v0.3.1, so the production tier always wins. `_fp16_st` (the
-# legacy decoder-FP32 tier, still produced by --precision fp16-legacy) is found when
-# it is the only candidate; _find_onnx warns whenever several names match.
+# Artifact suffixes are defined here so discovery and export use one vocabulary.
+_SLIM_SUFFIX = "_slim"       # production surgical FP16
+_LEGACY_SUFFIX = "_fp16_st"  # decoder-FP32 compatibility recipe
+# Prefer the production recipe while continuing to discover compatibility assets.
 _ONNX_SUFFIXES = {"fp32": ("", "_op19"), "fp16": (_SLIM_SUFFIX, _LEGACY_SUFFIX)}
 # Known D-FINE-seg checkpoints (relative to the seg source dir).
 _CHECKPOINTS = {
@@ -70,7 +65,7 @@ def _repo_root() -> Optional[Path]:
 
 
 def _seg_dir() -> Optional[Path]:
-    env = os.environ.get("DFINE_SEG_DIR")
+    env = os.environ.get("DFINE_SEG_DIR") or os.environ.get("DFINE_SEG_SRC")
     if env and Path(env).exists():
         return Path(env)
     repo = _repo_root()
@@ -79,6 +74,36 @@ def _seg_dir() -> Optional[Path]:
         if sib.exists():
             return sib
     return None
+
+
+def _tensorrt_header_roots() -> list[Path]:
+    """Header locations used by source-build diagnostics."""
+    roots: list[Path] = []
+
+    def add(path: Optional[Path]) -> None:
+        if not path:
+            return
+        root = Path(path).expanduser()
+        if root not in roots:
+            roots.append(root)
+
+    trt_dir = os.environ.get("TENSORRT_DIR")
+    add(Path(trt_dir) / "include" if trt_dir else None)
+    repo = _repo_root()
+    add(repo / "third_party" / "tensorrt" / "include" if repo else None)
+    for env_name in ("CUDAToolkit_ROOT", "CUDA_HOME", "CUDA_PATH", "CONDA_PREFIX"):
+        value = os.environ.get(env_name)
+        add(Path(value) / "include" if value else None)
+    for path in (
+        "/usr/local/TensorRT/include",
+        "/opt/tensorrt/include",
+        "/usr/local/cuda/include",
+        "/usr/include/x86_64-linux-gnu",
+        "/usr/include/aarch64-linux-gnu",
+        "/usr/include",
+    ):
+        add(Path(path))
+    return roots
 
 
 def _gpu_arch() -> str:
@@ -119,14 +144,7 @@ def _have_tensorrt() -> bool:
 
 
 def _artifact_fingerprint(onnx: Path) -> str:
-    """Identity of the MODEL an engine was built from: the ONNX bytes plus its
-    sidecar (class names / normalization travel into the engine sidecar). Two
-    different fine-tunes of the same size can never share a cache entry, and a
-    stale engine can never shadow a fresh export. The batch profile is NOT part
-    of the identity — it only shapes performance and is recorded in the engine
-    sidecar (_engine_meta); a same-artifact engine with a different profile is
-    still the right model (12 hex chars — enough to never collide within one
-    cache dir)."""
+    """Fingerprint the ONNX bytes and sidecar for cache identity."""
     h = hashlib.sha256()
     h.update(onnx.read_bytes())
     sidecar = onnx.with_suffix(".json")
@@ -155,7 +173,7 @@ def _same_artifact_engines(model: str, precision: str, fingerprint: str) -> list
 
 
 def _legacy_cache_engine_path(model: str, precision: str) -> Path:
-    """Pre-v0.3.1 cache name: not bound to any ONNX — a fallback of last resort."""
+    """Return the unfingerprinted compatibility-cache path."""
     return _cache_dir() / f"dfine_{model}_{precision}-sm{_gpu_arch()}-trt{_trt_version()}.engine"
 
 
@@ -179,8 +197,7 @@ def _find_onnx(model: str, precision: str, onnx_arg: Optional[str]) -> Optional[
         if not p.exists():
             raise SystemExit(f"ONNX not found: {p}")
         return p
-    # Location-major (the cache holds user-produced exports and must keep shadowing the
-    # dev tree, as in v0.2); within a location, prefer the newer release naming.
+    # User-produced cache artifacts take precedence over development-tree assets.
     candidates = []
     for base in (_cache_dir(), (_repo_root() / "trt-files" / "onnx") if _repo_root() else None):
         for suffix in _ONNX_SUFFIXES[precision]:
@@ -202,16 +219,12 @@ def _resolve_engine(
     opt_batch: int = 1,
     max_batch: int = 8,
 ) -> Path:
-    """Engine resolution, bound to artifact identity.
+    """Resolve an engine without crossing artifact identities.
 
     Precedence: an explicit --engine wins; otherwise the resolved ONNX (explicit
-    --onnx or discovery) defines the identity and ONLY an engine built from
-    exactly that ONNX (fingerprint in the filename) is used — an explicit --onnx
-    can never lose to a cache entry built from something else (the v0.3.0
-    shadowing bug: a stale COCO engine silently served a fresh custom export).
-    Engines whose provenance cannot be verified (source ONNX gone, pre-v0.3.1
-    cache names, dev-tree builds) are last resorts, used with a warning and
-    never picked silently among several candidates.
+    --onnx or discovery) defines the identity, and only an engine built from
+    exactly that ONNX is used. Engines whose source cannot be reverified are
+    explicit fallback candidates and are never selected ambiguously.
     """
     if engine_arg:
         p = Path(engine_arg)
@@ -282,7 +295,7 @@ def _resolve_engine(
                          f"to disambiguate:\n  {names}\npass --engine (or --onnx to rebuild)")
     legacy = _legacy_cache_engine_path(model, precision)
     if legacy.exists():
-        _log(f"[dfine] using pre-v0.3.1 cache entry {legacy.name} — not bound to an ONNX; "
+        _log(f"[dfine] using unfingerprinted cache entry {legacy.name} — not bound to an ONNX; "
              "re-run `dfine build` to bind it")
         return legacy
     repo = _repo_root()
@@ -353,7 +366,8 @@ def _check_onnx_precision(onnx: Path, precision: str) -> None:
 def _build_engine(onnx: Path, output: Path, precision: str, max_batch: int,
                   opt_batch: int = 1) -> Path:
     if not _have_tensorrt():
-        raise SystemExit("building an engine needs TensorRT — `pip install tensorrt==10.13.*`")
+        raise SystemExit(
+            "building an engine needs TensorRT — `pip install tensorrt-cu12==10.13.*`")
     _check_onnx_precision(onnx, precision)
     output.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -376,8 +390,7 @@ def _build_engine(onnx: Path, output: Path, precision: str, max_batch: int,
 
 
 def _convert_fp16(fp32_onnx: Path, output: Path) -> Path:
-    """Legacy strongly-typed FP16 (backbone+encoder FP16, whole decoder FP32) via
-    convert_fp16.py — the v0.2 tier, kept as --precision fp16-legacy."""
+    """Create the decoder-FP32 compatibility artifact."""
     output.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable,
@@ -391,8 +404,7 @@ def _convert_fp16(fp32_onnx: Path, output: Path) -> Path:
 
 
 def _convert_fp16_surgical(fp32_onnx: Path, output: Path) -> Path:
-    """Production FP16 (v0.3 surgical/slim: FP16 decoder with the FDR/deform FP32
-    island) via convert_fp16_surgical.py. Needs an opset >= 19 base graph."""
+    """Create the production surgical-FP16 artifact."""
     output.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable,
@@ -412,7 +424,8 @@ def _export_onnx(model: str, checkpoint: Optional[str], output: Path,
     seg = _seg_dir()
     if seg is None:
         raise SystemExit(
-            "export needs the D-FINE-seg source (set DFINE_SEG_DIR or place it beside this repo)"
+            "export needs D-FINE-seg source (set DFINE_SEG_DIR/DFINE_SEG_SRC or place it "
+            "beside this repo)"
         )
     ckpt = Path(checkpoint) if checkpoint else seg / _CHECKPOINTS[model]
     if not ckpt.exists():
@@ -542,7 +555,7 @@ def cmd_build(args) -> int:
 
 def _warn_if_replacing_different_checkpoint(onnx_out: Path) -> None:
     """An export into the cache overwrites the previous export of that stem. Same
-    checkpoint = routine refresh; a DIFFERENT checkpoint deserves a loud note,
+    checkpoint = routine refresh; a different checkpoint deserves a clear note,
     because every later `dfine predict --model X` resolves the new artifact."""
     sidecar = onnx_out.with_suffix(".json")
     if not sidecar.exists():
@@ -558,16 +571,16 @@ def _warn_if_replacing_different_checkpoint(onnx_out: Path) -> None:
 
 def cmd_export(args) -> int:
     model = args.model
-    # Validated opset/recipe pairings only. fp16 = the v0.3 production surgical/slim
+    # Validated opset/recipe pairings only. fp16 = the production surgical/slim
     # recipe, which hard-requires an opset-19 base (opset-16 decomposed LayerNorm
     # miscompiles under fine-grained FP16 in TRT 10.13); fp16-legacy = the measured
-    # v0.2 tier on its original opset-16 base. Unmeasured combinations are refused
+    # compatibility tier on its opset-16 base. Unmeasured combinations are refused
     # rather than silently exported.
     if args.precision == "fp16" and args.opset is not None and args.opset < 19:
         raise SystemExit(f"--precision fp16 (surgical) needs --opset >= 19, got {args.opset}; "
                          "use --precision fp16-legacy for the opset-16 tier")
     if args.precision == "fp16-legacy" and args.opset not in (None, 16):
-        raise SystemExit("--precision fp16-legacy is the validated opset-16 v0.2 tier; "
+        raise SystemExit("--precision fp16-legacy is the validated opset-16 compatibility tier; "
                          "drop --opset or use --precision fp16")
     opset = args.opset if args.opset is not None else (16 if args.precision == "fp16-legacy"
                                                        else 19)
@@ -676,13 +689,9 @@ def cmd_doctor(_args) -> int:
         loads = False
         print(f"libdfine      : FAILED\n{e}")
 
-    headers = next(
-        (d for d in ("/usr/include/x86_64-linux-gnu", "/usr/local/TensorRT/include",
-                     "/opt/tensorrt/include", "/usr/include")
-         if (Path(d) / "NvInfer.h").exists()),
-        None,
-    )
-    print(f"trt headers   : {headers or 'not found (needed only to BUILD from source)'}")
+    print("trt header roots (+ found, - missing):")
+    for root in _tensorrt_header_roots():
+        print(f"  {'+' if (root / 'NvInfer.h').is_file() else '-'} {root}")
     engines = sorted(_cache_dir().glob("*.engine"))
     print(f"engine cache  : {_cache_dir()} ({len(engines)} engine(s))")
     return 0 if loads else 1
@@ -718,8 +727,7 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--json", action="store_true", help="print detections as JSON")
     pr.set_defaults(func=cmd_predict)
 
-    # info/bench are engine-only: they never build, so an --onnx flag would be
-    # dead weight (it was silently ignored before v0.3.1).
+    # info/bench are engine-only: they never consume or build from ONNX.
     pi = sub.add_parser("info", help="print engine introspection")
     _add_common(pi, onnx=False)
     pi.set_defaults(func=cmd_info)
@@ -736,8 +744,8 @@ def build_parser() -> argparse.ArgumentParser:
     pe = sub.add_parser("export", help="export a checkpoint to ONNX (needs D-FINE-seg)")
     pe.add_argument("--model", choices=MODELS, default="m")
     pe.add_argument("--precision", choices=("fp32", "fp16", "fp16-legacy"), default="fp32",
-                    help="fp16 = the v0.3 production surgical/slim recipe (opset 19); "
-                         "fp16-legacy = the v0.2 decoder-FP32 tier (opset 16)")
+                    help="fp16 = production surgical/slim (opset 19); "
+                         "fp16-legacy = decoder-FP32 compatibility recipe (opset 16)")
     pe.add_argument("--checkpoint", help="path to a D-FINE .pt (defaults to the known seg ckpt)")
     pe.add_argument("--num-classes", type=int, default=None,
                     help="class count of the checkpoint (default 80); a mismatch aborts "

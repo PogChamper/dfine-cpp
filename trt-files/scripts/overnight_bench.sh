@@ -50,10 +50,10 @@ for sz in $SIZES; do
   E16G=trt-files/engines/dfine_${sz}_fp16_g0.engine       # 0-aux (CUDA-graph capturable)
 
   [ -f "$ONNX" ]   || step 900  "export $sz ONNX"        $PY $S/export_dfine_onnx.py --model-name $sz --checkpoint "$ck" --output $ONNX
-  [ -f "$E32" ]    || step 1500 "build $sz FP32"          $PY $S/build_engine.py --no-tf32 --max-batch 8 --cuda-graph --onnx $ONNX --output $E32
+  [ -f "$E32" ]    || step 1500 "build $sz FP32"          $PY $S/build_engine.py --no-tf32 --max-batch 8 --onnx $ONNX --output $E32
   [ -f "$ONNX16" ] || step 600  "convert $sz FP16 ONNX"   $PY $S/convert_fp16.py --onnx $ONNX --output $ONNX16
-  [ -f "$E16" ]    || step 1500 "build $sz FP16 (2-aux)"   $PY $S/build_engine.py --strongly-typed --no-tf32 --max-batch 8 --cuda-graph --onnx $ONNX16 --output $E16
-  [ -f "$E16G" ]   || step 1500 "build $sz FP16 (0-aux)"   $PY $S/build_engine.py --strongly-typed --no-tf32 --max-batch 8 --cuda-graph --max-aux-streams 0 --onnx $ONNX16 --output $E16G
+  [ -f "$E16" ]    || step 1500 "build $sz FP16 (2-aux)"   $PY $S/build_engine.py --strongly-typed --no-tf32 --max-batch 8 --onnx $ONNX16 --output $E16
+  [ -f "$E16G" ]   || step 1500 "build $sz FP16 (0-aux)"   $PY $S/build_engine.py --strongly-typed --no-tf32 --max-batch 8 --max-aux-streams 0 --onnx $ONNX16 --output $E16G
 
   if [ ! -f "$E32" ] || [ ! -f "$E16" ]; then log "  ✗ $sz: engines missing, skipping profiles"; continue; fi
 
@@ -73,13 +73,13 @@ for sz in $SIZES; do
         --graph-compare > "$OUTDIR/graph_${sz}.txt" 2>>"$LOG" && log "  ✓ $sz graph-compare" || log "  ✗ $sz graph-compare"
   fi
 
-  # P3 full-pipeline graph: per-stage CPU cost (pack/dispatch/wait/decode) of the
+  # Full-pipeline graph: per-stage CPU cost (pack/dispatch/wait/decode) of the
   # split gpu-decode path vs the single-launch graph, + in-run byte parity and the
   # live-threshold probe. NSYS=1 additionally records an Nsight Systems trace
   # (cuda,nvtx,osrt) to verify visually that the CPU idles while the graph runs
   # and that no hidden cudaMalloc/sync appears inside the captured region.
   if [ -f "$E16G" ]; then
-    log "▶ $sz pipeline-compare (P3, 0-aux FP16)"
+    log "▶ $sz pipeline-compare (0-aux FP16)"
     NSYS_PREFIX=""
     if [ "${NSYS:-0}" = "1" ] && command -v nsys >/dev/null 2>&1; then
       NSYS_PREFIX="nsys profile -t cuda,nvtx,osrt --force-overwrite true -o $OUTDIR/nsys_pipeline_${sz}"
@@ -116,10 +116,10 @@ for sz in $SIZES; do
     run_map split_filtered --gpu-decode --freeze --own-device-memory --filter-res 640x480 \
                            --limit 0 --out "$OUTDIR/dets_${sz}_split.json"
     if cmp -s "$OUTDIR/dets_${sz}_fullgraph.json" "$OUTDIR/dets_${sz}_split.json"; then
-      log "  ✓ $sz P3 byte-parity: full-graph == split gpu-decode (640x480 subset)"
+      log "  ✓ $sz byte-parity: full-graph == split gpu-decode (640x480 subset)"
       echo PASS > "$OUTDIR/parity_${sz}.txt"
     else
-      log "  ✗ $sz P3 BYTE-PARITY FAILED (dets_${sz}_fullgraph.json != dets_${sz}_split.json)"
+      log "  ✗ $sz byte-parity failed (dets_${sz}_fullgraph.json != dets_${sz}_split.json)"
       echo FAIL > "$OUTDIR/parity_${sz}.txt"
     fi
   fi
@@ -178,10 +178,10 @@ for sz in SIZES:
     cpu=f"{float(c1[0]):.2f} vs {float(c1[1]):.2f} ms" if c1 else "—"
     L.append(f"| {NAMES.get(sz,sz)} | {f(b1)} | {d(b1)} | {f(b8)} | {d(b8)} | {cpu} |")
 L.append("\n**Recommendation:** batch-1 streaming → build `--max-aux-streams 0` + `use_cuda_graph`; "
-         "batch throughput → default (2-aux) engine. See docs/HANDOFF.md M2.2.\n")
+         "batch throughput → default (2-aux) engine.\n")
 
-# P3 full-pipeline graph: per-stage CPU cost + parity (dfine_bench --pipeline-compare)
-L.append("\n## P3 full-pipeline graph (`dfine_bench --pipeline-compare`, 0-aux FP16)\n")
+# Full-pipeline graph: per-stage CPU cost + parity (dfine_bench --pipeline-compare)
+L.append("\n## Full-pipeline graph (`dfine_bench --pipeline-compare`, 0-aux FP16)\n")
 L.append("Per-stage HOST (CPU) cost, split gpu-decode path vs one `cudaGraphLaunch` per frame. "
          "`parity` counts byte-identical iterations; the threshold probe verifies the score "
          "threshold stays a live per-call knob inside the captured graph.\n")

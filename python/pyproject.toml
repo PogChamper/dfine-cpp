@@ -17,6 +17,7 @@ description = "Python bindings for D-FINE-cpp — C++/TensorRT D-FINE object det
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 dependencies = ["numpy>=1.21"]
 
 [project.scripts]

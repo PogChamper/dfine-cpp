@@ -5,15 +5,15 @@
 #   uv sync --frozen --extra gpu --extra torch       # + the checkpoint-export chain
 #   uv sync --frozen                                 # ONNX-graph tooling only (no GPU wheels)
 #
-# uv.lock pins the whole toolchain: exports are byte-reproducible only under the
-# locked versions (a different torch serializes a different ONNX).
+# uv.lock pins the Python toolchain. Reproducing a release export also requires
+# the D-FINE source revision recorded in trt-files/DFINE_SEG_REVISION.
 #
-# Notes / hard requirements (see docs/HANDOFF.md "Environment"):
-#   • TensorRT 10.13 and the matching CUDA-12 runtime must be present. The `tensorrt` wheel
-#     pulls the libs; at C++ runtime, LD_LIBRARY_PATH must point at `.../tensorrt_libs`.
-#   • onnxruntime-gpu is pinned to the CUDA-12 wheel (1.24.4); 1.27 needs CUDA 13.
+# Requirements and failure modes: docs/CONVERSION.md and docs/TROUBLESHOOTING.md.
+#   • TensorRT 10.13 and the matching CUDA-12 runtime must be present. The
+#     `tensorrt-cu12` package supplies the Python API and runtime libraries.
+#   • onnxruntime-gpu is pinned to the validated CUDA-12 build.
 #   • The ONNX **export** (export_dfine_onnx.py) additionally needs the D-FINE-seg source
-#     (https://github.com/ArgoHA/D-FINE-seg) on PYTHONPATH for build_model — it is NOT a
+#     (https://github.com/ArgoHA/D-FINE-seg) for build_model; it is not a
 #     pip dependency. Everything else (build_engine / convert_fp16 / convert_int8 /
 #     profile / coco_eval) is self-contained.
 [project]
@@ -43,8 +43,7 @@ gpu = [
 torch = ["torch==2.9.1", "torchvision==0.24.*", "loguru", "scipy"]
 
 [tool.uv]
-# torch + onnxruntime-gpu ship as GPU-specific wheels; point uv at the right indexes.
-# Adjust the CUDA tag (cu128) to your toolkit if not on CUDA 12.8.
+# The locked torch/torchvision wheels come from the CUDA 12.8 index.
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"

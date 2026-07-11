@@ -1,25 +1,11 @@
 #!/usr/bin/env python3
-"""Build a TensorRT engine from a raw D-FINE ONNX with a dynamic-batch profile.
+"""Build a TensorRT engine from a D-FINE ONNX graph.
 
-Mirrors what the C++ ``dfine_build`` app will do (native NvOnnxParser, one
-optimization profile over the ``images`` batch axis), so the engine contract is
-established here and reused by both Python verification and the C++ runtime.
-
-Precision modes:
-  (default)             FP32 (add ``--no-tf32`` for an FP32-faithful parity build).
-  ``--fp16``            weakly-typed whole-graph FP16 — the *anti-example*: it lets
-                        TRT run D-FINE's decoder in FP16, which the FDR integral
-                        amplifies into ~10 AP loss (the same failure class as the
-                        grid_sample trap, docs/impl/M0_STATUS.md). Timing only.
-  ``--fp16-decoder-fp32`` production FP16: backbone+encoder in FP16, but every
-                        float-compute decoder layer pinned to FP32 (class/bbox
-                        heads, FDR Integral/LQE, distance2bbox, deformable core).
-                        Decoder layers are found by ONNX-derived name prefix — all
-                        D-FINE compute is cleanly scoped under /model/{backbone,
-                        encoder,decoder} (verified: OTHER-region nodes are shape/
-                        constant only). Pair with ``--no-tf32`` so the pinned FP32
-                        decoder is also TF32-faithful. Outputs stay FP32, so the
-                        C++ runtime needs no change.
+The validated FP16 path is a surgically typed ONNX graph built with
+``--strongly-typed``; see ``docs/CONVERSION.md``. The weakly typed ``--fp16`` and
+decoder-pinning modes remain research controls. They measured about 6.8 AP below
+the PyTorch reference and do not reproduce the typed-graph result. The separate
+native-GridSample path measured about 10.5 AP below the reference.
 """
 
 from __future__ import annotations
@@ -76,16 +62,46 @@ def _publish_pair(graph_tmp, graph_out, sidecar_text, sidecar_out, tag):
         sidecar_out.unlink()
         print(f"[{tag}] removed stale sidecar {sidecar_out} (source has none)")
 
+
+def _engine_sidecar_plan(onnx_path: Path, out_path: Path) -> tuple[Path, Path | None]:
+    """Choose an engine sidecar without overwriting the graph or ONNX metadata."""
+    onnx_path = Path(onnx_path).resolve()
+    out_path = Path(out_path).resolve()
+    source = onnx_path.with_suffix(".json")
+    protected_source = source.resolve() if source.exists() else None
+
+    if protected_source == out_path:
+        raise SystemExit(
+            f"engine output would overwrite the ONNX sidecar: {out_path}; "
+            "use an output ending in .engine"
+        )
+
+    candidates = [out_path.with_suffix(".json"), Path(str(out_path) + ".json")]
+    usable: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved == out_path or resolved == protected_source:
+            continue
+        if all(resolved != existing.resolve() for existing in usable):
+            usable.append(candidate)
+
+    if not usable:
+        raise SystemExit(
+            f"cannot place an engine sidecar safely next to {out_path}; "
+            "use an output ending in .engine"
+        )
+
+    chosen = usable[0]
+    stale_twin = usable[1] if len(usable) > 1 else None
+    return chosen, stale_twin
+
 def pin_decoder_fp32(network: "trt.INetworkDefinition", prefixes: tuple[str, ...],
                      verbose: bool) -> int:
-    """Force every float-compute decoder layer to FP32 while the rest of the graph is
-    free to run FP16. Returns the number of layers pinned.
+    """Apply the experimental FP32 decoder constraints to a weakly typed graph.
 
-    The decoder is D-FINE's FP-sensitive region: the FDR Integral accumulates tiny
-    upstream errors into box shifts (docs/impl/M0_STATUS.md), so letting TRT pick FP16
-    there costs ~10 AP. We select decoder layers by name prefix; only layers with a
-    float output are pinned, so shape/int plumbing under the same scope is left alone.
-    Must be paired with OBEY/PREFER_PRECISION_CONSTRAINTS for TRT to honour it.
+    Only layers with floating-point outputs are pinned; shape and integer plumbing
+    under the same prefix is left unchanged. These placement modes did not recover
+    the validated typed-graph accuracy and are retained for controlled comparison.
     """
     pinned = 0
     skipped = 0
@@ -118,6 +134,9 @@ def build(args: argparse.Namespace) -> None:
     if not onnx_path.exists():
         raise FileNotFoundError(onnx_path)
     out_path = Path(args.output).resolve()
+    if out_path == onnx_path:
+        raise SystemExit("--output must not overwrite the input ONNX graph")
+    _engine_sidecar_plan(onnx_path, out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if sum(bool(x) for x in (args.fp16, args.fp16_decoder_fp32, args.bf16_decoder_fp32, args.int8)) > 1:
@@ -126,6 +145,12 @@ def build(args: argparse.Namespace) -> None:
         # Per-layer setPrecision is rejected on a strongly-typed network (types come
         # from the ONNX). The mixed build is weakly-typed by construction.
         raise SystemExit("mixed-precision pinning needs a weakly-typed network; drop --strongly-typed")
+    if args.max_aux_streams is not None and args.max_aux_streams < 0:
+        raise SystemExit("--max-aux-streams must be non-negative")
+    if args.cuda_graph:
+        if args.max_aux_streams not in (None, 0):
+            raise SystemExit("--cuda-graph conflicts with --max-aux-streams > 0")
+        args.max_aux_streams = 0
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -226,21 +251,13 @@ def build(args: argparse.Namespace) -> None:
         n = pin_decoder_fp32(network, prefixes, args.verbose)
         if n == 0:
             raise RuntimeError(f"no layers matched prefixes {list(prefixes)} — "
-                               "check the ONNX layer naming (see docs/HANDOFF M2.1)")
+                               "check the ONNX layer naming and precision recipe")
         print(f"[build] {low_name} mixed: unpinned layers {low_name}, {n} pinned FP32 "
               f"({args.constraints.upper()}_PRECISION_CONSTRAINTS)")
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError("build_serialized_network returned None")
-    # Atomic: an interrupted/OOM-killed build must not leave a truncated file at
-    # the final path — the CLI cache treats existence as validity, so a partial
-    # engine would poison the entry until manually deleted. The engine is staged
-    # here and published only after its sidecar is staged too, so the pair lands
-    # in two adjacent renames.
-    tmp_path = Path(str(out_path) + ".tmp")
-    tmp_path.write_bytes(plan)
-
     # Engine sidecar: the ONNX contract passes through untouched; the builder only
     # appends facts IT owns. Precision is decided by whoever set the compute types:
     # a weakly-typed flag mode here, or the converter's ONNX types (strongly typed) —
@@ -261,7 +278,7 @@ def build(args: argparse.Namespace) -> None:
         if logits_shape and logits_shape[1] > 0 and logits_shape[2] > 0:
             meta["num_queries"], meta["num_classes"] = int(logits_shape[1]), int(logits_shape[2])
         print(f"[build] NOTE: no ONNX sidecar ({sidecar.name}) — engine sidecar carries the "
-              "graph contract + build facts only (no class names/normalization)")
+              "graph contract + build facts only; preprocessing uses runtime defaults")
     if args.int8:
         meta["precision"], meta["precision_mode"] = "int8", "weakly_typed_int8_qdq"
         meta["fp16_decoder_fp32"] = False
@@ -292,7 +309,7 @@ def build(args: argparse.Namespace) -> None:
     meta.update({
         "schema_version": 1,
         "network_typing": "strong" if args.strongly_typed else "weak",
-        "cuda_graph_compat": bool(args.cuda_graph),
+        "cuda_graph_compat": args.max_aux_streams == 0,
         "trt_version": trt.__version__,
         "sm_arch": _sm_arch(),
         "tf32": not args.no_tf32,
@@ -302,24 +319,18 @@ def build(args: argparse.Namespace) -> None:
         "max_batch": args.max_batch,
         "onnx_sha256": hashlib.sha256(onnx_path.read_bytes()).hexdigest(),
     })
-    # The engine sidecar must never clobber the ONNX's own sidecar: with a
-    # same-stem output next to the ONNX (the README quickstart does exactly
-    # this), with_suffix(".json") IS the ONNX sidecar. The runtime looks for
-    # "<engine-path>.json" first, so the appended name stays resolvable.
-    engine_sidecar = out_path.with_suffix(".json")
-    if sidecar.exists() and engine_sidecar.resolve() == sidecar.resolve():
-        engine_sidecar = Path(str(out_path) + ".json")
-        print(f"[build] NOTE: engine and ONNX share a stem — engine sidecar goes to "
-              f"{engine_sidecar.name} (the ONNX's own sidecar stays untouched)")
-    else:
-        # Readers (the CLI resolver and the C++ runtime) probe the appended name
-        # FIRST: a leftover <engine>.json from a previous build (dfine_build's
-        # default) would shadow the sidecar published below on every future read.
-        stale_twin = Path(str(out_path) + ".json")
-        if stale_twin.exists():
-            stale_twin.unlink()
-            print(f"[build] removed stale sidecar {stale_twin.name} "
-                  "(it would shadow the fresh one)")
+    # Re-evaluate after the build in case a source sidecar appeared while TensorRT
+    # was running. Readers probe the appended form before the same-stem form, so
+    # remove the unused twin when it is not protected input metadata.
+    engine_sidecar, stale_twin = _engine_sidecar_plan(onnx_path, out_path)
+    if stale_twin is not None and stale_twin.is_file():
+        stale_twin.unlink()
+        print(f"[build] removed stale sidecar {stale_twin.name}")
+
+    # Stage the engine only after all destination checks have passed. Publishing
+    # the staged sidecar and engine uses adjacent atomic renames.
+    tmp_path = Path(str(out_path) + ".tmp")
+    tmp_path.write_bytes(plan)
     _publish_pair(tmp_path, out_path, json.dumps(meta, indent=2) + "\n",
                   engine_sidecar, "build")
     print(f"[build] wrote {out_path} ({plan.nbytes / 1e6:.1f} MB)")
@@ -353,7 +364,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--opt-level", type=int, default=None, help="builder_optimization_level 0-5")
     p.add_argument("--strongly-typed", action="store_true", help="strongly-typed network (pin FP32 by ONNX types)")
     p.add_argument("--tactic", default=None, help="restrict tactic sources, e.g. 'cublas' or 'cublas,edge,jit'")
-    p.add_argument("--cuda-graph", action="store_true", help="label sidecar cuda_graph_compat=true (advisory)")
+    p.add_argument("--cuda-graph", action="store_true",
+                   help="compatibility alias for --max-aux-streams 0")
     p.add_argument("--max-aux-streams", type=int, default=None,
                    help="cap TRT auxiliary streams; 0 = single-stream (required for CUDA-graph capture)")
     p.add_argument("--verbose", action="store_true", help="list every FP32-pinned decoder layer")

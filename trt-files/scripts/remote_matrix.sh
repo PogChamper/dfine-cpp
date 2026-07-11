@@ -165,7 +165,7 @@ for s in $SIZES; do
   build_engine "$ASSETS/dfine_${s}_op19.onnx" "$ENG/dfine_${s}_fp32.engine"
   build_engine "$ASSETS/dfine_${s}_slim.onnx" "$ENG/dfine_${s}_slim.engine" --strongly-typed
   build_engine "$ASSETS/dfine_${s}_slim.onnx" "$ENG/dfine_${s}_slim_g0.engine" \
-    --strongly-typed --max-aux-streams 0 --cuda-graph
+    --strongly-typed --max-aux-streams 0
 done
 
 # --------------------------------------------------------------------------- #

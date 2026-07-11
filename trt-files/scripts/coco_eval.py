@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """COCO val2017 mAP for the raw D-FINE engine vs the PyTorch reference.
 
-Turns the residual TRT-vs-PyTorch gap (M0_STATUS finding 4) into a hard number by
-running both backends over COCO val and scoring with pycocotools. The decode here is
-the reference the C++ M1 detector must reproduce exactly:
+Measures the residual TensorRT-vs-PyTorch gap by running both backends over COCO
+val and scoring with pycocotools. The decode is the native runtime reference:
 
     sigmoid(logits) -> top-300 over (query x class) -> label=idx%C, query=idx//C
     -> cxcywh(normalized) to xyxy -> scale by original (W,H)  [stretch preprocessing]
@@ -42,7 +41,7 @@ def preprocess(bgr: np.ndarray, img: int) -> torch.Tensor:
 
 def decode(logits: np.ndarray, boxes: np.ndarray, orig_w: int, orig_h: int,
            num_classes: int, topk: int):
-    """Raw decoder outputs -> (xyxy_pixel boxes, class_idx, scores). Reference for C++ M1."""
+    """Convert raw outputs to pixel boxes, class indices, and scores."""
     prob = 1.0 / (1.0 + np.exp(-logits[0]))            # [Q, C]
     flat = prob.reshape(-1)
     # topk may reach or exceed Q*C (any 1-class model at the default 300);

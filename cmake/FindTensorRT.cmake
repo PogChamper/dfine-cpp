@@ -1,7 +1,8 @@
 # FindTensorRT.cmake
 #
-# Locates TensorRT headers and libraries, exposing the imported target
-# TensorRT::TensorRT (interface includes + nvinfer + nvinfer_plugin + nvonnxparser).
+# Locates TensorRT headers and requested libraries. Components:
+#   Runtime     TensorRT::Runtime (nvinfer)
+#   OnnxParser  TensorRT::OnnxParser (nvonnxparser, implies Runtime)
 #
 # Hints (in order):
 #   -DTENSORRT_DIR=<path>    CMake variable
@@ -36,23 +37,16 @@ find_library(TENSORRT_NVINFER_LIB
         lib/x86_64-linux-gnu
 )
 
-find_library(TENSORRT_NVONNXPARSER_LIB
-    NAMES nvonnxparser
-    HINTS ${_TRT_HINTS}
-    PATH_SUFFIXES
-        lib lib64
-        lib/aarch64-linux-gnu
-        lib/x86_64-linux-gnu
-)
-
-find_library(TENSORRT_NVINFER_PLUGIN_LIB
-    NAMES nvinfer_plugin
-    HINTS ${_TRT_HINTS}
-    PATH_SUFFIXES
-        lib lib64
-        lib/aarch64-linux-gnu
-        lib/x86_64-linux-gnu
-)
+if("OnnxParser" IN_LIST TensorRT_FIND_COMPONENTS)
+    find_library(TENSORRT_NVONNXPARSER_LIB
+        NAMES nvonnxparser
+        HINTS ${_TRT_HINTS}
+        PATH_SUFFIXES
+            lib lib64
+            lib/aarch64-linux-gnu
+            lib/x86_64-linux-gnu
+    )
+endif()
 
 # Try to read the version from NvInferVersion.h if available.
 if(TENSORRT_INCLUDE_DIR AND EXISTS "${TENSORRT_INCLUDE_DIR}/NvInferVersion.h")
@@ -74,31 +68,41 @@ if(TENSORRT_INCLUDE_DIR AND EXISTS "${TENSORRT_INCLUDE_DIR}/NvInferVersion.h")
 endif()
 
 include(FindPackageHandleStandardArgs)
+set(TensorRT_Runtime_FOUND FALSE)
+if(TENSORRT_INCLUDE_DIR AND TENSORRT_NVINFER_LIB)
+    set(TensorRT_Runtime_FOUND TRUE)
+endif()
+set(TensorRT_OnnxParser_FOUND FALSE)
+if(TensorRT_Runtime_FOUND AND TENSORRT_NVONNXPARSER_LIB)
+    set(TensorRT_OnnxParser_FOUND TRUE)
+endif()
 find_package_handle_standard_args(TensorRT
     REQUIRED_VARS
         TENSORRT_INCLUDE_DIR
         TENSORRT_NVINFER_LIB
-        TENSORRT_NVONNXPARSER_LIB
     VERSION_VAR TensorRT_VERSION
+    HANDLE_COMPONENTS
 )
 
-if(TensorRT_FOUND AND NOT TARGET TensorRT::TensorRT)
-    add_library(TensorRT::TensorRT UNKNOWN IMPORTED)
-    set_target_properties(TensorRT::TensorRT PROPERTIES
+if(TensorRT_Runtime_FOUND AND NOT TARGET TensorRT::Runtime)
+    add_library(TensorRT::Runtime UNKNOWN IMPORTED)
+    set_target_properties(TensorRT::Runtime PROPERTIES
         IMPORTED_LOCATION ${TENSORRT_NVINFER_LIB}
         INTERFACE_INCLUDE_DIRECTORIES ${TENSORRT_INCLUDE_DIR}
     )
-    set(_trt_extra_libs ${TENSORRT_NVONNXPARSER_LIB})
-    if(TENSORRT_NVINFER_PLUGIN_LIB)
-        list(APPEND _trt_extra_libs ${TENSORRT_NVINFER_PLUGIN_LIB})
-    endif()
-    set_property(TARGET TensorRT::TensorRT APPEND PROPERTY
-        INTERFACE_LINK_LIBRARIES ${_trt_extra_libs})
+endif()
+
+if(TensorRT_OnnxParser_FOUND AND NOT TARGET TensorRT::OnnxParser)
+    add_library(TensorRT::OnnxParser UNKNOWN IMPORTED)
+    set_target_properties(TensorRT::OnnxParser PROPERTIES
+        IMPORTED_LOCATION ${TENSORRT_NVONNXPARSER_LIB}
+        INTERFACE_INCLUDE_DIRECTORIES ${TENSORRT_INCLUDE_DIR}
+        INTERFACE_LINK_LIBRARIES TensorRT::Runtime
+    )
 endif()
 
 mark_as_advanced(
     TENSORRT_INCLUDE_DIR
     TENSORRT_NVINFER_LIB
     TENSORRT_NVONNXPARSER_LIB
-    TENSORRT_NVINFER_PLUGIN_LIB
 )

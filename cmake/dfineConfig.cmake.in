@@ -1,13 +1,4 @@
 @PACKAGE_INIT@
 
-include(CMakeFindDependencyMacro)
-
-# TensorRT ships no config package; resolve it with the find module installed
-# next to this file. CUDAToolkit provides CUDA::cudart for the exported target.
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
-find_dependency(CUDAToolkit)
-find_dependency(TensorRT)
-list(POP_BACK CMAKE_MODULE_PATH)
-
 include("${CMAKE_CURRENT_LIST_DIR}/dfineTargets.cmake")
 check_required_components(dfine)

@@ -134,7 +134,7 @@ def test_legacy_cache_entry_is_a_warned_fallback(env, capsys):
     legacy = cli._legacy_cache_engine_path("m", "fp16")
     legacy.write_bytes(b"e")
     assert cli._resolve_engine("m", None, "fp16", None, allow_build=False) == legacy
-    assert "pre-v0.3.1" in capsys.readouterr().err
+    assert "unfingerprinted" in capsys.readouterr().err
 
 
 def engine_with_sidecar(path: Path, meta: dict) -> Path:

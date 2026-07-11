@@ -1,6 +1,4 @@
-"""release_assets ``assemble`` — the validation gate between the export tree and
-the upload staging dir. Exercised with tiny fake files; the gh-dependent
-``verify`` path runs against the live release per docs/RELEASE_CHECKLIST.md."""
+"""Release-asset assembly tests with small local fixtures."""
 
 from __future__ import annotations
 
@@ -41,13 +39,56 @@ def test_happy_path_stages_all_and_sums_includes_wheel(release):
     ra.assemble(release)
     out = Path(release.out)
     lines = (out / "SHA256SUMS").read_text().splitlines()
-    assert len(lines) == 21  # 20 model files + the wheel (the v0.3.1 audit gap)
+    assert len(lines) == 21  # 20 model files plus the wheel
     names = [ln.split("  ", 1)[1] for ln in lines]
     assert names == sorted(names)
     assert WHEEL in names
     for ln in lines:
         digest, name = ln.split("  ", 1)
         assert digest == hashlib.sha256((out / name).read_bytes()).hexdigest()
+
+
+def test_existing_empty_output_is_allowed(release):
+    Path(release.out).mkdir()
+
+    ra.assemble(release)
+
+    assert (Path(release.out) / "SHA256SUMS").is_file()
+
+
+def test_nonempty_output_is_refused_without_modification(release):
+    out = Path(release.out)
+    out.mkdir()
+    existing = out / "stale-asset.whl"
+    existing.write_bytes(b"do not delete")
+
+    with pytest.raises(SystemExit, match="new or empty"):
+        ra.assemble(release)
+
+    assert existing.read_bytes() == b"do not delete"
+    assert sorted(path.name for path in out.iterdir()) == [existing.name]
+
+
+def test_output_file_is_refused(release):
+    out = Path(release.out)
+    out.write_text("not a directory")
+
+    with pytest.raises(SystemExit, match="not a directory"):
+        ra.assemble(release)
+
+    assert out.read_text() == "not a directory"
+
+
+def test_model_file_cannot_be_used_as_wheel(release):
+    graph = Path(release.input) / "dfine_n_op19.onnx"
+    original = graph.read_bytes()
+    release.wheel = str(graph)
+
+    with pytest.raises(SystemExit, match="wheel name"):
+        ra.assemble(release)
+
+    assert graph.read_bytes() == original
+    assert not Path(release.out).exists()
 
 
 def test_missing_sidecar_refused_before_staging(release):

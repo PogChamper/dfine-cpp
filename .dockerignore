@@ -1,34 +1,28 @@
-# Host-side C++ build tree (regenerated inside the image by the Dockerfile's
-# own `cmake -B build` step — copying the host's build/ in would mix a
-# conda/miniconda-toolchain CMakeCache.txt with this container's toolchain).
+.git
+.github/
+.agents/
+.codex/
+assets/
+
 build/
+build-*/
+cmake-build-*/
+Testing/
 
-# Git metadata — not needed at build time and can be large (full history).
-.git/
-.gitignore
+.venv/
+**/__pycache__/
+*.py[cod]
+python/build/
+python/dist/
+python/*.egg-info/
+python/dfine/libdfine.so
+python/dfine/_scripts/
 
-# TensorRT/ONNX build outputs (regenerate via trt-files/scripts/*, see
-# .gitignore — these are gitignored for the same reason). Large: ~1.2 GB
-# engines + ~950 MB onnx on the authoring host. trt-files/scripts/ (the
-# export/build/eval tooling itself) is intentionally NOT excluded, in case
-# it's useful for reference inside the image, even though this Dockerfile
-# doesn't run any of it (see Dockerfile limitation (c): that tooling needs
-# the sibling D-FINE-seg python env, which isn't part of this build context).
+third_party/tensorrt/
 trt-files/onnx/
 trt-files/engines/
-
-# Design/research docs — not needed to build or run the C++ binaries.
-
-
-# Python bytecode caches (e.g. trt-files/scripts/__pycache__/).
-**/__pycache__/
-*.pyc
-
-# Misc dev-loop cruft that shouldn't end up in a build context.
-.github/
-.pre-commit-config.yaml
+*.engine
+*.onnx
 *.timing.cache
-
-# Model weights, if any get dropped in-tree (mirrors .gitignore; large binaries).
 *.pt
 *.pth

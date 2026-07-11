@@ -45,7 +45,12 @@ target_compile_options(dfine_warnings INTERFACE
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(GNUInstallDirs)
 find_package(CUDAToolkit REQUIRED)
-find_package(TensorRT REQUIRED)
+set(_dfine_trt_components Runtime)
+if(DFINE_BUILD_APPS)
+  list(APPEND _dfine_trt_components OnnxParser)
+endif()
+find_package(TensorRT REQUIRED COMPONENTS ${_dfine_trt_components})
+unset(_dfine_trt_components)
 
 # nlohmann/json (header-only). Prefer an installed copy (config package or a stray
 # header next to the CUDA toolkit / conda env); fall back to FetchContent.
@@ -93,8 +98,7 @@ target_include_directories(dfine
           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dfine
-  PUBLIC  TensorRT::TensorRT CUDA::cudart
-  PRIVATE nlohmann_json::nlohmann_json)
+  PRIVATE TensorRT::Runtime CUDA::cudart nlohmann_json::nlohmann_json)
 target_compile_features(dfine PUBLIC cxx_std_17)
 # ABI version, decoupled from the project version: bumped 0 -> 1 with the C ABI
 # v2 break (dfine_options_t gained struct_size), so binaries linked against
@@ -102,7 +106,8 @@ target_compile_features(dfine PUBLIC cxx_std_17)
 set(DFINE_ABI_VERSION 1)
 set_target_properties(dfine PROPERTIES
   VERSION ${PROJECT_VERSION} SOVERSION ${DFINE_ABI_VERSION}
-  CUDA_SEPARABLE_COMPILATION OFF)
+  CUDA_SEPARABLE_COMPILATION OFF
+  INSTALL_REMOVE_ENVIRONMENT_RPATH ON)
 
 # ---------------------------------------------------------------------------
 # Apps.
@@ -111,15 +116,16 @@ if(DFINE_BUILD_APPS)
   # Engine introspection — TensorRT only, no libdfine dependency.
   add_executable(dfine_inspect apps/dfine_inspect.cpp)
   target_include_directories(dfine_inspect PRIVATE include)
-  target_link_libraries(dfine_inspect PRIVATE TensorRT::TensorRT CUDA::cudart)
+  target_link_libraries(dfine_inspect PRIVATE TensorRT::Runtime CUDA::cudart)
 
   add_executable(dfine_smoke apps/dfine_smoke.cpp)
   target_include_directories(dfine_smoke PRIVATE include src)
-  target_link_libraries(dfine_smoke PRIVATE dfine::dfine)
+  target_link_libraries(dfine_smoke PRIVATE dfine::dfine TensorRT::Runtime CUDA::cudart)
 
   add_executable(dfine_build apps/dfine_build.cpp)
   target_include_directories(dfine_build PRIVATE include src)
-  target_link_libraries(dfine_build PRIVATE dfine::dfine nlohmann_json::nlohmann_json)
+  target_link_libraries(dfine_build
+    PRIVATE dfine::dfine TensorRT::OnnxParser CUDA::cudart nlohmann_json::nlohmann_json)
 
   # Image decode helper (vendored stb_image) for the image-consuming apps.
   add_library(dfine_image_io STATIC apps/image_io.cpp)
@@ -128,29 +134,34 @@ if(DFINE_BUILD_APPS)
 
   add_executable(dfine_detect apps/dfine_detect.cpp)
   target_include_directories(dfine_detect PRIVATE include)
-  target_link_libraries(dfine_detect PRIVATE dfine::dfine dfine_image_io)
+  target_link_libraries(dfine_detect
+    PRIVATE dfine::dfine dfine_image_io TensorRT::Runtime CUDA::cudart)
 
   add_executable(dfine_coco_eval apps/dfine_coco_eval.cpp)
   target_include_directories(dfine_coco_eval PRIVATE include)
-  target_link_libraries(dfine_coco_eval PRIVATE dfine::dfine dfine_image_io)
+  target_link_libraries(dfine_coco_eval
+    PRIVATE dfine::dfine dfine_image_io TensorRT::Runtime CUDA::cudart)
 
   add_executable(dfine_bench apps/dfine_bench.cpp)
   target_include_directories(dfine_bench PRIVATE include src)
-  target_link_libraries(dfine_bench PRIVATE dfine::dfine dfine_image_io)
+  target_link_libraries(dfine_bench
+    PRIVATE dfine::dfine dfine_image_io TensorRT::Runtime CUDA::cudart)
 
   # C-ABI test harnesses (only when the C ABI is compiled in).
   if(DFINE_BUILD_C_API)
     # Pure-C smoke: proves c_api.h is valid C and no exception escapes the ABI.
     add_executable(dfine_capi_smoke apps/dfine_capi_smoke.c)
     target_include_directories(dfine_capi_smoke PRIVATE include)
-    target_link_libraries(dfine_capi_smoke PRIVATE dfine::dfine)
+    target_link_libraries(dfine_capi_smoke
+      PRIVATE dfine::dfine TensorRT::Runtime CUDA::cudart)
     target_compile_options(dfine_capi_smoke PRIVATE
       -Wall -Wextra -Wpedantic $<$<BOOL:${DFINE_WARNINGS_AS_ERRORS}>:-Werror>)
 
     # C++ parity check: C ABI detections must equal DFineDetector::detect exactly.
     add_executable(dfine_capi_parity apps/dfine_capi_parity.cpp)
     target_include_directories(dfine_capi_parity PRIVATE include)
-    target_link_libraries(dfine_capi_parity PRIVATE dfine::dfine dfine_image_io)
+    target_link_libraries(dfine_capi_parity
+      PRIVATE dfine::dfine dfine_image_io TensorRT::Runtime CUDA::cudart)
   endif()
 endif()
 
@@ -176,12 +187,9 @@ if(DFINE_BUILD_TESTS)
 endif()
 
 # ---------------------------------------------------------------------------
-# Install / find_package(dfine CONFIG). Consumers link dfine::dfine. The
-# public headers are TensorRT/CUDA-clean (PIMPL), so consumers need the TRT
-# and CUDA *libraries* resolvable at link time (find_dependency in the config
-# file, which ships FindTensorRT.cmake) but never their headers. Installed
-# binaries carry NO baked RPATH — the same relocatability rule the wheel
-# enforces; TensorRT/CUDA come from LD_LIBRARY_PATH at runtime.
+# Install / find_package(dfine CONFIG). Public headers and the exported target
+# do not expose CUDA or TensorRT development dependencies. The shared library
+# resolves their runtime libraries through the platform loader.
 # ---------------------------------------------------------------------------
 include(CMakePackageConfigHelpers)
 
@@ -203,7 +211,6 @@ write_basic_package_version_file(
 install(FILES
   ${CMAKE_CURRENT_BINARY_DIR}/dfineConfig.cmake
   ${CMAKE_CURRENT_BINARY_DIR}/dfineConfigVersion.cmake
-  cmake/FindTensorRT.cmake
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dfine)
 
 message(STATUS "dfine ${PROJECT_VERSION}: TensorRT ${TensorRT_VERSION} (${TENSORRT_INCLUDE_DIR}), "

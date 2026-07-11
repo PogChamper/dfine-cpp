@@ -4,6 +4,8 @@ binary question — does libdfine load here?"""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from dfine import _ffi, cli
@@ -51,3 +53,12 @@ def test_doctor_registered_in_parser():
     with pytest.raises(SystemExit) as e:
         cli.build_parser().parse_args(["doctor", "--bogus"])
     assert e.value.code == 2
+
+
+def test_header_roots_include_explicit_and_arm_paths(monkeypatch, tmp_path):
+    trt = tmp_path / "TensorRT"
+    monkeypatch.setenv("TENSORRT_DIR", str(trt))
+    monkeypatch.setattr(cli, "_repo_root", lambda: None)
+    roots = cli._tensorrt_header_roots()
+    assert roots[0] == trt / "include"
+    assert Path("/usr/include/aarch64-linux-gnu") in roots

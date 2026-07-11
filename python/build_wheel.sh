@@ -11,10 +11,9 @@
 #
 # The wheel bundles libdfine.so but NOT TensorRT/CUDA: the installing machine
 # needs a TensorRT 10.x + CUDA 12 runtime on the loader path, e.g.
-# `pip install tensorrt==10.13.*`.
+# `pip install tensorrt-cu12==10.13.*`.
 #
-# Requires the `build` module and `wheel` >= 0.40 (the `tags` subcommand):
-# `pip install build 'wheel>=0.40'`.
+# Requires the `build` module: `pip install build`.
 # `python -m build` runs in an isolated env by default (downloads setuptools
 # from PyPI), so network access is needed.
 set -euo pipefail
@@ -24,18 +23,29 @@ REPO=$(cd .. && pwd)
 PYTHON=${PYTHON:-python3}
 BUNDLED=dfine/libdfine.so
 BUNDLED_SCRIPTS=dfine/_scripts
+STAGED_LICENSE=LICENSE
+STAGED_NOTICE=NOTICE
+LICENSES_STAGED=0
+
+for staged in "$STAGED_LICENSE" "$STAGED_NOTICE"; do
+    [[ ! -e "$staged" ]] \
+        || { echo "error: refusing to overwrite $PWD/$staged" >&2; exit 1; }
+done
 
 # The .so lives in dfine/ only for the duration of the build; remove it on any
 # exit so the dev tree stays clean and stale copies can't leak into later wheels.
 # Also drop setuptools' staging dirs (python/build, dfine.egg-info) — only
 # dist/ is the product. NB: "build" here is python/build, not the C++ ../build.
-cleanup() { rm -rf "$BUNDLED" "$BUNDLED_SCRIPTS" build dfine.egg-info "${RPATH_SCRIPT:-}"; }
+cleanup() {
+    rm -rf "$BUNDLED" "$BUNDLED_SCRIPTS" build dfine.egg-info "${RPATH_SCRIPT:-}"
+    if [[ "$LICENSES_STAGED" == 1 ]]; then
+        rm -f "$STAGED_LICENSE" "$STAGED_NOTICE"
+    fi
+}
 trap cleanup EXIT
 
 "$PYTHON" -c "import build" 2>/dev/null \
     || { echo "error: python module 'build' missing — run: $PYTHON -m pip install build" >&2; exit 1; }
-"$PYTHON" -c "import wheel" 2>/dev/null \
-    || { echo "error: python module 'wheel' missing — run: $PYTHON -m pip install wheel" >&2; exit 1; }
 
 if [[ "${SKIP_BUILD:-0}" != 1 ]]; then
     "$REPO/build.sh"
@@ -71,26 +81,26 @@ fi
 # cli.py prefers the dev tree when present, so the snapshot never shadows it.
 mkdir -p "$BUNDLED_SCRIPTS"
 cp "$REPO/trt-files/scripts/build_engine.py" "$BUNDLED_SCRIPTS/"
+LICENSES_STAGED=1
+cp "$REPO/LICENSE" "$STAGED_LICENSE"
+cp "$REPO/NOTICE" "$STAGED_NOTICE"
 
-"$PYTHON" -m build --wheel --outdir dist .
-
-# setuptools tags the wheel py3-none-any because the .so is package-data, not
-# an extension module. Retag to the platform the bundled ELF actually requires
-# (`wheel tags` prints the new filename). manylinux is not possible: libdfine.so
-# links CUDA/TensorRT libs that are non-redistributable and outside the
-# manylinux policy.
-# A same-named wheel already in dist/ (e.g. the tracked, gated release asset)
-# is about to be replaced — make that loud, with both hashes, never silent.
-PRE_TAG="dist/$(basename "$(ls dist/dfine-*-py3-none-any.whl)")"
-TARGET="${PRE_TAG/py3-none-any/py3-none-linux_$(uname -m)}"
+# setup.py declares a platform wheel because the bundled ELF is package data,
+# not a Python extension. The wheel remains Python-ABI independent. manylinux
+# is not applicable: CUDA and TensorRT are external to the manylinux policy.
+VERSION=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml)
+[[ -n "$VERSION" ]] || { echo "error: package version not found in pyproject.toml" >&2; exit 1; }
+TARGET="dist/dfine-${VERSION}-py3-none-linux_$(uname -m).whl"
 if [[ -f "$TARGET" ]]; then
     echo "WARNING: replacing existing $TARGET" >&2
     echo "  old sha256: $(sha256sum "$TARGET" | cut -d' ' -f1)" >&2
+    rm -f "$TARGET"
 fi
-WHEEL="dist/$("$PYTHON" -m wheel tags --platform-tag "linux_$(uname -m)" \
-              --remove dist/dfine-*-py3-none-any.whl | tail -1)"
+"$PYTHON" -m build --wheel --outdir dist .
+WHEEL="$TARGET"
+[[ -f "$WHEEL" ]] || { echo "error: expected wheel not produced: $WHEEL" >&2; exit 1; }
 echo "  new sha256: $(sha256sum "$WHEEL" | cut -d' ' -f1)" >&2
 
 echo
 echo "wheel: $PWD/$WHEEL"
-echo "install: pip install $PWD/$WHEEL  # runtime needs local TensorRT 10.x + CUDA 12, e.g. pip install 'tensorrt==10.13.*'"
+echo "install: pip install $PWD/$WHEEL  # runtime needs local TensorRT 10.x + CUDA 12, e.g. pip install 'tensorrt-cu12==10.13.*'"

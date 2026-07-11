@@ -7,9 +7,8 @@
 #   CUDA_ARCH=86 ./build.sh         # target a specific SM (default: native GPU)
 #   JOBS=8 ./build.sh
 #
-# Toolchain discovery order: $CMAKE/$NVCC env override -> PATH -> the author's
-# conda locations. TensorRT: $TENSORRT_DIR -> third_party/tensorrt (if populated,
-# see third_party/README.md) -> system paths via cmake/FindTensorRT.cmake.
+# Toolchain discovery order: $CMAKE/$NVCC override -> PATH -> standard CUDA path.
+# TensorRT: $TENSORRT_DIR -> third_party/tensorrt (if populated) -> system paths.
 # Conda-based nvcc needs system binutils for the host link (the conda ld lacks
 # GLIBC_PRIVATE symbols) — the wrapper + -B/usr/bin below are applied only then.
 set -euo pipefail
@@ -23,8 +22,8 @@ find_tool() { # name, fallback...
   echo ""
 }
 
-: "${CMAKE:=$(find_tool cmake /home/dxdxxd/miniconda3/envs/dfine/bin/cmake)}"
-: "${NVCC:=$(find_tool nvcc /usr/local/cuda/bin/nvcc /home/dxdxxd/miniconda3/bin/nvcc)}"
+: "${CMAKE:=$(find_tool cmake)}"
+: "${NVCC:=$(find_tool nvcc /usr/local/cuda/bin/nvcc)}"
 [[ -n "$CMAKE" ]] || { echo "error: cmake not found on PATH (set \$CMAKE)"; exit 1; }
 [[ -n "$NVCC"  ]] || { echo "error: nvcc not found on PATH (set \$NVCC)"; exit 1; }
 : "${CUDA_ROOT:=$(dirname "$(dirname "$NVCC")")}"
@@ -55,12 +54,10 @@ if [[ -z "$trt_hdr" ]]; then
 error: TensorRT headers (NvInfer.h) not found. `pip install tensorrt-cu12`
 provides the runtime libraries only — building needs the headers. Pick one:
 
-  apt (NVIDIA CUDA repo; pin the WHOLE chain to your runtime, e.g. 10.13 —
-  unpinned apt installs TensorRT 11):
+  apt (NVIDIA CUDA repo; pin the whole chain to TensorRT 10.13):
     V="$(apt-cache madison libnvinfer-dev | grep -oPm1 '10\.13\.[0-9.]+-1\+cuda12\.[0-9]+')"
     sudo apt-get install -y "libnvinfer10=$V" "libnvinfer-headers-dev=$V" \
-      "libnvinfer-dev=$V" "libnvinfer-plugin10=$V" "libnvinfer-headers-plugin-dev=$V" \
-      "libnvinfer-plugin-dev=$V" "libnvonnxparsers10=$V" "libnvonnxparsers-dev=$V"
+      "libnvinfer-dev=$V" "libnvonnxparsers10=$V" "libnvonnxparsers-dev=$V"
 
   container: nvcr.io/nvidia/tensorrt ships headers + libs preinstalled.
 
@@ -78,7 +75,15 @@ if [[ "$CUDA_ARCH" == native ]]; then
     echo "  set CUDA_ARCH=<sm> for a cross build (86 Ampere, 89 Ada, 120 Blackwell)" >&2
     exit 1
   }
-  cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d ' ')"
+  if ! cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+      | head -1 | tr -d ' ')"; then
+    echo "error: nvidia-smi could not query a GPU; set CUDA_ARCH=<sm> explicitly" >&2
+    exit 1
+  fi
+  [[ "$cap" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+    echo "error: could not read GPU compute capability; set CUDA_ARCH=<sm> explicitly" >&2
+    exit 1
+  }
   if awk "BEGIN{exit !($cap < 7.5)}"; then
     echo "error: GPU compute capability $cap — TensorRT 10 needs Turing (7.5) or newer" >&2
     exit 1
@@ -98,7 +103,7 @@ fi
 # literal 'UNSET' token nvcc dies on); the host-compiler choice belongs to the
 # cmake flags below, so drop the injected value.
 if [[ "${NVCC_PREPEND_FLAGS:-}" == *conda* || "${NVCC_PREPEND_FLAGS:-}" == *UNSET* ]]; then
-  echo "[build] dropping conda-injected NVCC_PREPEND_FLAGS ('${NVCC_PREPEND_FLAGS}')"
+  echo "[build] dropping conda-injected NVCC_PREPEND_FLAGS"
   unset NVCC_PREPEND_FLAGS
 fi
 # --------------------------------------------------------------------------- #
@@ -125,5 +130,5 @@ echo "[build] compile (-j$JOBS)"
 
 echo
 echo "[build] done. Binaries in ./build/. At runtime libnvinfer/libcudart must be on"
-echo "  LD_LIBRARY_PATH (e.g. a 'pip install tensorrt' venv's tensorrt_libs dir, or a"
+echo "  LD_LIBRARY_PATH (e.g. a 'pip install tensorrt-cu12==10.13.*' environment, or a"
 echo "  system TensorRT install)."

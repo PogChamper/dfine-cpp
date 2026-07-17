@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
-import subprocess
 import sys
 import types
 from pathlib import Path
@@ -17,7 +16,7 @@ import pytest
 onnx = pytest.importorskip("onnx")
 pytest.importorskip("onnxruntime")
 np = pytest.importorskip("numpy")
-pytest.importorskip("torch")  # the exporter module imports torch at import time
+torch = pytest.importorskip("torch")
 
 from onnx import TensorProto, helper  # noqa: E402
 
@@ -35,7 +34,7 @@ def exporter():
     return mod
 
 
-def tiny_graph(tmp_path: Path, *, bake_batch: bool) -> Path:
+def tiny_graph(tmp_path: Path, *, bake_batch: bool, nonfinite: float | None = None) -> Path:
     """images[N,3,4,4] -> flatten -> matmul -> reshape into logits/boxes.
 
     bake_batch=True reshapes through a literal batch of 1 (the way a batch-1
@@ -44,9 +43,10 @@ def tiny_graph(tmp_path: Path, *, bake_batch: bool) -> Path:
     defect, caught only by executing the graph.
     """
     feat = 3 * HW * HW
-    w_l = helper.make_tensor(
-        "w_l", TensorProto.FLOAT, [feat, Q * C], np.zeros(feat * Q * C, np.float32)
-    )
+    logit_weights = np.zeros(feat * Q * C, np.float32)
+    if nonfinite is not None:
+        logit_weights[0] = nonfinite
+    w_l = helper.make_tensor("w_l", TensorProto.FLOAT, [feat, Q * C], logit_weights)
     w_b = helper.make_tensor(
         "w_b", TensorProto.FLOAT, [feat, Q * 4], np.zeros(feat * Q * 4, np.float32)
     )
@@ -94,10 +94,40 @@ def test_tool_versions_fingerprint(exporter):
     assert all(isinstance(s, str) and s for s in v.values())
 
 
+def test_explicit_bilinear_matches_grid_sample(exporter):
+    generator = torch.Generator().manual_seed(17)
+    values = torch.randn((2, 3, 4, 5), generator=generator)
+    grid = torch.empty((2, 7, 6, 2)).uniform_(-1.4, 1.4, generator=generator)
+
+    actual = exporter._bilinear_gather(values, grid, 4, 5)
+    expected = torch.nn.functional.grid_sample(
+        values,
+        grid,
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=False,
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=2e-6, atol=2e-6)
+
+
 def test_exporter_and_validated_source_fingerprints(exporter):
     script = REPO / "trt-files/scripts/export_dfine_onnx.py"
     assert exporter._exporter_sha256() == hashlib.sha256(script.read_bytes()).hexdigest()
     assert exporter._validated_source_revision() == "f5a46697b9c3c6dc435b6c86718cc18452ae9baf"
+    source = REPO / "trt-files" / "dfine_model"
+    manifest = exporter._model_source_manifest(source)
+    expected = hashlib.sha256()
+    files = sorted(path for path in source.rglob("*.py") if path.is_file())
+    for path in files:
+        expected.update(path.relative_to(source).as_posix().encode())
+        expected.update(b"\0")
+        expected.update(path.read_bytes())
+        expected.update(b"\0")
+    assert manifest == {
+        "sha256": expected.hexdigest(),
+        "files": [path.relative_to(source).as_posix() for path in files],
+    }
 
 
 def test_validated_source_revision_errors_are_actionable(exporter, tmp_path):
@@ -210,7 +240,6 @@ def test_export_metadata_identifies_onnx_artifact(exporter, monkeypatch, tmp_pat
         trace_batch=2,
         opset=19,
         deform="explicit",
-        dfine_src=str(tmp_path),
     )
     monkeypatch.setattr(exporter, "_resolve_class_names", lambda _: [])
     monkeypatch.setattr(exporter, "_tool_versions", lambda: {})
@@ -218,78 +247,24 @@ def test_export_metadata_identifies_onnx_artifact(exporter, monkeypatch, tmp_pat
     monkeypatch.setattr(
         exporter,
         "_model_source_metadata",
-        lambda source, revision: {"validated_commit": revision},
+        lambda revision: {"upstream_commit": revision},
     )
 
     metadata = exporter._collect_meta(model, args, "a" * 40)
 
     assert metadata["schema_version"] == 1
     assert metadata["artifact_kind"] == "onnx"
-    assert metadata["model_source"]["validated_commit"] == "a" * 40
+    assert metadata["model_source"]["upstream_commit"] == "a" * 40
 
 
-def test_source_provenance_records_git_identity(exporter, tmp_path):
-    source = tmp_path / "D-FINE-seg"
-    source.mkdir()
-    subprocess.run(["git", "init", "-q", str(source)], check=True)
-    subprocess.run(
-        ["git", "-C", str(source), "config", "user.email", "test@example.com"], check=True
-    )
-    subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
-    (source / "model.py").write_text("MODEL = 1\n")
-    subprocess.run(["git", "-C", str(source), "add", "model.py"], check=True)
-    subprocess.run(["git", "-C", str(source), "commit", "-qm", "initial"], check=True)
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(source),
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:ArgoHA/D-FINE-seg.git",
-        ],
-        check=True,
-    )
-
-    provenance = exporter._source_provenance(source)
-    commit = subprocess.run(
-        ["git", "-C", str(source), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    assert provenance == {
-        "name": "D-FINE-seg",
-        "commit": commit,
-        "dirty": False,
-        "repository": "https://github.com/ArgoHA/D-FINE-seg",
-    }
-    metadata = exporter._model_source_metadata(source)
-    assert metadata["validated_commit"] == "f5a46697b9c3c6dc435b6c86718cc18452ae9baf"
-    assert metadata["matches_validated_revision"] is False
-
-    (source / "model.py").write_text("MODEL = 2\n")
-    assert exporter._source_provenance(source)["dirty"] is True
-
-
-def test_source_provenance_accepts_non_git_tree(exporter, tmp_path):
-    source = tmp_path / "unpacked-source"
-    source.mkdir()
-    assert exporter._source_provenance(source) == {"name": "unpacked-source"}
-    metadata = exporter._model_source_metadata(source)
-    assert metadata == {
-        "name": "unpacked-source",
-        "validated_commit": "f5a46697b9c3c6dc435b6c86718cc18452ae9baf",
-    }
-
-
-def test_source_remote_strips_credentials(exporter):
-    remote = "https://build-user:secret@github.com/ArgoHA/D-FINE-seg.git?token=secret"
-    assert exporter._canonical_remote(remote) == "https://github.com/ArgoHA/D-FINE-seg"
-    scp_remote = "git@github.com:ArgoHA/D-FINE-seg.git?token=secret"
-    assert exporter._canonical_remote(scp_remote) == "https://github.com/ArgoHA/D-FINE-seg"
-    assert exporter._canonical_remote("file:///home/user/D-FINE-seg") is None
+def test_bundled_model_provenance(exporter):
+    metadata = exporter._model_source_metadata()
+    revision = "f5a46697b9c3c6dc435b6c86718cc18452ae9baf"
+    assert metadata["repository"] == "https://github.com/ArgoHA/D-FINE-seg"
+    assert metadata["upstream_commit"] == revision
+    assert metadata["bundled"] is True
+    assert len(metadata["implementation_sha256"]) == 64
+    assert metadata["implementation_files"] == sorted(metadata["implementation_files"])
 
 
 def test_simplification_status_is_recordable(exporter, tmp_path, monkeypatch):
@@ -327,6 +302,13 @@ def test_sidecar_shape_drift_is_caught(exporter, tmp_path):
         exporter._verify_dynamic_batch_runs(good, meta(num_classes=C + 1))
     with pytest.raises(AssertionError, match="num-classes"):
         exporter._verify_dynamic_batch_runs(good, meta(num_queries=Q - 1))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_nonfinite_outputs_are_caught(exporter, tmp_path, value):
+    graph = tiny_graph(tmp_path, bake_batch=False, nonfinite=value)
+    with pytest.raises(AssertionError, match="non-finite"):
+        exporter._verify_dynamic_batch_runs(graph, meta())
 
 
 def test_zero_std_is_rejected(exporter, tmp_path):

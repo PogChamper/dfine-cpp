@@ -10,7 +10,7 @@
 #
 # Toggles (env): SIZES="n m"  ROUNDS=3  ITERS=500  WARMUP=30
 #                SKIP_FAST=0 (1 = no new exports, bench existing engines only)
-#                WORK=~/dfine-matrix  DFINE_SEG_DIR=~/D-FINE-seg
+#                WORK=~/dfine-matrix
 set -euo pipefail
 
 SIZES="${SIZES:-n m}"
@@ -19,7 +19,6 @@ ITERS="${ITERS:-500}"
 WARMUP="${WARMUP:-30}"
 SKIP_FAST="${SKIP_FAST:-0}"
 WORK="${WORK:-$HOME/dfine-matrix}"
-DFINE_SEG_DIR="${DFINE_SEG_DIR:-$HOME/D-FINE-seg}"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPTS="$REPO/trt-files/scripts"
@@ -52,7 +51,7 @@ if [ "$SKIP_FAST" != 1 ]; then
     local eng="$ENG/dfine_${s}_${tag}.engine"
     [ -f "$eng" ] && { echo "  cached $(basename "$eng")"; return 0; }
     python "$SCRIPTS/export_dfine_onnx.py" --model-name "$s" \
-      --checkpoint "$WORK/ckpt/${CKPT[$s]}" --dfine-src "$DFINE_SEG_DIR" --opset 19 \
+      --checkpoint "$WORK/ckpt/${CKPT[$s]}" --opset 19 \
       --num-queries 200 --cascade 1:100 "$@" \
       --output "$base" >"$OUT/export_${s}_${tag}.log" 2>&1
     python "$SCRIPTS/convert_fp16_surgical.py" --onnx "$base" --output "$slim" --slim \

@@ -19,6 +19,7 @@ python/dfine/libdfine.so
 python/dfine/_scripts/
 python/build/
 python/dfine.egg-info/
+python/dist/
 # Weights
 *.pt
 *.pth
@@ -26,3 +27,4 @@ python/dfine.egg-info/
 build/
 /Testing/
 /build-werror/
+/build-review/

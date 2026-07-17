@@ -77,7 +77,7 @@ The CLI cache fingerprint is:
 sha256(ONNX bytes + ONNX sidecar bytes)[:12]
 ```
 
-It scopes a cache entry to the exact graph/sidecar pair. The production builder records the source graph as `onnx_sha256`; the resolver compares that value when both the engine candidate and source ONNX are available. The ONNX sidecar records the checkpoint hash and export provenance, including tool versions and model-source revision when available.
+It scopes a cache entry to the exact graph/sidecar pair. The production builder records the source graph as `onnx_sha256`; the resolver compares that value when both the engine candidate and source ONNX are available. The ONNX sidecar records the checkpoint hash, tool versions, upstream model revision, and bundled model-source hash.
 
 The trust chain is:
 
@@ -126,7 +126,8 @@ The ONNX sidecar owns model and conversion facts:
 - model size, task, input geometry, classes, labels, and query count;
 - input/output names, shapes, box format, and score activation;
 - preprocessing and resize geometry;
-- checkpoint load status and SHA-256;
+- checkpoint state selector, load status, loaded and unused tensor counts, deserialization mode,
+  and SHA-256;
 - model-source provenance, exporter/converter hashes, source-graph hash, simplification result, and
   tool versions;
 - opset, deform core, precision, and precision recipe.

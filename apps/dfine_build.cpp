@@ -17,6 +17,7 @@
 #include <NvOnnxParser.h>
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -62,7 +63,7 @@ void usage(const char* argv0) {
                  "  --precision fp32     Accept an FP32 ONNX artifact (the only supported value)\n"
                  "  --workspace-mib N    Workspace pool MiB (default 4096)\n"
                  "  --input-name NAME    Input tensor (default images)\n"
-                 "  --min-batch N --opt-batch N --max-batch N   Dynamic profile (default 1/1/1)\n"
+                 "  --min-batch N --opt-batch N --max-batch N   Batch profile (default 1/1/1)\n"
                  "  --cuda-graph         Set max auxiliary streams to 0 for CUDA Graph capture\n"
                  "  --verbose            TRT logger at VERBOSE\n"
                  "\n  dfine v%s\n",
@@ -128,6 +129,11 @@ Args parse_args(int argc, char** argv) {
     if (a.min_batch > a.opt_batch || a.opt_batch > a.max_batch) {
         throw std::runtime_error("require min-batch <= opt-batch <= max-batch");
     }
+    if (a.min_batch == a.max_batch && a.min_batch != 1) {
+        throw std::runtime_error(
+            "static batch profiles above 1 are not supported by the native runtime; "
+            "use min-batch 1 with the target opt/max batch");
+    }
     return a;
 }
 
@@ -138,6 +144,64 @@ void print_dims(const nvinfer1::Dims& d) {
         std::printf("%ld", static_cast<long>(d.d[i]));
     }
     std::fputc(']', stdout);
+}
+
+struct BatchFacts {
+    bool dynamic{false};
+    int min{1};
+    int opt{1};
+    int max{1};
+};
+
+bool same_dims(const nvinfer1::Dims& lhs, const nvinfer1::Dims& rhs) {
+    if (lhs.nbDims != rhs.nbDims) return false;
+    for (int i = 0; i < lhs.nbDims; ++i)
+        if (lhs.d[i] != rhs.d[i]) return false;
+    return true;
+}
+
+BatchFacts inspect_batch_facts(const nvinfer1::IHostMemory& plan, nvinfer1::ILogger& logger,
+                               const std::string& input_name, int channels, int height, int width,
+                               const Args& args) {
+    std::unique_ptr<nvinfer1::IRuntime> runtime{nvinfer1::createInferRuntime(logger)};
+    if (!runtime) throw std::runtime_error("createInferRuntime failed");
+    std::unique_ptr<nvinfer1::ICudaEngine> engine{
+        runtime->deserializeCudaEngine(plan.data(), plan.size())};
+    if (!engine) throw std::runtime_error("failed to deserialize the engine built in this process");
+    if (engine->getNbOptimizationProfiles() != 1) {
+        throw std::runtime_error("built engine must contain exactly one optimization profile");
+    }
+
+    const nvinfer1::Dims shape = engine->getTensorShape(input_name.c_str());
+    if (shape.nbDims != 4 || shape.d[1] != channels || shape.d[2] != height ||
+        shape.d[3] != width || (shape.d[0] != -1 && shape.d[0] < 1)) {
+        throw std::runtime_error("built engine has an invalid input shape");
+    }
+
+    const std::array<nvinfer1::OptProfileSelector, 3> selectors{
+        nvinfer1::OptProfileSelector::kMIN,
+        nvinfer1::OptProfileSelector::kOPT,
+        nvinfer1::OptProfileSelector::kMAX,
+    };
+    const std::array<int, 3> requested{args.min_batch, args.opt_batch, args.max_batch};
+    std::array<nvinfer1::Dims, 3> actual{};
+    for (std::size_t i = 0; i < selectors.size(); ++i) {
+        actual[i] = engine->getProfileShape(input_name.c_str(), 0, selectors[i]);
+        const nvinfer1::Dims expected = nvinfer1::Dims4{requested[i], channels, height, width};
+        if (!same_dims(actual[i], expected)) {
+            throw std::runtime_error(
+                "built engine batch profile differs from the requested profile");
+        }
+    }
+
+    const bool dynamic = shape.d[0] == -1;
+    if (!dynamic && shape.d[0] != 1) {
+        throw std::runtime_error("built engine has static batch " + std::to_string(shape.d[0]) +
+                                 "; the native runtime supports static batch 1 or a dynamic "
+                                 "batch profile");
+    }
+    return BatchFacts{dynamic, static_cast<int>(actual[0].d[0]), static_cast<int>(actual[1].d[0]),
+                      static_cast<int>(actual[2].d[0])};
 }
 
 std::filesystem::path normalized_path(const std::filesystem::path& path) {
@@ -519,6 +583,11 @@ int main(int argc, char** argv) {
         std::printf("[dfine_build] built in %.1fs, plan = %.1f MiB\n",
                     std::chrono::duration<double>(t1 - t0).count(),
                     static_cast<double>(plan->size()) / (1024.0 * 1024.0));
+        const BatchFacts batch_facts =
+            inspect_batch_facts(*plan, logger, input->getName(), in_dims.d[1], in_h, in_w, args);
+        std::printf("[dfine_build] verified %s engine profile: min=%d opt=%d max=%d\n",
+                    batch_facts.dynamic ? "dynamic" : "static", batch_facts.min, batch_facts.opt,
+                    batch_facts.max);
 
         // Persist the (now-populated) timing cache for faster subsequent rebuilds.
         if (timing_cache) {
@@ -548,10 +617,10 @@ int main(int argc, char** argv) {
         j["tf32"] = false;
         // This minimal builder does not compute onnx_sha256; cache resolution reports
         // the resulting engine as provenance-unverified.
-        j["dynamic_batch"] = need_profile;
-        j["min_batch"] = args.min_batch;
-        j["opt_batch"] = args.opt_batch;
-        j["max_batch"] = args.max_batch;
+        j["dynamic_batch"] = batch_facts.dynamic;
+        j["min_batch"] = batch_facts.min;
+        j["opt_batch"] = batch_facts.opt;
+        j["max_batch"] = batch_facts.max;
         j["cuda_graph_compat"] = args.cuda_graph;
         j["max_aux_streams"] = args.cuda_graph ? nlohmann::json(0) : nlohmann::json(nullptr);
         j["trt_version"] = std::to_string(NV_TENSORRT_MAJOR) + "." +

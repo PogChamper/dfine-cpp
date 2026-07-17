@@ -7,11 +7,11 @@
 This document covers the distributable `dfine` package. Maintainer model tooling, dataset validation,
 and release workflows use the root `uv.lock` instead.
 
-The latest published wheel is v0.3.3. It targets Linux x86_64 and contains an `sm_89` native
+The latest published wheel is v0.4.0. It targets Linux x86_64 and contains an `sm_89` native
 library with forward PTX, validated on Ada and Blackwell:
 
 ```sh
-python -m pip install "dfine[cli,tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.3.3/dfine-0.3.3-py3-none-linux_x86_64.whl"
+python -m pip install "dfine[cli,tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/dfine-0.4.0-py3-none-linux_x86_64.whl"
 ```
 
 Turing, Ampere, Jetson, and development installations use a source build:
@@ -138,8 +138,8 @@ falls back from a missing explicit `meta_path`; strict failure begins in v0.4.0.
 ## CLI
 
 The wheel installs `dfine` but does not download model files. [Getting started](../docs/GETTING_STARTED.md)
-defines the commands and release-asset path; checkpoint export additionally requires the compatible
-D-FINE source tree documented in [Conversion](../docs/CONVERSION.md).
+defines the commands and release-asset path. Checkpoint export is source-checkout tooling and uses the
+repository's locked environment and bundled model definition; see [Conversion](../docs/CONVERSION.md).
 
 ## Library discovery
 

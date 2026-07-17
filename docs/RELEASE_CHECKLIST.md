@@ -13,7 +13,8 @@ uv sync --frozen --extra gpu --extra torch --group release
 PY="$PWD/.venv/bin/python"
 test -x "$PY"
 
-export DFINE_SEG_DIR="${DFINE_SEG_DIR:?set DFINE_SEG_DIR to the tested D-FINE-seg checkout}"
+export CHECKPOINT_DIR="${CHECKPOINT_DIR:?set CHECKPOINT_DIR to the standard checkpoint directory}"
+export DFINE_ORACLE_SRC="${DFINE_ORACLE_SRC:?set DFINE_ORACLE_SRC to the pinned D-FINE-seg checkout}"
 export TRTLIB="${TRTLIB:?set TRTLIB to the directory containing libnvinfer.so.10}"
 export ENGINE="${ENGINE:?set ENGINE to the validated D-FINE-M slim engine}"
 export ENGINE_G0="${ENGINE_G0:?set ENGINE_G0 to the validated zero-aux-stream engine}"
@@ -29,7 +30,8 @@ export MODEL_DIR="${MODEL_DIR:-$RELEASE_DIR/models}"
 test ! -e "$RELEASE_DIR"
 mkdir -p "$RELEASE_DIR" "$MODEL_DIR"
 
-test -d "$DFINE_SEG_DIR"
+test -d "$CHECKPOINT_DIR"
+test -d "$DFINE_ORACLE_SRC"
 test -e "$TRTLIB/libnvinfer.so.10"
 test -f "$ENGINE"
 test -f "$ENGINE_G0"
@@ -39,7 +41,8 @@ test -f "$KNOWN_IMAGE"
 test -f "$FOOD_CHECKPOINT"
 test -f "$FOOD_IMAGE"
 
-DFINE_SEG_DIR="$(realpath "$DFINE_SEG_DIR")"
+CHECKPOINT_DIR="$(realpath "$CHECKPOINT_DIR")"
+DFINE_ORACLE_SRC="$(realpath "$DFINE_ORACLE_SRC")"
 TRTLIB="$(realpath "$TRTLIB")"
 ENGINE="$(realpath "$ENGINE")"
 ENGINE_G0="$(realpath "$ENGINE_G0")"
@@ -59,15 +62,20 @@ test -f "$ENGINE_G0_META"
 ENGINE_META="$(realpath "$ENGINE_META")"
 ENGINE_G0_META="$(realpath "$ENGINE_G0_META")"
 RUNTIME_LD_PATH="$TRTLIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export PY DFINE_SEG_DIR TRTLIB RUNTIME_LD_PATH ENGINE ENGINE_G0 ENGINE_META ENGINE_G0_META
+export PY CHECKPOINT_DIR DFINE_ORACLE_SRC TRTLIB RUNTIME_LD_PATH
+export ENGINE ENGINE_G0 ENGINE_META ENGINE_G0_META
 export COCO_IMAGES COCO_ANN KNOWN_IMAGE FOOD_CHECKPOINT FOOD_IMAGE RELEASE_DIR MODEL_DIR
 
-test "$(git -C "$DFINE_SEG_DIR" rev-parse HEAD)" = "$(cat trt-files/DFINE_SEG_REVISION)"
-test -z "$(git -C "$DFINE_SEG_DIR" status --porcelain)"
+for checkpoint in dfine_n_coco.pt dfine_{s,m,l,x}_obj2coco.pt; do
+    test -f "$CHECKPOINT_DIR/$checkpoint"
+done
+test "$(git -C "$DFINE_ORACLE_SRC" rev-parse HEAD)" = "$(cat trt-files/DFINE_SEG_REVISION)"
+test -z "$(git -C "$DFINE_ORACLE_SRC" status --porcelain)"
 ```
 
-The revision file identifies the tested model source. A dirty or different checkout is not a
-release input.
+The revision file identifies the upstream source of the bundled model implementation. The checkout
+is used only for the differential release gate. Each export records the revision and exact bundled-source
+hash; users do not need this checkout.
 
 ## 1. Finalize the release commit
 
@@ -160,7 +168,8 @@ PYTHONPATH="$PWD/python" DFINE_LIBRARY="$PWD/build/libdfine.so" \
 
 ```sh
 PYTHONPATH="$PWD/python" "$PY" -m dfine.cli export \
-    --model m --precision fp16 --output "$MODEL_DIR/dfine_m_slim.onnx"
+    --model m --checkpoint "$CHECKPOINT_DIR/dfine_m_obj2coco.pt" \
+    --precision fp16 --output "$MODEL_DIR/dfine_m_slim.onnx"
 PYTHONPATH="$PWD/python" "$PY" -m dfine.cli build \
     --model m --precision fp16 --onnx "$MODEL_DIR/dfine_m_slim.onnx" \
     --output "$RELEASE_DIR/dfine_m_slim.engine"
@@ -172,9 +181,12 @@ PYTHONPATH="$PWD/python" DFINE_LIBRARY="$PWD/build/libdfine.so" \
     --engine "$RELEASE_DIR/dfine_m_slim.engine" --batches 1 2 8
 ```
 
-- [ ] The ONNX sidecar reports `checkpoint_load: strict`, the commit in
-      `trt-files/DFINE_SEG_REVISION`, `model_source.dirty: false`, the checkpoint SHA-256, and
-      complete `tool_versions`. `exporter_sha256` is a 64-character lowercase SHA-256 and
+- [ ] The ONNX sidecar reports `checkpoint_load: strict`,
+      `checkpoint_deserialization: weights_only`, `checkpoint_selected_state: checkpoint root`,
+      the canonical loaded-tensor count, zero unused tensors, the commit in
+      `trt-files/DFINE_SEG_REVISION`, the bundled model-source SHA-256, the checkpoint SHA-256, and
+      complete `tool_versions`.
+      `exporter_sha256` is a 64-character lowercase SHA-256 and
       `onnx_simplification` records `applied` for the locked release recipe. A slim sidecar also
       records `source_onnx_sha256`, `converter_sha256`, and the `onnxconverter-common` version.
       The exporter/converter hashes and official checkpoint hash must match the release sources.
@@ -251,19 +263,34 @@ PYTHONPATH="$PWD/python" DFINE_LIBRARY="$PWD/build/libdfine.so" \
 
 ## 7. Five-size static gate
 
-For n/s/m/l/x, require strict checkpoint load, zero `GridSample` nodes, symbolic batch, successful
-ONNX Runtime execution at N=1 and N=2, and a clean `onnx.checker` result. A missing ONNX Runtime or
-skipped behavioral postcondition fails the gate. Each published sidecar must pass the source,
+For n/s/m/l/x, require strict checkpoint load, zero `GridSample` nodes, symbolic batch, finite ONNX
+Runtime outputs at N=1 and N=2, and a clean `onnx.checker` result. A missing ONNX Runtime or skipped
+behavioral postcondition fails the gate. Each published sidecar must pass the source,
 exporter-hash, tool-version, and simplification checks from the D-FINE-M gate. Run the five-size full
 COCO campaign only when the graph or precision recipe changes.
+
+First prove the bundled factory against the pinned upstream implementation and all five standard
+checkpoints:
+
+```sh
+DFINE_SEG_SRC="$DFINE_ORACLE_SRC" DFINE_CHECKPOINT_DIR="$CHECKPOINT_DIR" \
+    PYTHONPATH="$PWD/python" "$PY" -m pytest -q \
+    python/tests/test_bundled_model.py::test_pinned_dfine_seg_oracle
+```
 
 Generate the remaining pairs directly in the publication input directory; the M pair from the
 previous gate stays untouched:
 
 ```sh
+declare -A CHECKPOINT=(
+    [n]=dfine_n_coco.pt
+    [s]=dfine_s_obj2coco.pt
+    [l]=dfine_l_obj2coco.pt
+    [x]=dfine_x_obj2coco.pt
+)
 for size in n s l x; do
     PYTHONPATH="$PWD/python" "$PY" -m dfine.cli export \
-        --model "$size" --precision fp16 \
+        --model "$size" --checkpoint "$CHECKPOINT_DIR/${CHECKPOINT[$size]}" --precision fp16 \
         --output "$MODEL_DIR/dfine_${size}_slim.onnx"
 done
 ```

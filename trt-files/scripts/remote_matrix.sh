@@ -33,7 +33,6 @@
 #   git clone https://github.com/PogChamper/dfine-cpp && cd dfine-cpp
 #   uv sync --frozen --extra gpu --extra torch     # drop '--extra torch' if SKIP_EXPORT=1
 #   source .venv/bin/activate
-#   git clone https://github.com/ArgoHA/D-FINE-seg "$HOME/D-FINE-seg"   # export stage only
 #
 # Then:  bash trt-files/scripts/remote_matrix.sh
 #
@@ -44,7 +43,6 @@
 #   SKIP_EXPORT=0     1 = skip checkpoint download + export + conversion repro
 #   SKIP_INT8=0       1 = skip the INT8-QDQ conversion/build (research tier)
 #   SKIP_EVAL=0       1 = skip subset coco_eval
-#   DFINE_SEG_DIR=~/D-FINE-seg
 #   WORK=~/dfine-matrix
 set -euo pipefail
 
@@ -54,7 +52,6 @@ RELEASE_TAG="${RELEASE_TAG:-v0.3.2}"
 SKIP_EXPORT="${SKIP_EXPORT:-0}"
 SKIP_INT8="${SKIP_INT8:-0}"
 SKIP_EVAL="${SKIP_EVAL:-0}"
-DFINE_SEG_DIR="${DFINE_SEG_DIR:-$HOME/D-FINE-seg}"
 WORK="${WORK:-$HOME/dfine-matrix}"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -177,30 +174,25 @@ DFINE_TEST_ENGINE="$ENG/dfine_${FIRST_SIZE}_fp32.engine" \
 # --------------------------------------------------------------------------- #
 if [ "$SKIP_EXPORT" != 1 ]; then
   say "export + conversion reproducibility"
-  if [ ! -d "$DFINE_SEG_DIR" ]; then
-    note "  D-FINE-seg not found at $DFINE_SEG_DIR — skipping (set DFINE_SEG_DIR or SKIP_EXPORT=1)"
-  else
-    declare -A CKPT=( [n]=dfine_n_coco.pth [s]=dfine_s_obj2coco.pth [m]=dfine_m_obj2coco.pth \
-                      [l]=dfine_l_obj2coco.pth [x]=dfine_x_obj2coco.pth )
-    for s in $SIZES; do
-      ck="$WORK/ckpt/${CKPT[$s]}"
-      mkdir -p "$WORK/ckpt"
-      [ -f "$ck" ] || curl -fsSL --retry 3 --retry-all-errors -o "$ck" \
-        "https://github.com/Peterande/storage/releases/download/dfinev1.0/${CKPT[$s]}"
-      python "$SCRIPTS/export_dfine_onnx.py" --model-name "$s" --checkpoint "$ck" \
-        --dfine-src "$DFINE_SEG_DIR" --opset 19 \
-        --output "$EXP/dfine_${s}_op19.onnx" >"$OUT/export_${s}.log" 2>&1
-      python "$SCRIPTS/convert_fp16_surgical.py" --onnx "$EXP/dfine_${s}_op19.onnx" \
-        --output "$EXP/dfine_${s}_slim.onnx" --slim >"$OUT/convert_slim_${s}.log" 2>&1
-      python "$SCRIPTS/convert_fp16.py" --onnx "$EXP/dfine_${s}_op19.onnx" \
-        --output "$EXP/dfine_${s}_fp16_st.onnx" >"$OUT/convert_legacy_${s}.log" 2>&1
-      for f in "dfine_${s}_op19.onnx" "dfine_${s}_slim.onnx"; do
-        if cmp -s "$EXP/$f" "$ASSETS/$f"; then verdict=BYTE-IDENTICAL; else verdict=DIFFERS; fi
-        note "  $f vs release: $verdict"
-      done
-      build_engine "$EXP/dfine_${s}_fp16_st.onnx" "$ENG/dfine_${s}_fp16_st.engine" --strongly-typed
+  declare -A CKPT=( [n]=dfine_n_coco.pth [s]=dfine_s_obj2coco.pth [m]=dfine_m_obj2coco.pth \
+                    [l]=dfine_l_obj2coco.pth [x]=dfine_x_obj2coco.pth )
+  for s in $SIZES; do
+    ck="$WORK/ckpt/${CKPT[$s]}"
+    mkdir -p "$WORK/ckpt"
+    [ -f "$ck" ] || curl -fsSL --retry 3 --retry-all-errors -o "$ck" \
+      "https://github.com/Peterande/storage/releases/download/dfinev1.0/${CKPT[$s]}"
+    python "$SCRIPTS/export_dfine_onnx.py" --model-name "$s" --checkpoint "$ck" \
+      --opset 19 --output "$EXP/dfine_${s}_op19.onnx" >"$OUT/export_${s}.log" 2>&1
+    python "$SCRIPTS/convert_fp16_surgical.py" --onnx "$EXP/dfine_${s}_op19.onnx" \
+      --output "$EXP/dfine_${s}_slim.onnx" --slim >"$OUT/convert_slim_${s}.log" 2>&1
+    python "$SCRIPTS/convert_fp16.py" --onnx "$EXP/dfine_${s}_op19.onnx" \
+      --output "$EXP/dfine_${s}_fp16_st.onnx" >"$OUT/convert_legacy_${s}.log" 2>&1
+    for f in "dfine_${s}_op19.onnx" "dfine_${s}_slim.onnx"; do
+      if cmp -s "$EXP/$f" "$ASSETS/$f"; then verdict=BYTE-IDENTICAL; else verdict=DIFFERS; fi
+      note "  $f vs release: $verdict"
     done
-  fi
+    build_engine "$EXP/dfine_${s}_fp16_st.onnx" "$ENG/dfine_${s}_fp16_st.engine" --strongly-typed
+  done
 fi
 
 # --------------------------------------------------------------------------- #

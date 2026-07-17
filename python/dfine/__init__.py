@@ -19,7 +19,7 @@ __all__ = ["Box", "Detection", "Detector", "set_log_callback", "__version__", "l
 
 # Importing the package does not load the native library. library_version()
 # performs the load and can be used as an installation smoke test.
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 
 def library_version() -> str:

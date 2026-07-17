@@ -100,12 +100,14 @@ struct DFineDetector::Impl {
     // survivors ([B*K] DetectionGPU + counts) — no full-logits D2H, no CPU decode.
     bool gpu_decode_supported_{false};  // FP32 outputs
     bool gpu_decode_warned_{false};
-    GpuDecodeScratch gdec_;                     // raw device pointers into gdec_arena_
-    std::unique_ptr<DeviceArena> gdec_arena_;   // one block backing all 9 scratch slabs
-    int gdec_cap_batch_{0};                     // buffers sized for this many images
-    std::vector<DetectionGPU> gdec_host_out_;   // D2H compact results [cap*K]
-    std::vector<uint32_t> gdec_host_counts_;    // survivors per image [cap]
-    std::vector<DecodeMapGPU> gdec_maps_host_;  // per-image coordinate maps, H2D staging
+    GpuDecodeScratch gdec_;                    // raw device pointers into gdec_arena_
+    std::unique_ptr<DeviceArena> gdec_arena_;  // one block backing all 9 scratch slabs
+    int gdec_cap_batch_{0};                    // buffers sized for this many images
+    // Pinned host staging: cudaMemcpyAsync against pageable memory degrades to a
+    // synchronous copy, which would fold GPU execution time into dispatch_ms.
+    HostPtr gdec_host_out_;     // D2H compact results [cap*K]
+    HostPtr gdec_host_counts_;  // survivors per image [cap]
+    HostPtr gdec_maps_host_;    // per-image coordinate maps, H2D staging
 
     // --- Preprocessing geometry (resolved once: options override > sidecar) --------
     bool letterbox_{false};
@@ -748,9 +750,14 @@ struct DFineDetector::Impl {
         gdec_.cub_temp_bytes = cub_bytes;
 
         gdec_arena_ = std::move(arena);  // frees the previous block (grow-only replacement)
-        gdec_host_out_.resize(static_cast<std::size_t>(cap) * K);
-        gdec_host_counts_.resize(static_cast<std::size_t>(cap));
-        gdec_maps_host_.resize(static_cast<std::size_t>(cap));
+        const auto pin = [](HostPtr& slot, std::size_t bytes) {
+            void* p = nullptr;
+            DFINE_CUDA_CHECK(cudaMallocHost(&p, bytes));
+            slot.reset(p);
+        };
+        pin(gdec_host_out_, static_cast<std::size_t>(cap) * K * sizeof(DetectionGPU));
+        pin(gdec_host_counts_, static_cast<std::size_t>(cap) * sizeof(uint32_t));
+        pin(gdec_maps_host_, static_cast<std::size_t>(cap) * sizeof(DecodeMapGPU));
         gdec_cap_batch_ = cap;
     }
 
@@ -1150,11 +1157,11 @@ struct DFineDetector::Impl {
         session.enqueue("GPU decode");  // outputs -> device_buffer(name)
         graph_ctx_batch_ = B;           // context is now enqueued/flushed for this shape
 
+        auto* maps_host = static_cast<DecodeMapGPU*>(gdec_maps_host_.get());
         for (int i = 0; i < B; ++i) {
-            gdec_maps_host_[static_cast<std::size_t>(i)] =
-                to_gpu_(make_map_(images[i].width, images[i].height));
+            maps_host[i] = to_gpu_(make_map_(images[i].width, images[i].height));
         }
-        DFINE_CUDA_CHECK(cudaMemcpyAsync(gdec_.maps, gdec_maps_host_.data(),
+        DFINE_CUDA_CHECK(cudaMemcpyAsync(gdec_.maps, maps_host,
                                          static_cast<std::size_t>(B) * sizeof(DecodeMapGPU),
                                          cudaMemcpyHostToDevice, stream));
 
@@ -1164,10 +1171,11 @@ struct DFineDetector::Impl {
                            stream);
 
         const auto out_n = static_cast<std::size_t>(B) * K;
-        DFINE_CUDA_CHECK(cudaMemcpyAsync(gdec_host_out_.data(), gdec_.out,
-                                         out_n * sizeof(DetectionGPU), cudaMemcpyDeviceToHost,
-                                         stream));
-        DFINE_CUDA_CHECK(cudaMemcpyAsync(gdec_host_counts_.data(), gdec_.counts,
+        auto* host_out = static_cast<DetectionGPU*>(gdec_host_out_.get());
+        auto* host_counts = static_cast<uint32_t*>(gdec_host_counts_.get());
+        DFINE_CUDA_CHECK(cudaMemcpyAsync(host_out, gdec_.out, out_n * sizeof(DetectionGPU),
+                                         cudaMemcpyDeviceToHost, stream));
+        DFINE_CUDA_CHECK(cudaMemcpyAsync(host_counts, gdec_.counts,
                                          static_cast<std::size_t>(B) * sizeof(uint32_t),
                                          cudaMemcpyDeviceToHost, stream));
         const auto td1 = std::chrono::steady_clock::now();  // all GPU work issued
@@ -1177,8 +1185,8 @@ struct DFineDetector::Impl {
         std::vector<Detections> results;
         results.reserve(static_cast<std::size_t>(B));
         for (int i = 0; i < B; ++i) {
-            const uint32_t m = gdec_host_counts_[static_cast<std::size_t>(i)];
-            const DetectionGPU* base = gdec_host_out_.data() + static_cast<std::size_t>(i) * K;
+            const uint32_t m = host_counts[static_cast<std::size_t>(i)];
+            const DetectionGPU* base = host_out + static_cast<std::size_t>(i) * K;
             Detections dets;
             dets.reserve(m);
             for (uint32_t k = 0; k < m; ++k) {

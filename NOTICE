@@ -7,6 +7,12 @@ See the LICENSE file for the full license text.
 D-FINE-cpp is a C++/TensorRT inference port of D-FINE
 (https://github.com/Peterande/D-FINE), which is licensed under Apache-2.0.
 
+The checkpoint exporter contains a detection-only model implementation derived
+from D-FINE-seg (https://github.com/ArgoHA/D-FINE-seg) at revision
+f5a46697b9c3c6dc435b6c86718cc18452ae9baf, Copyright 2026 The D-FINE-seg
+Authors, licensed under Apache-2.0. D-FINE-seg incorporates D-FINE and RT-DETR
+model code; their copyright notices are retained in the derived source files.
+
 Parts of the runtime scaffolding were derived from rf-detr-cpp
 (https://github.com/infracv/rf-detr-cpp), Copyright 2026 rf-detr-cpp
 contributors, licensed under Apache-2.0: the TensorRT session wrapper,

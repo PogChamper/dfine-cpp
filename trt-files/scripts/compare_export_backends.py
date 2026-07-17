@@ -44,9 +44,14 @@ import tensorrt as trt
 import torch
 
 SCRIPTS = Path(__file__).resolve().parent
+TRT_FILES = SCRIPTS.parent
+sys.path[:] = [path for path in sys.path if path != str(TRT_FILES)]
+sys.path.insert(0, str(TRT_FILES))
 if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
+    sys.path.append(str(SCRIPTS))
 
+from dfine_model import build_model  # noqa: E402
+from export_dfine_onnx import load_checkpoint_state  # noqa: E402
 
 # --------------------------- preprocessing & geometry ---------------------------
 
@@ -94,15 +99,18 @@ def iou_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 class TorchBackend:
     def __init__(self, args):
-        sys.path.insert(0, args.dfine_src)
-        from src.d_fine.dfine import build_model
-        from src.d_fine.utils import load_tuning_state
-        m = build_model(args.model_name, num_classes=args.num_classes, enable_mask_head=False,
-                        device="cuda", img_size=(args.img_size, args.img_size), in_channels=3,
-                        pretrained_model_path=None, pretrained_backbone=False)
-        m = load_tuning_state(m, args.checkpoint).cuda()
-        m.deploy()
-        m.eval()
+        m = build_model(
+            args.model_name,
+            args.num_classes,
+            (args.img_size, args.img_size),
+        )
+        load_checkpoint_state(
+            m,
+            Path(args.checkpoint),
+            allow_partial=False,
+            allow_unsafe=False,
+        )
+        m = m.cuda().deploy().eval()
         self.m = m
 
     @torch.no_grad()
@@ -408,7 +416,6 @@ def parse_args():
     p.add_argument("--gt-thr", type=float, default=0.40, help="(B) min .pt score to count as reference GT det")
     p.add_argument("--det-thr", type=float, default=0.05, help="(B) min score to keep a backend prediction")
     p.add_argument("--checkpoint", default="/home/dxdxxd/projects/custom-dfine/second-staff/full_detector_1506_ex_2104.pt")
-    p.add_argument("--dfine-src", default="/home/dxdxxd/projects/custom-dfine/D-FINE-seg")
     p.add_argument("--onnx", default=str(onnx / "dfine_s_food_explicit.onnx"))
     p.add_argument("--basic-engine", default=str(eng / "dfine_s_food_basic.engine"))
     p.add_argument("--basic-tf32-engine", default=str(eng / "dfine_s_food_basic_tf32.engine"))

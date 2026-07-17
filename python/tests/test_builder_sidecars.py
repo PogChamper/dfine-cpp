@@ -219,6 +219,11 @@ def test_batch_profile_accepts_ordered_bounds(build_engine):
     build_engine._validate_batch_profile(1, 4, 8)
 
 
+def test_batch_profile_rejects_unsupported_static_batch(build_engine):
+    with pytest.raises(SystemExit, match="static batch profiles above 1"):
+        build_engine._validate_batch_profile(8, 8, 8)
+
+
 @pytest.mark.parametrize("limit", [None, 0, 3])
 def test_graph_policy_applies_config_and_metadata(
     build_engine,
@@ -243,15 +248,154 @@ def test_graph_policy_applies_config_and_metadata(
         max_batch=8,
     )
     monkeypatch.setattr(build_engine, "_sm_arch", lambda: "89")
-    facts = build_engine._engine_build_facts(args, "a" * 64, policy, outputs_fp32=True)
+    batch_facts = {
+        "dynamic_batch": True,
+        "min_batch": 1,
+        "opt_batch": 4,
+        "max_batch": 8,
+    }
+    facts = build_engine._engine_build_facts(
+        args,
+        "a" * 64,
+        policy,
+        outputs_fp32=True,
+        batch_facts=batch_facts,
+    )
 
     assert facts["artifact_kind"] == "engine"
     assert facts["max_aux_streams"] == limit
     assert facts["cuda_graph_compat"] is (limit == 0)
     assert facts["onnx_sha256"] == "a" * 64
 
-    fp16_facts = build_engine._engine_build_facts(args, "a" * 64, policy, outputs_fp32=False)
+    fp16_facts = build_engine._engine_build_facts(
+        args,
+        "a" * 64,
+        policy,
+        outputs_fp32=False,
+        batch_facts=batch_facts,
+    )
     assert fp16_facts["cuda_graph_compat"] is False
+
+
+class _EngineProfile:
+    num_optimization_profiles = 1
+
+    def __init__(self, shape, profile):
+        self.shape = shape
+        self.profile = profile
+
+    def get_tensor_shape(self, name):
+        assert name == "images"
+        return self.shape
+
+    def get_tensor_profile_shape(self, name, index):
+        assert name == "images"
+        assert index == 0
+        return self.profile
+
+
+def test_engine_batch_facts_override_dynamic_onnx_contract(build_engine, monkeypatch):
+    engine = _EngineProfile(
+        (1, 3, 640, 640),
+        ((1, 3, 640, 640), (1, 3, 640, 640), (1, 3, 640, 640)),
+    )
+
+    facts = build_engine._engine_batch_facts(
+        engine,
+        "images",
+        (3, 640, 640),
+        (1, 1, 1),
+    )
+
+    assert facts == {
+        "dynamic_batch": False,
+        "min_batch": 1,
+        "opt_batch": 1,
+        "max_batch": 1,
+    }
+
+    meta = {"artifact_kind": "onnx", "dynamic_batch": True, "max_batch": 8}
+    args = types.SimpleNamespace(strongly_typed=False, no_tf32=True)
+    monkeypatch.setattr(build_engine, "_sm_arch", lambda: "89")
+    meta.update(
+        build_engine._engine_build_facts(
+            args,
+            "a" * 64,
+            {"max_aux_streams": None},
+            outputs_fp32=True,
+            batch_facts=facts,
+        )
+    )
+    assert meta["artifact_kind"] == "engine"
+    assert meta["dynamic_batch"] is False
+    assert (meta["min_batch"], meta["opt_batch"], meta["max_batch"]) == (1, 1, 1)
+
+
+def test_engine_batch_facts_preserve_dynamic_profile(build_engine):
+    engine = _EngineProfile(
+        (-1, 3, 640, 640),
+        ((1, 3, 640, 640), (4, 3, 640, 640), (8, 3, 640, 640)),
+    )
+
+    facts = build_engine._engine_batch_facts(
+        engine,
+        "images",
+        (3, 640, 640),
+        (1, 4, 8),
+    )
+
+    assert facts == {
+        "dynamic_batch": True,
+        "min_batch": 1,
+        "opt_batch": 4,
+        "max_batch": 8,
+    }
+
+
+def test_engine_batch_facts_reject_requested_profile_drift(build_engine):
+    engine = _EngineProfile(
+        (-1, 3, 640, 640),
+        ((1, 3, 640, 640), (4, 3, 640, 640), (8, 3, 640, 640)),
+    )
+
+    with pytest.raises(RuntimeError, match="differs from requested"):
+        build_engine._engine_batch_facts(
+            engine,
+            "images",
+            (3, 640, 640),
+            (1, 1, 8),
+        )
+
+
+def test_engine_batch_facts_reject_static_batch_above_one(build_engine):
+    engine = _EngineProfile(
+        (8, 3, 640, 640),
+        ((8, 3, 640, 640), (8, 3, 640, 640), (8, 3, 640, 640)),
+    )
+
+    with pytest.raises(RuntimeError, match="static batch 8"):
+        build_engine._engine_batch_facts(
+            engine,
+            "images",
+            (3, 640, 640),
+            (8, 8, 8),
+        )
+
+
+def test_engine_batch_facts_require_one_profile(build_engine):
+    engine = _EngineProfile(
+        (-1, 3, 640, 640),
+        ((1, 3, 640, 640), (4, 3, 640, 640), (8, 3, 640, 640)),
+    )
+    engine.num_optimization_profiles = 2
+
+    with pytest.raises(RuntimeError, match="2 optimization profiles"):
+        build_engine._engine_batch_facts(
+            engine,
+            "images",
+            (3, 640, 640),
+            (1, 4, 8),
+        )
 
 
 def test_graph_compat_ignores_unconsumed_outputs(build_engine):

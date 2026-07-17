@@ -22,6 +22,16 @@ import numpy as np
 import tensorrt as trt
 import torch
 
+SCRIPTS = Path(__file__).resolve().parent
+TRT_FILES = SCRIPTS.parent
+sys.path[:] = [path for path in sys.path if path != str(TRT_FILES)]
+sys.path.insert(0, str(TRT_FILES))
+if str(SCRIPTS) not in sys.path:
+    sys.path.append(str(SCRIPTS))
+
+from dfine_model import build_model  # noqa: E402
+from export_dfine_onnx import load_checkpoint_state  # noqa: E402
+
 
 def preprocess(image_path: Path, img: int) -> torch.Tensor:
     bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
@@ -34,16 +44,18 @@ def preprocess(image_path: Path, img: int) -> torch.Tensor:
 
 
 def torch_outputs(args, x: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
-    sys.path.insert(0, args.dfine_src)
-    from src.d_fine.dfine import build_model
-    from src.d_fine.utils import load_tuning_state
-
-    model = build_model(args.model_name, num_classes=args.num_classes, enable_mask_head=False,
-                        device="cuda", img_size=(args.img_size, args.img_size), in_channels=3,
-                        pretrained_model_path=None, pretrained_backbone=False)
-    model = load_tuning_state(model, args.checkpoint).cuda()
-    model.deploy()
-    model.eval()
+    model = build_model(
+        args.model_name,
+        args.num_classes,
+        (args.img_size, args.img_size),
+    )
+    load_checkpoint_state(
+        model,
+        Path(args.checkpoint),
+        allow_partial=False,
+        allow_unsafe=False,
+    )
+    model = model.cuda().deploy().eval()
     with torch.no_grad():
         out = model(x.cuda())
     return out["pred_logits"].float().cpu().numpy(), out["pred_boxes"].float().cpu().numpy()
@@ -115,15 +127,14 @@ def main(args) -> None:
 def parse_args():
     repo = Path(__file__).resolve().parents[2]
     p = argparse.ArgumentParser(description="PyTorch vs TensorRT/ONNX parity on surviving detections")
-    p.add_argument("--model-name", default="m")
+    p.add_argument("--model-name", choices=("n", "s", "m", "l", "x"), default="m")
     p.add_argument("--num-classes", type=int, default=80)
     p.add_argument("--img-size", type=int, default=640)
     p.add_argument("--topk", type=int, default=30)
-    p.add_argument("--checkpoint", default="/home/dxdxxd/projects/custom-dfine/D-FINE-seg/pretrained/dfine_m_obj2coco.pt")
-    p.add_argument("--dfine-src", default="/home/dxdxxd/projects/custom-dfine/D-FINE-seg")
+    p.add_argument("--checkpoint", required=True)
     p.add_argument("--engine", default=str(repo / "trt-files" / "engines" / "dfine_m_fp32_notf32.engine"))
     p.add_argument("--onnx", default=str(repo / "trt-files" / "onnx" / "dfine_m.onnx"))
-    p.add_argument("--image", default="/home/dxdxxd/projects/custom-dfine/D-FINE-seg/tests/assets/park_gen.jpg")
+    p.add_argument("--image", required=True)
     return p.parse_args()
 
 

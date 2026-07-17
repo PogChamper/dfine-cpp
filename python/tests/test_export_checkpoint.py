@@ -7,7 +7,9 @@ from __future__ import annotations
 import argparse
 import builtins
 import importlib.util
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,6 +39,10 @@ class TinyHead(nn.Module):
         self.dec_score_head = nn.ModuleList([nn.Linear(16, num_classes)])
 
 
+class LegacyPayload:
+    pass
+
+
 def save_ckpt(tmp_path: Path, payload: dict) -> Path:
     p = tmp_path / "ckpt.pt"
     torch.save(payload, p)
@@ -52,6 +58,17 @@ def test_select_state_prefers_ema(exporter):
     assert state is ema and name == "model"
     state, name = exporter._select_state(ema)
     assert state is ema and name == "checkpoint root"
+
+
+def test_bundled_model_import_rejects_preloaded_external_module(exporter, monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "dfine_model",
+        SimpleNamespace(__file__="/tmp/external/dfine_model/__init__.py"),
+    )
+
+    with pytest.raises(RuntimeError, match="outside the bundle"):
+        exporter._add_model_to_path()
 
 
 def test_strict_exact_load(exporter, tmp_path, monkeypatch):
@@ -70,6 +87,8 @@ def test_strict_exact_load(exporter, tmp_path, monkeypatch):
     assert report["mode"] == "strict"
     assert report["loaded"] == len(model.state_dict())
     assert report["missing"] == 0 and report["shape_mismatch"] == 0
+    assert report["unused"] == 0
+    assert report["deserialization"] == "weights_only"
     assert len(report["sha256"]) == 64
     assert reads == 1
 
@@ -111,6 +130,7 @@ def test_extra_checkpoint_tensors_tolerated(exporter, tmp_path, capsys):
     ckpt = save_ckpt(tmp_path, {"model": sd})
     report = exporter.load_checkpoint_state(TinyHead(), ckpt, allow_partial=False)
     assert report["mode"] == "strict"
+    assert report["unused"] == 1
     assert "unused" in capsys.readouterr().out
 
 
@@ -118,6 +138,21 @@ def test_bare_state_dict_checkpoint(exporter, tmp_path):
     ckpt = save_ckpt(tmp_path, TinyHead().state_dict())
     report = exporter.load_checkpoint_state(TinyHead(), ckpt, allow_partial=False)
     assert report["selected_state"] == "checkpoint root"
+
+
+def test_pickle_fallback_requires_explicit_opt_in(exporter, tmp_path, capsys):
+    ckpt = save_ckpt(
+        tmp_path,
+        {"model": TinyHead().state_dict(), "legacy": LegacyPayload()},
+    )
+    with pytest.raises(SystemExit, match="refusing pickle deserialization"):
+        exporter.load_checkpoint_state(TinyHead(), ckpt, allow_partial=False)
+
+    report = exporter.load_checkpoint_state(
+        TinyHead(), ckpt, allow_partial=False, allow_unsafe=True
+    )
+    assert report["deserialization"] == "unsafe_pickle"
+    assert "--allow-unsafe-checkpoint" in capsys.readouterr().out
 
 
 def test_regenerated_geometry_buffers_retarget_vs_same_size(exporter, tmp_path):

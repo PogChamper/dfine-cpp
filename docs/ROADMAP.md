@@ -94,4 +94,5 @@ Version 1.0 should describe stability, not feature count:
 - at least one external deployment exercises the maintained runtime contract.
 
 Released work is recorded in [release notes](releases/). Current measurements remain in
-[Validation](VALIDATION.md) and the [research matrix](RESEARCH_MATRIX.md).
+[Benchmarks](BENCHMARKS.md); historical experiments remain in the
+[research matrix](RESEARCH_MATRIX.md).

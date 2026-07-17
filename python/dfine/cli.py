@@ -3,8 +3,9 @@
     dfine predict --model m --image dog.jpg          # detect + print (+ --out to draw)
     dfine info    --model m                           # engine introspection
     dfine build   --model m --precision fp16          # ONNX -> .engine (into the cache)
-    dfine export  --model m                            # .pt  -> ONNX  (needs D-FINE-seg)
+    dfine export  --model m --checkpoint model.pt      # source checkout: .pt -> ONNX
     dfine bench   --model m --batches 1,2,4,8          # latency/throughput
+    dfine sweep   --checkpoint model.pt ...            # source checkout: decision table
 
 Engines are resolved from (in order): --engine, the on-disk cache
 (~/.cache/dfine), the dev-tree trt-files/engines, or built on demand from an
@@ -33,14 +34,6 @@ _SLIM_SUFFIX = "_slim"  # production surgical FP16
 _LEGACY_SUFFIX = "_fp16_st"  # decoder-FP32 compatibility recipe
 # Prefer the production recipe while continuing to discover compatibility assets.
 _ONNX_SUFFIXES = {"fp32": ("", "_op19"), "fp16": (_SLIM_SUFFIX, _LEGACY_SUFFIX)}
-# Known D-FINE-seg checkpoints (relative to the seg source dir).
-_CHECKPOINTS = {
-    "n": "pretrained/dfine_n_coco.pt",
-    "s": "pretrained/dfine_s_obj2coco.pt",
-    "m": "pretrained/dfine_m_obj2coco.pt",
-    "l": "pretrained/dfine_l_obj2coco.pt",
-    "x": "pretrained/dfine_x_obj2coco.pt",
-}
 
 
 def _probability(value: str) -> float:
@@ -48,14 +41,6 @@ def _probability(value: str) -> float:
     if not math.isfinite(threshold) or threshold < 0.0 or threshold > 1.0:
         raise argparse.ArgumentTypeError("must be finite and within [0,1]")
     return threshold
-
-
-def _default_checkpoint(seg: Path, model: str) -> Path:
-    canonical = seg / _CHECKPOINTS[model]
-    if canonical.exists():
-        return canonical
-    legacy = seg / canonical.name
-    return legacy if legacy.exists() else canonical
 
 
 # --------------------------------------------------------------------------- #
@@ -79,18 +64,6 @@ def _repo_root() -> Optional[Path]:
     """The dev-tree repo root if we're running from a source checkout, else None."""
     root = Path(__file__).resolve().parents[2]
     return root if (root / "trt-files" / "scripts" / "build_engine.py").exists() else None
-
-
-def _seg_dir() -> Optional[Path]:
-    env = os.environ.get("DFINE_SEG_DIR") or os.environ.get("DFINE_SEG_SRC")
-    if env and Path(env).exists():
-        return Path(env)
-    repo = _repo_root()
-    if repo:
-        sib = repo.parent / "D-FINE-seg"
-        if sib.exists():
-            return sib
-    return None
 
 
 def _tensorrt_header_roots() -> list[Path]:
@@ -349,7 +322,7 @@ def _resolve_engine(
     if allow_build:
         raise SystemExit(
             f"no engine or ONNX for model '{model}' ({precision}). Provide --onnx, or run "
-            "`dfine export` first (needs the D-FINE-seg source), or pass --engine."
+            "`dfine export` first, or pass --engine."
         )
     raise SystemExit(
         f"no engine found for model '{model}' ({precision}); pass --engine or build one"
@@ -357,14 +330,17 @@ def _resolve_engine(
 
 
 # --------------------------------------------------------------------------- #
-# Shelling out to the build/export scripts
+# Shelling out to build and export scripts
 # --------------------------------------------------------------------------- #
 
 
 def _scripts_dir() -> Path:
     repo = _repo_root()
     if not repo:
-        raise SystemExit("build/export need the dev-tree scripts (trt-files/scripts); not found")
+        raise SystemExit(
+            "checkpoint export is source-checkout tooling; run it from a D-FINE-cpp "
+            "checkout in the locked tools environment"
+        )
     return repo / "trt-files" / "scripts"
 
 
@@ -495,15 +471,12 @@ def _export_onnx(
     num_classes: Optional[int] = None,
     class_names: Optional[str] = None,
     allow_partial: bool = False,
+    allow_unsafe: bool = False,
 ) -> Path:
-    seg = _seg_dir()
-    if seg is None:
-        raise SystemExit(
-            "export needs D-FINE-seg source (set DFINE_SEG_DIR/DFINE_SEG_SRC or place it "
-            "beside this repo)"
-        )
-    ckpt = Path(checkpoint) if checkpoint else _default_checkpoint(seg, model)
-    if not ckpt.exists():
+    if not checkpoint:
+        raise SystemExit("export requires --checkpoint; automatic model download is not available")
+    ckpt = Path(checkpoint).expanduser()
+    if not ckpt.is_file():
         raise SystemExit(f"checkpoint not found: {ckpt} (pass --checkpoint)")
     output.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -513,8 +486,6 @@ def _export_onnx(
         model,
         "--checkpoint",
         str(ckpt),
-        "--dfine-src",
-        str(seg),
         "--output",
         str(output),
     ]
@@ -526,6 +497,8 @@ def _export_onnx(
         cmd += ["--class-names", class_names]
     if allow_partial:
         cmd += ["--allow-partial-checkpoint"]
+    if allow_unsafe:
+        cmd += ["--allow-unsafe-checkpoint"]
     _log("[dfine] $", " ".join(cmd))
     subprocess.run(cmd, check=True, stdout=sys.stderr)
     return output
@@ -726,6 +699,7 @@ def cmd_export(args) -> int:
         num_classes=args.num_classes,
         class_names=args.class_names,
         allow_partial=args.allow_partial_checkpoint,
+        allow_unsafe=args.allow_unsafe_checkpoint,
     )
     if args.precision == "fp32":
         print(f"exported {fp32_out}")
@@ -753,6 +727,17 @@ def cmd_bench(args) -> int:
         _log("[dfine] $", " ".join(cmd))
         return subprocess.run(cmd).returncode
     raise SystemExit("dfine_bench binary not found (build it with ./build.sh) — no bench backend")
+
+
+def cmd_sweep(args) -> int:
+    """Delegate to trt-files/scripts/preset_sweep.py, forwarding every argument.
+
+    The tool owns its argument surface (including --help); the CLI adds no
+    duplicate declarations that could drift.
+    """
+    cmd = [sys.executable, str(_scripts_dir() / "preset_sweep.py"), *args.sweep_args]
+    _log("[dfine] $", " ".join(cmd))
+    return subprocess.run(cmd).returncode
 
 
 def cmd_doctor(_args) -> int:
@@ -876,7 +861,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pb.set_defaults(func=cmd_build)
 
-    pe = sub.add_parser("export", help="export a checkpoint to ONNX (needs D-FINE-seg)")
+    pe = sub.add_parser(
+        "export",
+        help="export a checkpoint to ONNX (source checkout)",
+        description=(
+            "Export a checkpoint to ONNX. This command requires a D-FINE-cpp source checkout."
+        ),
+    )
     pe.add_argument("--model", choices=MODELS, default="m")
     pe.add_argument(
         "--precision",
@@ -885,7 +876,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="fp16 = production surgical/slim (opset 19); "
         "fp16-legacy = decoder-FP32 compatibility recipe (opset 16)",
     )
-    pe.add_argument("--checkpoint", help="path to a D-FINE .pt (defaults to the known seg ckpt)")
+    pe.add_argument(
+        "--checkpoint",
+        required=True,
+        help="path to a D-FINE detection .pt/.pth",
+    )
     pe.add_argument(
         "--num-classes",
         type=int,
@@ -904,6 +899,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="research only: keep exporting when checkpoint tensors are "
         "missing/mismatched (the sidecar records the partial load)",
     )
+    pe.add_argument(
+        "--allow-unsafe-checkpoint",
+        action="store_true",
+        help="allow pickle deserialization when the weights-only loader rejects the checkpoint; "
+        "permits arbitrary code execution",
+    )
     pe.add_argument("--output", help="ONNX output path (default: cache)")
     pe.add_argument(
         "--opset",
@@ -918,13 +919,31 @@ def build_parser() -> argparse.ArgumentParser:
     pbe.add_argument("--batches", default="1,2,4,8")
     pbe.set_defaults(func=cmd_bench)
 
+    psw = sub.add_parser(
+        "sweep",
+        help="sweep a checkpoint across operating points (source checkout)",
+        description=(
+            "Run the conversion/optimization sweep and print one decision table. "
+            "All arguments are forwarded to trt-files/scripts/preset_sweep.py; "
+            "run `dfine sweep --help` for its options."
+        ),
+        add_help=False,
+    )
+    psw.add_argument("sweep_args", nargs=argparse.REMAINDER)
+    psw.set_defaults(func=cmd_sweep)
+
     pd = sub.add_parser("doctor", help="print environment diagnostics (attach to bug reports)")
     pd.set_defaults(func=cmd_doctor)
     return p
 
 
 def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    # `sweep` forwards verbatim (including --help and other leading options),
+    # which argparse.REMAINDER inside a subparser cannot capture reliably.
+    if arguments[:1] == ["sweep"]:
+        return cmd_sweep(argparse.Namespace(sweep_args=arguments[1:]))
+    args = build_parser().parse_args(arguments)
     try:
         return args.func(args)
     except KeyboardInterrupt:

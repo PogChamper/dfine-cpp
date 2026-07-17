@@ -1,0 +1,63 @@
+# Differential parity of the bundled inference-only D-FINE model against the
+# pinned upstream D-FINE-seg revision: bit-exact logits/boxes over all five
+# published checkpoints, on CPU. The job downloads ~700 MB of checkpoints, so
+# it runs only when the bundled model, the pin, or its test change — and on
+# demand.
+name: oracle
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "trt-files/dfine_model/**"
+      - "trt-files/DFINE_SEG_REVISION"
+      - "python/tests/test_bundled_model.py"
+      - ".github/workflows/oracle.yml"
+  push:
+    branches: [main]
+    paths:
+      - "trt-files/dfine_model/**"
+      - "trt-files/DFINE_SEG_REVISION"
+      - "python/tests/test_bundled_model.py"
+      - ".github/workflows/oracle.yml"
+
+jobs:
+  differential:
+    name: bundled model vs pinned D-FINE-seg
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Clone D-FINE-seg at the pinned revision
+        run: |
+          revision="$(cat trt-files/DFINE_SEG_REVISION)"
+          git clone https://github.com/ArgoHA/D-FINE-seg dfine-seg
+          git -C dfine-seg checkout "$revision"
+
+      - name: Download the published checkpoints
+        run: |
+          mkdir -p checkpoints
+          for name in dfine_n_coco.pt dfine_s_obj2coco.pt dfine_m_obj2coco.pt \
+                      dfine_l_obj2coco.pt dfine_x_obj2coco.pt; do
+            curl -fL --retry 3 -o "checkpoints/$name" \
+              "https://huggingface.co/ArgoSA/D-FINE-seg/resolve/main/$name"
+          done
+
+      - name: Install CPU PyTorch and the oracle's import chain
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+          pip install pytest loguru scipy
+
+      - name: Run the differential oracle
+        env:
+          DFINE_SEG_SRC: ${{ github.workspace }}/dfine-seg
+          DFINE_CHECKPOINT_DIR: ${{ github.workspace }}/checkpoints
+        run: |
+          pytest python/tests/test_bundled_model.py -q -rs -k pinned_dfine_seg_oracle \
+            | tee oracle.log
+          grep -q "1 passed" oracle.log

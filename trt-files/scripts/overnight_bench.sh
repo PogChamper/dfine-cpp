@@ -14,8 +14,8 @@
 set -uo pipefail
 S=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd -- "$S/../.." && pwd)
-SEG=${DFINE_SEG_DIR:-$REPO/../D-FINE-seg}
-PY=${PYTHON:-$SEG/.venv/bin/python}
+CHECKPOINT_DIR=${DFINE_CHECKPOINT_DIR:?set DFINE_CHECKPOINT_DIR to the checkpoint directory}
+PY=${PYTHON:-$REPO/.venv/bin/python}
 COCO_IMAGES=${COCO_IMAGES:?set COCO_IMAGES to COCO val2017}
 COCO_ANN=${COCO_ANN:?set COCO_ANN to instances_val2017.json}
 [ -x "$PY" ] || { echo "Python interpreter not found: $PY" >&2; exit 1; }
@@ -36,6 +36,8 @@ SUBSET_ARGS=${SUBSET_ARGS:-"--full"}   # override e.g. SUBSET_ARGS="--subset 200
 read -r -a SUBSET_ARGV <<< "$SUBSET_ARGS"
 BATCHES=(1 2 4 8)
 CM_LIMIT=${CM_LIMIT:-2000}
+ROUNDS=${ROUNDS:-3}
+[[ $ROUNDS =~ ^[1-9][0-9]*$ ]] || { echo "ROUNDS must be a positive integer" >&2; exit 1; }
 FAILURES=0
 
 declare -A CKPT_NAME=( [n]=dfine_n_coco.pt [s]=dfine_s_obj2coco.pt \
@@ -46,7 +48,7 @@ log()  { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
 step() { local t=$1; shift; local d="$1"; shift; log "▶ $d"; if timeout "$t" "$@" >>"$LOG" 2>&1; then log "  ✓ $d"; return 0; else local rc=$?; FAILURES=$((FAILURES + 1)); log "  ✗ $d (rc=$rc — continuing)"; return "$rc"; fi; }
 
 log "=== D-FINE overnight benchmark → $OUTDIR ==="
-log "sizes=[$SIZES]  dataset=[$SUBSET_ARGS]  batches=[${BATCHES[*]}]"
+log "sizes=[$SIZES]  dataset=[$SUBSET_ARGS]  batches=[${BATCHES[*]}]  rounds=$ROUNDS"
 if ! nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null | tee -a "$LOG"; then
   log "GPU query failed"
   exit 1
@@ -58,8 +60,7 @@ for sz in $SIZES; do
     "$OUTDIR/graph_${sz}.txt" "$OUTDIR/pipeline_${sz}.txt" "$OUTDIR/parity_${sz}.txt" \
     "$OUTDIR/dets_${sz}_fullgraph.json" "$OUTDIR/dets_${sz}_split.json" \
     "$OUTDIR"/map_"${sz}"_*.txt
-  ck=$SEG/pretrained/${CKPT_NAME[$sz]}
-  [ -f "$ck" ] || ck=$SEG/${CKPT_NAME[$sz]}
+  ck=$CHECKPOINT_DIR/${CKPT_NAME[$sz]}
   if [ ! -f "$ck" ]; then FAILURES=$((FAILURES + 1)); log "  ✗ checkpoint missing: $ck — skipping $sz"; continue; fi
   ONNX=trt-files/onnx/dfine_${sz}.onnx
   ONNX16=trt-files/onnx/dfine_${sz}_fp16_st.onnx
@@ -81,7 +82,7 @@ for sz in $SIZES; do
   step 3600 "$sz profile FP32 (torch/onnx/trt/cpp)" \
     "$PY" "$S/profile.py" --backends torch onnx trt cpp --engine "$E32" \
         "${SUBSET_ARGV[@]}" --batches "${BATCHES[@]}" \
-        --warmup 30 --iters 150 --model-name "$sz" --checkpoint "$ck" --dfine-src "$SEG" \
+        --warmup 30 --iters 150 --rounds "$ROUNDS" --model-name "$sz" --checkpoint "$ck" \
         --onnx "$ONNX" --images "$COCO_IMAGES" --ann "$COCO_ANN" \
         --workdir "$OUTDIR" --out "$FP32_REPORT"
   # trt-fp16 / cpp-fp16
@@ -90,7 +91,7 @@ for sz in $SIZES; do
   step 2400 "$sz profile FP16 (trt/cpp)" \
     "$PY" "$S/profile.py" --backends trt cpp --engine "$E16" \
         "${SUBSET_ARGV[@]}" --batches "${BATCHES[@]}" \
-        --warmup 30 --iters 150 --images "$COCO_IMAGES" --ann "$COCO_ANN" \
+        --warmup 30 --iters 150 --rounds "$ROUNDS" --images "$COCO_IMAGES" --ann "$COCO_ANN" \
         --workdir "$OUTDIR" --out "$FP16_REPORT"
   # rigorous CUDA-graph impact on the 0-aux engine
   if [ -f "$E16G" ]; then
@@ -181,41 +182,67 @@ for sz in $SIZES; do
 done
 
 log "=== consolidating → $REPORT ==="
-if OUTDIR="$OUTDIR" SIZES="$SIZES" SUBSET_ARGS="$SUBSET_ARGS" CM_LIMIT="$CM_LIMIT" "$PY" - <<'PYEOF'
+if OUTDIR="$OUTDIR" SIZES="$SIZES" SUBSET_ARGS="$SUBSET_ARGS" CM_LIMIT="$CM_LIMIT" ROUNDS="$ROUNDS" "$PY" - <<'PYEOF'
 import json, os, re, glob, datetime
 OUT=os.environ["OUTDIR"]; SIZES=os.environ["SIZES"].split()
 SUBSET_ARGS=os.environ["SUBSET_ARGS"].strip(); CM_LIMIT=int(os.environ["CM_LIMIT"])
+ROUNDS=int(os.environ.get("ROUNDS", "3"))
 NAMES={"n":"nano","s":"small","m":"medium","l":"large","x":"xlarge"}
 def load(p):
-    try: return json.load(open(os.path.join(OUT,p)))
-    except Exception: return None
+    path=os.path.join(OUT,p)
+    if not os.path.exists(path): return None
+    with open(path) as stream: report=json.load(stream)
+    if report.get("schema") != 2:
+        raise RuntimeError(f"{path}: expected profile schema 2")
+    if not isinstance(report.get("backends"),dict):
+        raise RuntimeError(f"{path}: missing backends object")
+    return report
 def cell(x,n=2): return (f"{x:.{n}f}" if isinstance(x,(int,float)) else "—")
-def be(rep,name,b,key):
+def row(rep,name,b):
     if not rep: return None
-    e=rep["backends"].get(name,{}); L=e.get("latency",{}); r=L.get(str(b)) or L.get(b) or {}
-    if key=="ap":
-        m=e.get("map"); return m.get("AP") if m else None
-    return r.get(key)
+    latency=rep["backends"].get(name,{}).get("latency",{})
+    value=latency.get(str(b)) or latency.get(b)
+    if value is not None and not isinstance(value.get("scopes"),dict):
+        raise RuntimeError(f"{name} batch {b}: missing latency scopes")
+    return value
+def scoped(rep,name,b,scope,key):
+    value=row(rep,name,b)
+    return value.get("scopes",{}).get(scope,{}).get(key) if value else None
+def memory(rep,name,b):
+    value=row(rep,name,b)
+    return value.get("gpu_mem_mib") if value else None
+def ap(rep,name):
+    if not rep: return None
+    metrics=rep["backends"].get(name,{}).get("map")
+    return metrics.get("AP") if metrics else None
 L=[]
 L.append(f"# D-FINE cross-backend benchmark — {datetime.date.today()}")
 dataset = "Full COCO val2017 (5000 images)" if SUBSET_ARGS == "--full" else f"Selection: `{SUBSET_ARGS}`"
-L.append(f"\n{dataset}. Latency = e2e p50 ms (preprocess+infer+decode); "
-         "FPS = img/s; GPU MiB = peak inference footprint. *torch/onnx GPU mem is an in-process delta and "
+L.append(f"\n{dataset}. Latency cells are the median of {ROUNDS} round-level p50 values in ms. "
+         "E2E covers image preprocessing through CPU "
+         "detections; the forward scope is named per row; TRT device time covers resident input through "
+         "resident outputs. FPS is derived from E2E p50; GPU MiB is the inference footprint. "
+         "*torch/onnx GPU mem is an in-process delta and "
          "understates their true footprint; compare FP32↔FP16 within a stack.*\n")
-BK=[("PyTorch (FP32)","fp32","torch"),("ONNXRuntime-GPU (FP32)","fp32","onnx"),
-    ("TensorRT FP32 (py)","fp32","trt"),("TensorRT FP16 (py)","fp16","trt"),
-    ("C++ FP32","fp32","cpp"),("C++ FP16","fp16","cpp")]
+BK=[("PyTorch (FP32)","fp32","torch","backend call, host→host","backend_call_host_to_host"),
+    ("ONNXRuntime-GPU (FP32)","fp32","onnx","backend call, host→host","backend_call_host_to_host"),
+    ("TensorRT FP32 (py)","fp32","trt","H2D + engine + D2H","trt_transfer_inclusive"),
+    ("TensorRT FP16 (py)","fp16","trt","H2D + engine + D2H","trt_transfer_inclusive"),
+    ("C++ FP32","fp32","cpp","—",None),("C++ FP16","fp16","cpp","—",None)]
 for sz in SIZES:
     f32=load(f"cmp_{sz}_fp32.json"); f16=load(f"cmp_{sz}_fp16.json")
     if not (f32 or f16): continue
     L.append(f"\n## {NAMES.get(sz,sz)} ({sz})\n")
-    L.append("| backend | e2e b1 | infer b1 | FPS b1 | FPS b8 | GPU MiB | mAP |")
-    L.append("|---|---|---|---|---|---|---|")
-    for label,prec,name in BK:
+    L.append("| backend | forward scope | e2e b1 | forward b1 | TRT device b1 | FPS b1 | FPS b8 | GPU MiB | mAP |")
+    L.append("|---|---|---|---|---|---|---|---|---|")
+    for label,prec,name,forward_label,forward_scope in BK:
         rep=f16 if prec=="fp16" else f32
-        L.append(f"| {label} | {cell(be(rep,name,1,'p50'))} | {cell(be(rep,name,1,'infer_p50'))} | "
-                 f"{cell(be(rep,name,1,'img_per_s'),1)} | {cell(be(rep,name,8,'img_per_s'),1)} | "
-                 f"{cell(be(rep,name,1,'gpu_mem_mib'),0)} | {cell(be(rep,name,1,'ap'),4)} |")
+        forward=scoped(rep,name,1,forward_scope,"p50") if forward_scope else None
+        L.append(f"| {label} | {forward_label} | {cell(scoped(rep,name,1,'end_to_end','p50'))} | "
+                 f"{cell(forward)} | {cell(scoped(rep,name,1,'trt_engine_device','p50'))} | "
+                 f"{cell(scoped(rep,name,1,'end_to_end','img_per_s'),1)} | "
+                 f"{cell(scoped(rep,name,8,'end_to_end','img_per_s'),1)} | "
+                 f"{cell(memory(rep,name,1),0)} | {cell(ap(rep,name),4)} |")
 L.append("\n## CUDA-graph impact (0-aux FP16 engine, `dfine_bench --graph-compare`)\n")
 L.append("Rigorous same-run interleaved (immune to clock drift). D-FINE is dispatch-bound at small batch: "
          "the graph replaces the CPU's per-kernel enqueueV3 launches with one `cudaGraphLaunch`.\n")

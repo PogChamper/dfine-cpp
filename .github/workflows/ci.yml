@@ -38,7 +38,7 @@ jobs:
         run: pip install ruff==0.6.9 clang-format==18.1.8
 
       - name: ruff
-        run: ruff check trt-files/scripts python/dfine python/tests
+        run: ruff check trt-files/dfine_model trt-files/scripts python/dfine python/tests
 
       - name: shellcheck
         # shellcheck is preinstalled on ubuntu-latest runners.
@@ -177,13 +177,12 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install package + test deps
-        # Beyond the dev extra: CPU torch + onnx/onnxruntime so the release-gate
-        # suites (strict checkpoint loading, the mandatory ORT N=1/2 dynamic-batch
-        # postcondition) execute here instead of being skipped by optional imports.
+        # Beyond the dev extra: CPU torch + ONNX dependencies exercise the export
+        # gates; pycocotools exercises the shared dataset scorer.
         run: |
           pip install -e "python/[dev]"
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install onnx onnxruntime onnxconverter-common
+          pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install onnx onnxruntime onnxconverter-common pycocotools
       - name: pytest
         # conftest.py fixtures still skip the GPU-bound subset (libdfine/engine/
         # GPU missing). The CPU subset — CLI cache/export/json suites plus the

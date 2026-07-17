@@ -6,20 +6,18 @@
 #   uv sync --frozen --extra gpu --extra torch --group release  # + release tests/build
 #   uv sync --frozen                                 # ONNX-graph tooling only (no GPU wheels)
 #
-# uv.lock pins the Python toolchain. Reproducing a release export also requires
-# the D-FINE source revision recorded in trt-files/DFINE_SEG_REVISION.
+# uv.lock pins the Python toolchain. The bundled model implementation records its
+# upstream revision in trt-files/DFINE_SEG_REVISION.
 #
 # Requirements and failure modes: docs/CONVERSION.md and docs/TROUBLESHOOTING.md.
 #   • TensorRT 10.13 and the matching CUDA-12 runtime must be present. The
 #     `tensorrt-cu12` package supplies the Python API and runtime libraries.
 #   • onnxruntime-gpu is pinned to the validated CUDA-12 build.
-#   • The ONNX **export** (export_dfine_onnx.py) additionally needs the D-FINE-seg source
-#     (https://github.com/ArgoHA/D-FINE-seg) for build_model; it is not a
-#     pip dependency. Everything else (build_engine / convert_fp16 / convert_int8 /
-#     profile / coco_eval) is self-contained.
+#   • The ONNX checkpoint exporter uses the detection-only model sources bundled
+#     under trt-files/dfine_model.
 [project]
 name = "dfine-cpp-tools"
-version = "0.4.0"
+version = "0.5.0"
 description = "Export / build / convert / eval / profile scripts for the D-FINE-cpp TensorRT runtime"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -39,8 +37,8 @@ gpu = [
     "tensorrt-cu12==10.13.*",
     "socksio",                                        # SOCKS proxy for HF weight downloads
 ]
-# The full checkpoint-export chain: export_dfine_onnx.py needs torch itself;
-# the D-FINE-seg model sources it imports pull in torchvision, loguru, scipy.
+# Export and evaluation use the bundled model. The additional packages support the
+# pinned upstream differential gate and historical conversion reproducers.
 torch = ["torch==2.9.1", "torchvision==0.24.*", "loguru", "scipy"]
 
 [dependency-groups]

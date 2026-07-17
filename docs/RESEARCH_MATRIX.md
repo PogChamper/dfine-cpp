@@ -1,19 +1,21 @@
-# Research Matrix — every measurement behind v0.3.0
+# Research matrix — v0.3.0 measurements
 
-The complete measured record of the precision/throughput campaign (2026-07-02/03) that produced
-the surgical-FP16 pipeline, the export sliders, and the v0.3.0 release recipe. Everything here is
-a real measurement — including the paths that **failed** (FP8, INT8, a deform plugin, BF16); they
-are recorded with the same care so nobody has to re-run them.
+This document preserves the 2026-07-02/03 precision and throughput campaign that produced the
+surgical-FP16 pipeline, export sliders, and v0.3.0 recipe. The current cross-domain preset study is
+in the [v0.5 report](reports/v0.5.0-preset-evaluation.md).
 
 **Common setup.** D-FINE-M `obj2coco` unless noted; RTX 4070 Ti SUPER (GeForce Ada, sm_89);
 TensorRT 10.13.3; CUDA 12; COCO val2017. "Full-val" = mAP@[.50:.95] on all 5000 images
 (`coco_eval.py --limit 0`); "subset" = the first 2000 (screening only, never a release gate).
 All engines strongly-typed, `--no-tf32`. Benchmarks: `dfine_bench` (the C++ runtime), 500 iters,
 medians of 3 interleaved rounds on an idle GPU. References (m): PyTorch subset base 0.5672,
-full-val FP32 0.5506, production FP16-ST 0.5500.
+full-val FP32 0.5506, production FP16-ST 0.5500. The PyTorch full-val reference is
+session-dependent within 0.03 points: the bug-report era measured 0.5509, this campaign 0.5506,
+and the v0.5 study 0.55067 with TF32 disabled — each document anchors its deltas to its own
+measured base.
 
-Reduced-query throughput rows report the measured `K=Q` decode configuration. [Validation](VALIDATION.md)
-records the current runtime regression gate for the same artifacts.
+Reduced-query throughput rows report the measured `K=Q` decode configuration. Current published
+results are in [Benchmarks](BENCHMARKS.md).
 
 Engine configs referenced throughout:
 
@@ -48,10 +50,9 @@ pre_bbox_head 0.069. The FDR tail (integral+LQE+bbox+pre_bbox) is only ≈5.6% o
 precision-critical, not time-critical.
 
 **Deform kernel census.** The explicit gather-bilinear core is 4843 of 7631 ONNX nodes, but Myelin
-fuses it to **16 runtime kernels** (4 big per-layer blobs carry ~88% of deform time). The "dozens
-of tiny Gathers thrash memory" premise is false at engine level; a heroic 2× fused-deform plugin
-would cap at ~3% (b1) / ~8% (b8) end-to-end. **Plugin rejected.** Reformat/cast cleanup likewise:
-0.7-1.0% ceiling, rejected.
+fuses it to **16 runtime kernels** (4 large per-layer blobs carry ~88% of deform time). A 2×
+fused-deform plugin would cap at ~3% (b1) / ~8% (b8) end to end. The measured ceiling did not
+justify a plugin. Reformat/cast cleanup had a 0.7-1.0% ceiling.
 
 ## 2. Torch fake-quant ablation (what precision D-FINE actually needs)
 
@@ -75,21 +76,21 @@ adversarially reviewed, AIFI in_proj escape fixed; not shipped — the shipped e
 | FP8 W+A, minmax | 0.3177 | −25 pts |
 | FP8 W+A, percentile | 0.2053 | −36 pts (percentile makes FP8 *worse*) |
 
-Verdicts: an engineered FP16 decoder is ~lossless (→ §4); INT8 accuracy is an activation-
+Results: an engineered FP16 decoder is ~lossless (→ §4); INT8 accuracy is an activation-
 *calibration* problem, not a precision wall; FP8 loss is E4M3-mantissa-limited (scale-invariant
-relative error — no PTQ calibration can fix it, only QAT); the old "BF16 dead (−27 AP)" result was
+relative error — PTQ calibration does not address it); the earlier −27 AP BF16 result was
 a weak-typing artifact. **F-1 hazard:** the explicit-deform gather *index* math (`y*w+x`, values
 up to 6400) is FP16-unsafe (integers >2048 are inexact) — any reduced-precision deform must keep
 index/coordinate math FP32. This shaped the converter's coordinate slice.
 
-## 3. FP8 E4M3 — dead on both axes (GeForce Ada)
+## 3. FP8 E4M3 (GeForce Ada)
 
 Real TensorRT path: modelopt 0.44 QDQ (decoder excluded, 129 quantized nodes), opset-19,
 strongly-typed build. Result: subset mAP **0.3909 (−17.6 pts)** and **7-9% slower** than fp16_st
 (b1 3.99 vs 3.72 ms, b8 19.04 vs 17.48 ms). GeForce Ada runs FP8 tensor cores at FP16 rate (FP8
 mandates FP32 accumulation, which GeForce halves), so you pay Q/DQ overhead for zero math gain.
-Matches the torch ablation (§2): the accuracy loss is mantissa-limited. **Closed; do not revisit
-on this hardware class.**
+Matches the torch ablation (§2): the accuracy loss is mantissa-limited. The path was rejected for
+GeForce Ada.
 
 ## 4. Surgical FP16 — the bisect that found a TensorRT bug
 
@@ -120,7 +121,7 @@ ORT-vs-TRT repro pair is archived; an NVIDIA bug report is in preparation. (Thir
 family documented in [impl/M0_STATUS.md](impl/M0_STATUS.md): in-context GridSample and the kFP16
 builder flag.)
 
-### Surgical, gated on all five sizes (full-val, Golden Rule)
+### Surgical, gated on all five sizes
 
 | size | surgical | fp16_st ref | verdict |
 |---|---|---|---|
@@ -156,7 +157,8 @@ default.**
 The P1-P3 runtime machinery (GPU decode, `freeze()`, one-`cudaGraphLaunch`-per-frame) works
 unchanged on a `--max-aux-streams 0` surgical build: byte-identical detections over 300 iters +
 threshold probe, **b1 wall 2.474 ms (−27% vs split path; the prod-fp16_st graph was 2.55 ms)**,
-CPU 0.164 ms/frame — the repo's latency record.
+CPU 0.164 ms/frame — this campaign's latency record. The current record is the v0.5 `max` graph
+point, 1.99 ms ([Benchmarks](BENCHMARKS.md#runtime-modes-and-serving-profile)).
 
 ## 5. Export sliders (now `export_dfine_onnx.py` flags)
 
@@ -169,9 +171,9 @@ Measured on the m surgical base (full-val where stated; b8 ips medians):
 | queries 300→200 | `--num-queries 200` | **0.5487 full-val (−0.13)** | 3.44/291 | 563 |
 | decoder 4→3 layers | `--eval-idx 2` | 0.5443 full-val (−0.57) | 3.29/304 | 546 |
 | cascade prune | `--cascade 1:100` | 0.5456 full-val (−0.44) | — | ~530 |
-| FAST = E2+Q200 | both | 0.5434 full-val (−0.66) | 3.04/330 | 608 (648 with opt8) |
+| E2 + Q200 | `--eval-idx 2 --num-queries 200` | 0.5434 full-val (−0.66) | 3.04/330 | 608 (648 with opt8) |
 
-¹ Same-run comparison block; run-to-run the surgical b8 median lands at 526-533 (the §7 grand
+¹ Same-run comparison block; run-to-run the surgical b8 median lands at 526-533 (the §7 full
 ladder, a different session, has 526).
 
 **Cascade** (`--cascade K:KEEP`) is the architecture-native slider: after decoder layer K, keep
@@ -190,7 +192,9 @@ Cascade curve (m, subset + b8 ips):
 | **1:150** | **0.5645** | **0.5482 (−0.18)** | 569 |
 | 2:100 | 0.5644 | — | 563 |
 
-**1:150 is the recommended single slider**: −0.18 AP full-val for +8% b8.
+This campaign selected 1:150 as its single-slider point: −0.18 AP full-val for +8% b8. The later
+[v0.5 study](reports/v0.5.0-preset-evaluation.md) found a better measured balance for Q200 and is
+the current selection reference.
 
 ## 6. INT8 — closed negative (standalone and combo)
 
@@ -210,7 +214,7 @@ minmax QDQ graph — ORT histogram calibration OOMs a 16 GB host):
 ¹ TRT cannot fuse a per-input-channel `Mul(1/s)` into a per-output-channel weight-DQ scale
 (`wtsOpUtils` broadcast assert). The fix design — folding 1/s into the *producer* conv through
 ReLU commutation (`relu(x)·k == relu(x·k)`, k>0, valid for the whole HGNetv2 backbone) — is
-documented but unimplemented; the measured speed ceiling made it moot.
+documented but unimplemented; the measured speed ceiling did not justify the work.
 ² TRT 10.13 has no int8-depthwise kernels inside an FP16-typed context.
 
 **Why closed:** the int8 conv gain is only ~1.23× real (Q/DQ overhead), so standalone INT8 (519
@@ -218,7 +222,7 @@ ips) loses to pure surgical FP16 (528/561), and the combo (486) loses harder whi
 of mAP. On GeForce Ada, surgical FP16 strictly dominates every INT8 recipe we could build.
 `convert_int8.py` stays in the tree as the reference implementation.
 
-## 7. The grand ladder (all sizes × configs × batches)
+## 7. Size and configuration ladder
 
 Medians of 3 interleaved rounds × 500 iters, idle GPU, `p50 ms / img/s`; VRAM = peak engine+buffers.
 
@@ -245,7 +249,7 @@ The m ladder end to end: PyTorch 66 → C++ fp32 230 → prod fp16_st 469 → su
 §4 session; 561 with opt-batch 8) → fast 598 → **max 686 img/s (10.4× PyTorch, +46% over v0.2.0
 prod)**. Subset deltas predicted the full-val deltas within ±0.05 pt on every gated config.
 
-## 8. Does it survive a fine-tuned production model?
+## 8. Fine-tuned production model
 
 The whole stack, re-validated on a production fine-tuned **D-FINE-S (3 classes, food domain)**
 against its own PyTorch checkpoint as pseudo-ground-truth (score ≥ 0.40), 2000 real 1810×1080
@@ -257,18 +261,18 @@ frames. Fidelity = AP of the engine's detections vs the .pt reference:
 | fp16_st | 0.9989 | 3.20/312 | 500 | 476 |
 | surgical | **0.9999** (AP50 = 1.0000 — the most faithful stage, incl. fp32) | 3.19/313 | 555 | 410 |
 | Q100 (`--num-queries 100`) | 0.9964 | 3.03/330 | 619 | 404 |
-| FAST (`--eval-idx 2 --num-queries 100`) | 0.9966 | 2.99/334 | **638** | 370 |
+| E2 + Q100 (`--eval-idx 2 --num-queries 100`) | 0.9966 | 2.99/334 | **638** | 370 |
 | cascade 1:50 + slim | **0.9972** | — | 564 | 376 |
 
-2× the fp32 throughput at 0.997+ fidelity, −40% VRAM. On few-class fine-tunes the sliders are
-nearly free — few classes need few queries. (After this, the deployment's bottleneck moved to
-CPU-side preprocessing of 1810×1080 frames — that is what `full_pipeline_graph` exists for.)
+The measured point reached 2× FP32 throughput at 0.997+ fidelity and −40% VRAM. In this three-class
+model, query reduction had a smaller fidelity cost than on COCO. CPU preprocessing of 1810×1080
+frames then became the deployment bottleneck addressed by `full_pipeline_graph`.
 
-## 9. Probes that closed negative or neutral (measured, do not re-run)
+## 9. Rejected or neutral probes
 
 | probe | result | verdict |
 |---|---|---|
-| FP8 (real TRT, modelopt) | 0.3909 mAP, 7-9% slower | dead on GeForce Ada (§3) |
+| FP8 (real TRT, modelopt) | 0.3909 mAP, 7-9% slower | rejected on GeForce Ada (§3) |
 | fused deform-attn plugin | Myelin already fuses to 16 kernels; ≤8% e2e ceiling | unjustified (§1) |
 | INT8 standalone / combo | 519 / 486 ips < 528 surgical | closed (§6) |
 | `builder_optimization_level=5` | 517 vs 562 ips — picked *worse* tactics | rejected |
@@ -282,17 +286,16 @@ CPU-side preprocessing of 1810×1080 frames — that is what `full_pipeline_grap
 ## 10. Reproduce
 
 ```sh
-: "${DFINE_SEG_DIR:?set DFINE_SEG_DIR to the pinned D-FINE-seg checkout}"
+: "${DFINE_CHECKPOINT:?set DFINE_CHECKPOINT to dfine_m_obj2coco.pt}"
 : "${COCO_IMAGES:?set COCO_IMAGES to COCO val2017}"
 : "${COCO_ANN:?set COCO_ANN to instances_val2017.json}"
-export DFINE_CHECKPOINT="${DFINE_CHECKPOINT:-$DFINE_SEG_DIR/pretrained/dfine_m_obj2coco.pt}"
 
 uv sync --frozen --extra gpu --extra torch
 ./build.sh
 
 # Opset-19 export required by the surgical converter.
 uv run python trt-files/scripts/export_dfine_onnx.py \
-    --model-name m --checkpoint "$DFINE_CHECKPOINT" --dfine-src "$DFINE_SEG_DIR" \
+    --model-name m --checkpoint "$DFINE_CHECKPOINT" \
     --opset 19 --output dfine_m_op19.onnx
 
 # Fast adds --num-queries 200 --cascade 1:100.

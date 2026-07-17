@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1
 
-# Native build environment and command-line tools. ONNX export is intentionally
-# outside this image because it also requires a D-FINE source checkout and the
-# locked PyTorch tools environment.
+# Native build environment and command-line tools. ONNX export is outside this
+# image because the locked PyTorch tools environment is not installed here.
 FROM nvidia/cuda:12.9.1-devel-ubuntu22.04
 
 ARG TRT_DEB_VERSION=10.13.3.9-1+cuda12.9

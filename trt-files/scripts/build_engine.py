@@ -336,6 +336,11 @@ def _validate_batch_profile(min_batch: int, opt_batch: int, max_batch: int) -> N
             "batch profile must satisfy 1 <= min <= opt <= max "
             f"(got {min_batch}/{opt_batch}/{max_batch})"
         )
+    if min_batch == max_batch and min_batch != 1:
+        raise SystemExit(
+            "static batch profiles above 1 are not supported by the native runtime; "
+            f"use 1/{opt_batch}/{max_batch} to target batch {opt_batch}"
+        )
 
 
 def _apply_graph_policy(config, policy: dict) -> int | None:
@@ -367,8 +372,59 @@ def _graph_outputs_are_fp32(network, meta: dict) -> bool:
     return selected is not None and all(tensor.dtype == trt.DataType.FLOAT for tensor in selected)
 
 
+def _engine_batch_facts(
+    engine,
+    input_name: str,
+    chw: tuple[int, int, int],
+    requested: tuple[int, int, int],
+) -> dict:
+    """Read the effective batch contract from a deserialized engine."""
+    if engine.num_optimization_profiles != 1:
+        raise RuntimeError(
+            f"built engine has {engine.num_optimization_profiles} optimization profiles; expected 1"
+        )
+
+    shape = tuple(int(dim) for dim in engine.get_tensor_shape(input_name))
+    if len(shape) != 4 or tuple(shape[1:]) != chw or shape[0] == 0 or shape[0] < -1:
+        raise RuntimeError(f"built engine has invalid input shape for {input_name}: {shape}")
+
+    profile_shapes = tuple(
+        tuple(int(dim) for dim in dims) for dims in engine.get_tensor_profile_shape(input_name, 0)
+    )
+    if len(profile_shapes) != 3 or any(
+        len(dims) != 4 or tuple(dims[1:]) != chw or dims[0] < 1 for dims in profile_shapes
+    ):
+        raise RuntimeError(
+            f"built engine has invalid optimization profile for {input_name}: {profile_shapes}"
+        )
+    dynamic_batch = shape[0] == -1
+    if not dynamic_batch and shape[0] != 1:
+        raise RuntimeError(
+            f"built engine has static batch {shape[0]}; the native runtime supports static batch 1 "
+            "or a dynamic batch profile"
+        )
+
+    expected_shapes = tuple((batch, *chw) for batch in requested)
+    if profile_shapes != expected_shapes:
+        raise RuntimeError(
+            f"built engine batch profile {profile_shapes} differs from requested {expected_shapes}"
+        )
+
+    min_batch, opt_batch, max_batch = (dims[0] for dims in profile_shapes)
+    return {
+        "dynamic_batch": dynamic_batch,
+        "min_batch": min_batch,
+        "opt_batch": opt_batch,
+        "max_batch": max_batch,
+    }
+
+
 def _engine_build_facts(
-    args: argparse.Namespace, onnx_sha256: str, graph_policy: dict, outputs_fp32: bool
+    args: argparse.Namespace,
+    onnx_sha256: str,
+    graph_policy: dict,
+    outputs_fp32: bool,
+    batch_facts: dict,
 ) -> dict:
     """Return metadata owned by the TensorRT build step."""
     return {
@@ -378,9 +434,7 @@ def _engine_build_facts(
         "trt_version": trt.__version__,
         "sm_arch": _sm_arch(),
         "tf32": not args.no_tf32,
-        "opt_batch": args.opt_batch,
-        "min_batch": args.min_batch,
-        "max_batch": args.max_batch,
+        **batch_facts,
         "onnx_sha256": onnx_sha256,
         **graph_policy,
         "cuda_graph_compat": graph_policy["max_aux_streams"] == 0 and outputs_fp32,
@@ -594,9 +648,32 @@ def build(args: argparse.Namespace) -> None:
             f"({args.constraints.upper()}_PRECISION_CONSTRAINTS)"
         )
 
+    outputs_fp32 = _graph_outputs_are_fp32(network, meta)
+    input_name = inp.name
+    chw = (int(c), int(h), int(w))
+    input_shape = tuple(inp.shape)
+    output_shapes = [tuple(network.get_output(i).shape) for i in range(network.num_outputs)]
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError("build_serialized_network returned None")
+    del profile, inp, parser, network, config, builder
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(plan)
+    if engine is None:
+        raise RuntimeError("failed to deserialize the engine built in this process")
+    batch_facts = _engine_batch_facts(
+        engine,
+        input_name,
+        chw,
+        (args.min_batch, args.opt_batch, args.max_batch),
+    )
+    batch_kind = "dynamic" if batch_facts["dynamic_batch"] else "static"
+    print(
+        f"[build] verified {batch_kind} engine batch profile: "
+        f"min={batch_facts['min_batch']} opt={batch_facts['opt_batch']} "
+        f"max={batch_facts['max_batch']}"
+    )
+    del engine, runtime
     # Engine sidecar: the ONNX contract passes through untouched; the builder only
     # appends facts IT owns. Precision is decided by whoever set the compute types:
     # a weakly-typed flag mode here, or the converter's ONNX types (strongly typed) —
@@ -607,11 +684,9 @@ def build(args: argparse.Namespace) -> None:
         # the runtime's sidecar-vs-engine cross-check sees the engine's real
         # dims/classes/queries instead of absent fields (class names and
         # normalization stay unknown — the runtime warns and uses its defaults).
-        inp_shape = network.get_input(0).shape
-        out_shapes = [tuple(network.get_output(i).shape) for i in range(network.num_outputs)]
-        logits_shape = next((s for s in out_shapes if len(s) == 3 and s[-1] != 4), None)
-        if len(inp_shape) == 4 and inp_shape[2] > 0 and inp_shape[3] > 0:
-            meta["input_h"], meta["input_w"] = int(inp_shape[2]), int(inp_shape[3])
+        logits_shape = next((s for s in output_shapes if len(s) == 3 and s[-1] != 4), None)
+        if len(input_shape) == 4 and input_shape[2] > 0 and input_shape[3] > 0:
+            meta["input_h"], meta["input_w"] = int(input_shape[2]), int(input_shape[3])
         if logits_shape and logits_shape[1] > 0 and logits_shape[2] > 0:
             meta["num_queries"], meta["num_classes"] = int(logits_shape[1]), int(logits_shape[2])
         print(
@@ -649,8 +724,7 @@ def build(args: argparse.Namespace) -> None:
                 "precision_mode",
                 "fp32" if meta["precision"] == "fp32" else "strongly_typed_unknown",
             )
-    outputs_fp32 = _graph_outputs_are_fp32(network, meta)
-    meta.update(_engine_build_facts(args, onnx_sha256, graph_policy, outputs_fp32))
+    meta.update(_engine_build_facts(args, onnx_sha256, graph_policy, outputs_fp32, batch_facts))
     # Revalidate the resolved destinations after the build so a path change cannot
     # redirect publication. The ONNX sidecar namespace remains reserved whether or
     # not a source sidecar existed in the input snapshot.

@@ -16,8 +16,7 @@ composed ``fast``/``max`` presets) is tabulated in docs/RESEARCH_MATRIX.md.
 
 A JSON sidecar with the same stem records the runtime contract and provenance.
 
-Model construction uses the D-FINE-seg package, whose detection subnetwork is
-compatible with the official D-FINE detection architecture.
+Model construction uses the bundled detection-only D-FINE implementation.
 """
 
 from __future__ import annotations
@@ -30,17 +29,15 @@ import json
 import os
 import re
 import secrets
-import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
-# This script lives in trt-files/scripts alongside profile.py, whose name shadows the
-# stdlib `profile` module that cProfile (pulled in by torchvision -> torch._dynamo)
-# imports. Drop the scripts dir from the front of sys.path so stdlib wins; this script
-# imports no sibling module, so removing it is safe.
+# This script lives beside profile.py, whose name shadows the stdlib module used by
+# torch._dynamo. Remove only the direct-entrypoint path; callers may need sibling modules.
 _scripts_dir = str(Path(__file__).resolve().parent)
-sys.path[:] = [p for p in sys.path if p not in ("", _scripts_dir)]
+sys.path[:] = [p for p in sys.path if p != ""]
+if sys.path and sys.path[0] == _scripts_dir:
+    sys.path.pop(0)
 
 import torch
 import torch.nn as nn
@@ -204,11 +201,20 @@ def _publish_pair(
         print(f"[{tag}] removed stale sidecar {sidecar_out} (source has none)")
 
 
-def _add_repo_to_path(repo_root: Path) -> None:
-    """Make the D-FINE-seg ``src`` package importable."""
-    root = str(repo_root.resolve())
-    if root not in sys.path:
-        sys.path.insert(0, root)
+def _add_model_to_path() -> None:
+    root = Path(__file__).resolve().parents[1]
+    package = root / "dfine_model"
+    loaded = sys.modules.get("dfine_model")
+    if loaded is not None:
+        source_value = getattr(loaded, "__file__", None)
+        if not source_value:
+            raise RuntimeError("dfine_model was imported without a source path")
+        source = Path(source_value).resolve()
+        if package not in source.parents:
+            raise RuntimeError(f"dfine_model was imported from outside the bundle: {source}")
+    root_str = str(root)
+    sys.path[:] = [entry for entry in sys.path if entry != root_str]
+    sys.path.insert(0, root_str)
 
 
 class RawDetect(nn.Module):
@@ -342,7 +348,10 @@ def patch_cascade(model: nn.Module, k: int, keep: int) -> None:
 
     import torch.nn.functional as F
 
-    chead = copy.deepcopy(model.decoder.dec_score_head[k]).eval().requires_grad_(False)
+    decoder = model.decoder.decoder
+    decoder.cascade_score_head = (
+        copy.deepcopy(model.decoder.dec_score_head[k]).eval().requires_grad_(False)
+    )
 
     def _cascade_forward(
         self,
@@ -361,7 +370,8 @@ def patch_cascade(model: nn.Module, k: int, keep: int) -> None:
         memory_mask=None,
         return_queries=False,
     ):
-        from src.d_fine.arch.utils import distance2bbox, inverse_sigmoid
+        _add_model_to_path()
+        from dfine_model.utils import distance2bbox, inverse_sigmoid
 
         output = target
         output_detach = pred_corners_undetach = 0
@@ -397,7 +407,7 @@ def patch_cascade(model: nn.Module, k: int, keep: int) -> None:
             ref_points_detach = inter_ref_bbox.detach()
             output_detach = output.detach()
             if i == k:
-                rank = F.sigmoid(chead(output)).amax(-1)  # [B, Q]
+                rank = F.sigmoid(self.cascade_score_head(output)).amax(-1)  # [B, Q]
                 keep_idx = rank.topk(keep, dim=1).indices  # [B, keep]
 
                 def _g(t):
@@ -410,7 +420,7 @@ def patch_cascade(model: nn.Module, k: int, keep: int) -> None:
                 ref_points_initial = _g(ref_points_initial)
         raise RuntimeError("cascade forward: eval_idx not reached")
 
-    model.decoder.decoder.forward = types.MethodType(_cascade_forward, model.decoder.decoder)
+    decoder.forward = types.MethodType(_cascade_forward, decoder)
 
 
 def apply_sliders(model: nn.Module, args: argparse.Namespace) -> None:
@@ -580,6 +590,25 @@ def _exporter_sha256() -> str:
     return hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()
 
 
+def _model_source_manifest(source: Path | None = None) -> dict:
+    """Hash every bundled Python source that can affect model construction."""
+    source = source or Path(__file__).resolve().parents[1] / "dfine_model"
+    source = source.resolve()
+    files = sorted(path for path in source.rglob("*.py") if path.is_file())
+    if not files:
+        raise SystemExit(f"bundled D-FINE model sources are missing: {source}")
+    digest = hashlib.sha256()
+    relative_files = []
+    for path in files:
+        relative = path.relative_to(source).as_posix()
+        relative_files.append(relative)
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return {"sha256": digest.hexdigest(), "files": relative_files}
+
+
 def _validated_source_revision(revision_file: Path | None = None) -> str:
     """Return the D-FINE-seg revision used to validate the release recipe."""
     if revision_file is None:
@@ -634,80 +663,17 @@ def _validated_artifact_plan(
     return onnx_path
 
 
-def _canonical_remote(url: str) -> str | None:
-    url = url.strip()
-    match = re.fullmatch(r"git@([^:]+):(.+)", url)
-    if match:
-        url = f"https://{match.group(1)}/{match.group(2)}"
-    parsed = urlsplit(url)
-    if parsed.scheme not in {"http", "https", "ssh", "git"} or not parsed.hostname:
-        return None
-    host = parsed.hostname
-    try:
-        port = parsed.port
-    except ValueError:
-        return None
-    if port:
-        host = f"{host}:{port}"
-    scheme = "https" if parsed.scheme == "ssh" else parsed.scheme
-    path = parsed.path.rstrip("/").removesuffix(".git")
-    return urlunsplit((scheme, host, path, "", ""))
-
-
-def _source_provenance(source: Path) -> dict:
-    """Describe the model source tree without requiring it to be a Git checkout."""
-    source = source.expanduser().resolve()
-    provenance: dict[str, object] = {"name": source.name}
-
-    def git(*args: str) -> str | None:
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(source), *args],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except OSError:
-            return None
-        return result.stdout.strip() if result.returncode == 0 else None
-
-    root = git("rev-parse", "--show-toplevel")
-    commit = git("rev-parse", "HEAD")
-    if root is None or commit is None:
-        return provenance
-
-    git_root = Path(root).resolve()
-    provenance["name"] = git_root.name
-    if source != git_root:
-        try:
-            provenance["subdirectory"] = str(source.relative_to(git_root))
-        except ValueError:
-            pass
-    provenance["commit"] = commit
-    status = git("status", "--porcelain", "--untracked-files=normal")
-    if status is not None:
-        provenance["dirty"] = bool(status)
-    remote = git("remote", "get-url", "origin")
-    if remote is None:
-        remotes = git("remote")
-        first_remote = remotes.splitlines()[0] if remotes else None
-        if first_remote:
-            remote = git("remote", "get-url", first_remote)
-    if remote:
-        canonical_remote = _canonical_remote(remote)
-        if canonical_remote:
-            provenance["repository"] = canonical_remote
-    return provenance
-
-
-def _model_source_metadata(source: Path, validated_revision: str | None = None) -> dict:
-    """Add the validated source reference without restricting custom exports."""
-    provenance = _source_provenance(source)
+def _model_source_metadata(validated_revision: str | None = None) -> dict:
     reference = validated_revision or _validated_source_revision()
-    provenance["validated_commit"] = reference
-    if "commit" in provenance:
-        provenance["matches_validated_revision"] = provenance["commit"] == reference
-    return provenance
+    manifest = _model_source_manifest()
+    return {
+        "name": "D-FINE-seg",
+        "repository": "https://github.com/ArgoHA/D-FINE-seg",
+        "upstream_commit": reference,
+        "bundled": True,
+        "implementation_sha256": manifest["sha256"],
+        "implementation_files": manifest["files"],
+    }
 
 
 def _collect_meta(
@@ -775,13 +741,12 @@ def _collect_meta(
         "opset": args.opset,
         "tool_versions": _tool_versions(),
         "exporter_sha256": _exporter_sha256(),
-        "model_source": _model_source_metadata(Path(args.dfine_src), validated_revision),
+        "model_source": _model_source_metadata(validated_revision),
         # Always present so no downstream tool ever has to GUESS the compute
         # types: the FP16 converters overwrite both fields with their recipe.
         "precision": "fp32",
         "precision_mode": "fp32",
         "deform_core": args.deform,
-        "trt_min_version": "8.5",
         **({"class_names": class_names} if class_names else {}),
     }
 
@@ -858,7 +823,12 @@ def _mismatch_hints(diff: dict, model_sd_len: int) -> list[str]:
     return hints
 
 
-def load_checkpoint_state(model: nn.Module, ckpt: Path, allow_partial: bool) -> dict:
+def load_checkpoint_state(
+    model: nn.Module,
+    ckpt: Path,
+    allow_partial: bool,
+    allow_unsafe: bool = False,
+) -> dict:
     """Load `ckpt` into `model` and return a load report for the sidecar.
 
     Strict mode (default): any missing or shape-mismatched model tensor aborts the
@@ -875,9 +845,18 @@ def load_checkpoint_state(model: nn.Module, ckpt: Path, allow_partial: bool) -> 
     stream = io.BytesIO(checkpoint_bytes)
     try:
         raw = torch.load(stream, map_location="cpu", weights_only=True)
-    except Exception:  # noqa: BLE001  (older checkpoints carry pickled objects)
+        deserialization = "weights_only"
+    except Exception as exc:  # noqa: BLE001  (PyTorch uses several exception types)
+        if not allow_unsafe:
+            raise SystemExit(
+                f"safe checkpoint load failed for {ckpt}: {exc}\n"
+                "refusing pickle deserialization; inspect the checkpoint source and pass "
+                "--allow-unsafe-checkpoint only when arbitrary code execution is acceptable"
+            ) from exc
         stream.seek(0)
-        raw = torch.load(stream, map_location="cpu")
+        print("[export] --allow-unsafe-checkpoint: loading checkpoint through pickle")
+        raw = torch.load(stream, map_location="cpu", weights_only=False)
+        deserialization = "unsafe_pickle"
     if not isinstance(raw, dict):
         raise SystemExit(
             f"checkpoint {ckpt} does not contain a state dict (got {type(raw).__name__})"
@@ -932,27 +911,30 @@ def load_checkpoint_state(model: nn.Module, ckpt: Path, allow_partial: bool) -> 
         "loaded": len(loadable),
         "missing": len(diff["missing"]),
         "shape_mismatch": len(diff["shape_mismatch"]),
+        "unused": len(diff["extra"]),
         "sha256": hashlib.sha256(checkpoint_bytes).hexdigest(),
+        "deserialization": deserialization,
     }
 
 
 def build_detection_model(args: argparse.Namespace, device: torch.device) -> tuple[nn.Module, dict]:
-    from src.d_fine.dfine import build_model  # noqa: E402  (path set at runtime)
+    _add_model_to_path()
+    from dfine_model import build_model
 
     model = build_model(
         model_name=args.model_name,
         num_classes=args.num_classes,
-        enable_mask_head=False,
-        device=device,
         img_size=(args.img_size, args.img_size),
-        in_channels=3,
-        pretrained_model_path=None,
-        pretrained_backbone=False,
     )
     ckpt = Path(args.checkpoint).resolve()
-    if not ckpt.exists():
+    if not ckpt.is_file():
         raise FileNotFoundError(f"checkpoint not found: {ckpt}")
-    load_report = load_checkpoint_state(model, ckpt, args.allow_partial_checkpoint)
+    load_report = load_checkpoint_state(
+        model,
+        ckpt,
+        args.allow_partial_checkpoint,
+        getattr(args, "allow_unsafe_checkpoint", False),
+    )
     print(
         f"[export] checkpoint: {load_report['loaded']}/{len(model.state_dict())} tensors "
         f"loaded ({load_report['mode']}, from {load_report['selected_state']})"
@@ -979,7 +961,6 @@ def export(args: argparse.Namespace) -> None:
     # Fail before loading a checkpoint or overwriting an output. The execution
     # postcondition is part of a valid export, not a best-effort extra.
     _require_dynamic_batch_runtime()
-    _add_repo_to_path(Path(args.dfine_src))
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"[export] device={device} variant={args.model_name} classes={args.num_classes}")
 
@@ -1015,14 +996,12 @@ def export(args: argparse.Namespace) -> None:
     meta["checkpoint_sha256"] = load_report["sha256"]
     meta["checkpoint_load"] = load_report["mode"]
     meta["checkpoint_loaded_tensors"] = load_report["loaded"]
+    meta["checkpoint_deserialization"] = load_report["deserialization"]
+    meta["checkpoint_selected_state"] = load_report["selected_state"]
+    meta["checkpoint_unused_tensors"] = load_report["unused"]
     if load_report["mode"] == "partial":
         meta["checkpoint_missing_count"] = load_report["missing"]
         meta["checkpoint_shape_mismatch_count"] = load_report["shape_mismatch"]
-    if meta["model_source"].get("matches_validated_revision") is False:
-        print(
-            "[export] note: D-FINE source commit differs from the validated revision; "
-            "the export will continue and record both commits"
-        )
     summary_keys = (
         "variant",
         "num_queries",
@@ -1235,6 +1214,13 @@ def _verify_dynamic_batch_runs(onnx_path: Path, meta: dict) -> None:
                 f"match the sidecar contract [N,{q},{c}]/[N,{q},4] — wrong --num-classes/"
                 "--num-queries, or the sidecar drifted from the graph"
             )
+        nonfinite = {
+            name: int(np.count_nonzero(~np.isfinite(value)))
+            for name, value in (("logits", logits), ("boxes", boxes))
+            if not np.isfinite(value).all()
+        }
+        if nonfinite:
+            raise AssertionError(f"batch-{n} outputs contain non-finite values: {nonfinite}")
     print(f"[verify] dynamic batch OK: N=1 and N=2 run; outputs match [N,{q},{c}] / [N,{q},4]")
 
 
@@ -1267,6 +1253,12 @@ def parse_args() -> argparse.Namespace:
         "missing/mismatched model tensor; the sidecar records the partial load",
     )
     p.add_argument(
+        "--allow-unsafe-checkpoint",
+        action="store_true",
+        help="allow pickle deserialization when PyTorch's weights-only loader rejects the "
+        "checkpoint; permits arbitrary code execution",
+    )
+    p.add_argument(
         "--class-names",
         default="",
         help="display names for the sidecar: a file (one name per line) or a comma "
@@ -1286,14 +1278,6 @@ def parse_args() -> argparse.Namespace:
         "--no-letterbox-upscale",
         action="store_true",
         help="do not upscale an image that already fits the engine canvas",
-    )
-    p.add_argument(
-        "--dfine-src",
-        default=os.environ.get(
-            "DFINE_SEG_SRC", os.environ.get("DFINE_SEG_DIR", str(repo.parent / "D-FINE-seg"))
-        ),
-        help="root of the D-FINE-seg source (github.com/ArgoHA/D-FINE-seg) providing "
-        "build_model; or set $DFINE_SEG_SRC/$DFINE_SEG_DIR",
     )
     p.add_argument("--output", default=str(repo / "trt-files" / "onnx" / "dfine_m.onnx"))
     p.add_argument("--device", default="cuda")

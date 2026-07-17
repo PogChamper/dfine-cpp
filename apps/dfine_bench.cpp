@@ -478,16 +478,21 @@ int main(int argc, char** argv) {
             throw std::runtime_error("dfine_bench: sidecar input dimensions contradict the engine");
         }
         if (have_meta && meta_doc.batch_facts_describe_engine()) {
-            const auto conflict = [](bool asserted, int sidecar, int actual) {
-                return asserted && sidecar != actual;
+            const auto conflict = [](const char* field, bool asserted, int sidecar, int actual) {
+                if (asserted && sidecar != actual) {
+                    throw std::runtime_error(std::string("dfine_bench: sidecar ") + field + " " +
+                                             std::to_string(sidecar) + " contradicts engine " +
+                                             std::to_string(actual));
+                }
             };
-            if ((meta_doc.has_dynamic_batch && m.dynamic_batch != dynamic) ||
-                conflict(meta_doc.has_min_batch, m.min_batch, min_batch) ||
-                conflict(meta_doc.has_opt_batch, m.opt_batch, opt_batch) ||
-                conflict(meta_doc.has_max_batch, m.max_batch, max_batch)) {
-                throw std::runtime_error(
-                    "dfine_bench: sidecar batch profile contradicts the engine");
+            if (meta_doc.has_dynamic_batch && m.dynamic_batch != dynamic) {
+                throw std::runtime_error("dfine_bench: sidecar dynamic_batch " +
+                                         std::string(m.dynamic_batch ? "true" : "false") +
+                                         " contradicts engine " + (dynamic ? "true" : "false"));
             }
+            conflict("min_batch", meta_doc.has_min_batch, m.min_batch, min_batch);
+            conflict("opt_batch", meta_doc.has_opt_batch, m.opt_batch, opt_batch);
+            conflict("max_batch", meta_doc.has_max_batch, m.max_batch, max_batch);
         }
 
         // Source image (real, repeated) or synthetic gradient.

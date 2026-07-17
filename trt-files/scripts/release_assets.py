@@ -114,6 +114,13 @@ MODEL_FACTS = {
         "feat_strides": [8, 16, 32],
     },
 }
+OFFICIAL_CHECKPOINT_TENSOR_COUNTS = {
+    "n": 674,
+    "s": 794,
+    "m": 1053,
+    "l": 1173,
+    "x": 1441,
+}
 OFFICIAL_CHECKPOINTS = {
     "n": "a6b913de83520d48bfc0d58d4645b3648662419ca0503b9386fef38548891ff6",
     "s": "4d878bf9be3e07bb0092f03ad45366d900bd0fa765c65c2d67ced1b08856182d",
@@ -249,6 +256,23 @@ def _script_sha256(name: str) -> str:
     return hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
 
 
+def _model_source_manifest() -> dict:
+    source = Path(__file__).resolve().parents[1] / "dfine_model"
+    files = sorted(path for path in source.rglob("*.py") if path.is_file())
+    if not files:
+        raise SystemExit(f"bundled D-FINE model sources are missing: {source}")
+    digest = hashlib.sha256()
+    relative_files = []
+    for path in files:
+        relative = path.relative_to(source).as_posix()
+        relative_files.append(relative)
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return {"sha256": digest.hexdigest(), "files": relative_files}
+
+
 def _validate_wheel(wheel: Path, version: str) -> None:
     expected = f"dfine-{version}-py3-none-linux_x86_64.whl"
     if wheel.name != expected:
@@ -366,6 +390,9 @@ def _validate_sidecar(
         "artifact_kind": "onnx",
         "schema_version": 1,
         "checkpoint_load": "strict",
+        "checkpoint_deserialization": "weights_only",
+        "checkpoint_selected_state": "checkpoint root",
+        "checkpoint_unused_tensors": 0,
         "precision": precision,
         "model": "d-fine",
         "variant": size,
@@ -394,6 +421,7 @@ def _validate_sidecar(
         "deform_core": "explicit",
         "gridsample_nodes": 0,
         "onnx_simplification": "applied",
+        "checkpoint_loaded_tensors": OFFICIAL_CHECKPOINT_TENSOR_COUNTS[size],
         "checkpoint_sha256": OFFICIAL_CHECKPOINTS[size],
         "exporter_sha256": _script_sha256("export_dfine_onnx.py"),
         **MODEL_FACTS[size],
@@ -413,20 +441,17 @@ def _validate_sidecar(
     source = meta.get("model_source")
     if not isinstance(source, dict):
         raise SystemExit(f"{sidecar.name}: model_source must be an object")
-    commit = source.get("commit")
-    validated = source.get("validated_commit")
+    implementation = _model_source_manifest()
     if (
-        not isinstance(commit, str)
-        or not GIT_COMMIT.fullmatch(commit)
-        or not isinstance(validated, str)
-        or not GIT_COMMIT.fullmatch(validated)
-        or commit != validated
-        or commit != validated_revision
-        or source.get("dirty") is not False
-        or source.get("matches_validated_revision") is not True
+        source.get("name") != "D-FINE-seg"
+        or source.get("repository") != "https://github.com/ArgoHA/D-FINE-seg"
+        or source.get("upstream_commit") != validated_revision
+        or source.get("bundled") is not True
+        or source.get("implementation_sha256") != implementation["sha256"]
+        or source.get("implementation_files") != implementation["files"]
     ):
         raise SystemExit(
-            f"{sidecar.name}: model_source must identify the clean, validated source commit"
+            f"{sidecar.name}: model_source must identify the validated bundled implementation"
         )
     tool_versions = meta.get("tool_versions")
     if (

@@ -30,6 +30,7 @@ def bootstrap(verbose: bool = False) -> Any:
     global _BOOTSTRAPPED
     _ensure_wsl_driver_on_path()
     import onnxruntime as ort
+
     if _BOOTSTRAPPED:
         return ort
     preload = getattr(ort, "preload_dlls", None)
@@ -46,8 +47,15 @@ def bootstrap(verbose: bool = False) -> Any:
     return ort
 
 
-def make_session(model_path: str, *, device_id: int = 0, prefer_cuda: bool = True,
-                 log_severity: int = 3, sess_options=None):
+def make_session(
+    model_path: str,
+    *,
+    device_id: int = 0,
+    prefer_cuda: bool = True,
+    use_tf32: bool = False,
+    log_severity: int = 3,
+    sess_options=None,
+):
     """Create an InferenceSession on CUDA (fallback CPU). Returns (session, providers_used)."""
     ort = bootstrap()
     if sess_options is None:
@@ -56,8 +64,17 @@ def make_session(model_path: str, *, device_id: int = 0, prefer_cuda: bool = Tru
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     providers: list = []
     if prefer_cuda and "CUDAExecutionProvider" in ort.get_available_providers():
-        providers.append(("CUDAExecutionProvider", {"device_id": device_id,
-                          "cudnn_conv_algo_search": "EXHAUSTIVE", "cudnn_conv_use_max_workspace": "1"}))
+        providers.append(
+            (
+                "CUDAExecutionProvider",
+                {
+                    "device_id": device_id,
+                    "cudnn_conv_algo_search": "EXHAUSTIVE",
+                    "cudnn_conv_use_max_workspace": "1",
+                    "use_tf32": "1" if use_tf32 else "0",
+                },
+            )
+        )
     providers.append("CPUExecutionProvider")
     sess = ort.InferenceSession(model_path, sess_options=sess_options, providers=providers)
     return sess, sess.get_providers()

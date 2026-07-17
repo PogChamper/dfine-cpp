@@ -17,7 +17,6 @@ def harness(monkeypatch, tmp_path):
     calls: list[list[str]] = []
     monkeypatch.setattr(cli.subprocess, "run",
                         lambda cmd, check=True, **kw: calls.append([str(c) for c in cmd]))
-    monkeypatch.setattr(cli, "_seg_dir", lambda: tmp_path)
     monkeypatch.setattr(cli, "_scripts_dir", lambda: tmp_path / "scripts")
     monkeypatch.setattr(cli, "_cache_dir", lambda: tmp_path / "cache")
     ckpt = tmp_path / "model.pt"
@@ -104,20 +103,64 @@ def test_custom_model_args_passthrough(harness):
     assert "--allow-partial-checkpoint" in calls[0]
 
 
+def test_unsafe_checkpoint_passthrough(harness):
+    calls, ckpt = harness
+    assert cli.main(
+        ["export", "--checkpoint", ckpt, "--allow-unsafe-checkpoint"]
+    ) == 0
+    assert "--allow-unsafe-checkpoint" in calls[0]
+
+
+def test_checkpoint_is_required(harness, capsys):
+    calls, _ = harness
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["export", "--model", "m"])
+    assert exc_info.value.code == 2
+    assert "the following arguments are required: --checkpoint" in capsys.readouterr().err
+    assert calls == []
+
+
+def test_unsafe_checkpoint_help_warns_about_code_execution(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["export", "--help"])
+    assert exc_info.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "permits arbitrary code execution" in help_text
+
+
+def test_export_help_marks_source_checkout(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["export", "--help"])
+    assert exc_info.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "requires a D-FINE-cpp source checkout" in help_text
+
+
+def test_export_scripts_require_source_checkout(monkeypatch):
+    monkeypatch.setattr(cli, "_repo_root", lambda: None)
+    with pytest.raises(SystemExit, match="checkpoint export is source-checkout tooling"):
+        cli._scripts_dir()
+
+
 def test_resolver_prefers_the_production_tier():
     assert cli._ONNX_SUFFIXES["fp16"][0] == "_slim"
 
 
-def test_standard_checkpoints_use_upstream_pretrained_directory():
-    assert all(path.startswith("pretrained/") for path in cli._CHECKPOINTS.values())
+def test_sweep_forwards_every_argument_verbatim(monkeypatch, tmp_path):
+    """`dfine sweep` owns no argument surface: everything (even --help) is
+    forwarded to preset_sweep.py, so the two cannot drift."""
+    calls: list[list[str]] = []
 
+    class _Completed:
+        returncode = 7
 
-def test_standard_checkpoint_falls_back_to_legacy_root(tmp_path):
-    canonical = tmp_path / cli._CHECKPOINTS["n"]
-    legacy = tmp_path / canonical.name
-    legacy.write_bytes(b"checkpoint")
-    assert cli._default_checkpoint(tmp_path, "n") == legacy
+    monkeypatch.setattr(
+        cli.subprocess, "run", lambda cmd, **kw: calls.append([str(c) for c in cmd]) or _Completed()
+    )
+    monkeypatch.setattr(cli, "_scripts_dir", lambda: tmp_path / "scripts")
 
-    canonical.parent.mkdir()
-    canonical.write_bytes(b"canonical")
-    assert cli._default_checkpoint(tmp_path, "n") == canonical
+    exit_code = cli.main(["sweep", "--ap-budget", "0.3", "--point", "max:mode=graph"])
+
+    assert exit_code == 7  # the tool's exit code passes through
+    assert calls[0][1].endswith("preset_sweep.py")
+    assert calls[0][2:] == ["--ap-budget", "0.3", "--point", "max:mode=graph"]

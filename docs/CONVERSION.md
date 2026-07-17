@@ -42,45 +42,41 @@ python trt-files/scripts/build_engine.py \
 ```
 
 Use `--opt-batch 8` for a batch-serving engine. It improves batch-8 throughput by approximately 6–10% in the measured D-FINE-M runs and increases batch-1 latency by 8–19%.
+Keep `--min-batch 1` when targeting a larger batch. An equal profile such as `8/8/8` becomes a
+static-batch engine and is rejected: the native runtime accepts static batch 1 or a dynamic range.
 
 Add `--cuda-graph` to `dfine build` when either CUDA Graph mode will be used. It sets
 `max_aux_streams=0`; the default cache output uses a separate `-g0` entry. With the direct builder,
 use `--max-aux-streams 0` or its `--cuda-graph` alias. The flag does not change output types; active
 capture also requires FP32 logits and boxes. The ordinary runtime and GPU decode do not require it.
 
-Do not add `--fp16` to a typed FP16 artifact. That flag selects the measured weakly typed anti-example. The FP16 compute types are already encoded in `dfine_m_slim.onnx`; `--strongly-typed` tells TensorRT to preserve them.
+Do not add `--fp16` to a typed FP16 artifact. That flag discards the encoded types and lets TensorRT choose precision freely — the weak-typing failure class this pipeline exists to prevent. The FP16 compute types are already encoded in `dfine_m_slim.onnx`; `--strongly-typed` tells TensorRT to preserve them.
 
 ## Export a checkpoint
 
-Checkpoint export currently uses the model builder from [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg). It is an export-time dependency only; engine build and inference do not import it. The tested source revision is stored in [`trt-files/DFINE_SEG_REVISION`](../trt-files/DFINE_SEG_REVISION).
+Checkpoint export uses the detection-only D-FINE implementation bundled under
+`trt-files/dfine_model`. Its upstream [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg)
+revision is stored in [`trt-files/DFINE_SEG_REVISION`](../trt-files/DFINE_SEG_REVISION).
+D-FINE-seg remains the training implementation and differential-test reference; users do not need
+its source tree to export a checkpoint.
 
-Prepare the locked tools environment and a source checkout:
+Prepare the locked tools environment:
 
 ```sh
-git clone https://github.com/ArgoHA/D-FINE-seg ../D-FINE-seg
-git -C ../D-FINE-seg checkout "$(cat trt-files/DFINE_SEG_REVISION)"
 uv sync --frozen --extra gpu --extra torch
 ```
 
-Standard detection checkpoints are hosted in `ArgoSA/D-FINE-seg`. Use
-`dfine_{s,m,l,x}_obj2coco.pt`; nano has no `obj2coco` checkpoint, so use
-`dfine_n_coco.pt`. From the D-FINE-cpp checkout, download a missing standard file with the upstream
-helper:
-
-```sh
-PYTHONPATH=../D-FINE-seg uv run --with huggingface-hub==1.13.0 python -c \
-    'from src.d_fine.utils import ensure_pretrained; print(ensure_pretrained("../D-FINE-seg/pretrained/dfine_m_obj2coco.pt"))'
-```
-
-Custom checkpoint names are not downloaded and must already exist.
+Standard detection checkpoints are hosted in
+[`ArgoSA/D-FINE-seg`](https://huggingface.co/ArgoSA/D-FINE-seg). Use
+`dfine_{s,m,l,x}_obj2coco.pt`; nano has no `obj2coco` checkpoint, so use `dfine_n_coco.pt`. The
+exporter does not download checkpoints; pass an existing standard or custom checkpoint explicitly.
 
 Export the FP32 base:
 
 ```sh
 uv run python trt-files/scripts/export_dfine_onnx.py \
     --model-name m \
-    --checkpoint ../D-FINE-seg/pretrained/dfine_m_obj2coco.pt \
-    --dfine-src ../D-FINE-seg \
+    --checkpoint /path/to/dfine_m_obj2coco.pt \
     --opset 19 \
     --output dfine_m_op19.onnx
 ```
@@ -92,9 +88,13 @@ The exporter performs these postconditions before publishing the graph and sidec
 3. The batch dimension remains symbolic.
 4. The graph contains only standard-domain ONNX operations.
 5. The explicit deformable-attention core contains no `GridSample` node.
-6. ONNX Runtime executes batch 1 and 2 with shapes matching the sidecar.
+6. ONNX Runtime executes batch 1 and 2 with finite outputs whose shapes match the sidecar.
 
 Failed postconditions do not publish or overwrite the output pair. `--allow-partial-checkpoint` exists for research and records a partial load in the sidecar; do not use it for a release or deployment artifact.
+Checkpoint deserialization is weights-only by default. `--allow-unsafe-checkpoint` enables pickle
+fallback and therefore permits arbitrary code execution; use it only for a trusted legacy file.
+The sidecar records the selected checkpoint state, deserialization mode, and loaded and unused
+tensor counts.
 
 Convert the FP32 graph to the production recipe:
 
@@ -111,14 +111,16 @@ deform coordinate/index chain in FP32; backbone, encoder, decoder compute, and d
 FP16. Graph outputs remain FP32, preserving one output contract for CPU decode and the optional
 GPU/graph paths.
 
-The CLI runs the same sequence from a repository checkout:
+The source-checkout CLI runs the same sequence in the locked tools environment:
 
 ```sh
-dfine export --model m --checkpoint /path/to/checkpoint.pt \
+PYTHONPATH=python uv run --frozen --extra gpu --extra torch \
+  python -m dfine.cli export --model m --checkpoint /path/to/checkpoint.pt \
     --precision fp16 --output dfine_m_slim.onnx
 ```
 
-Set `DFINE_SEG_DIR` for the CLI when the D-FINE-seg checkout is not the default sibling directory. The direct exporter accepts `--dfine-src` and also reads `DFINE_SEG_SRC` or `DFINE_SEG_DIR`.
+An editable install exposes the shorter `dfine export` form. The runtime wheel does not contain the
+checkpoint-export toolchain.
 
 ## Custom classes and checkpoints
 
@@ -130,7 +132,6 @@ uv run python trt-files/scripts/export_dfine_onnx.py \
     --checkpoint food_s.pt \
     --num-classes 3 \
     --class-names burger,fries,drink \
-    --dfine-src ../D-FINE-seg \
     --output food_s_op19.onnx
 ```
 
@@ -173,21 +174,35 @@ These are measured TensorRT behaviors for the recorded graph and stack. They are
 
 ## Accuracy-traded presets
 
-The release `slim` recipe changes precision placement but remains full-val lossless. The following presets alter the export graph and, for `max`, the engine profile:
+`slim` changes precision placement; the options below change the exported graph. They are explicit
+operating points, not aliases:
 
-| Preset or option | Graph change | Measured D-FINE-M cost |
-|---|---|---:|
-| `--num-queries 200` | Start with 200 decoder queries | −0.13 AP |
-| `--cascade 1:150` | Keep the top 150 queries after decoder layer 1 | −0.18 AP |
-| `--eval-idx 2` | Emit after decoder layer 2 | −0.57 AP |
-| `fast` recipe | Q200 + cascade 1:100 | −0.44 to −0.77 AP across sizes |
-| `max` recipe | `fast` + eval layer 2 + opt batch 8 | −0.89 AP on M |
+| Graph | Export flags | Output queries | Measured D-FINE-M ΔAP | Measured b8 throughput |
+|---|---|---:|---:|---:|
+| `base` | — | 300 | — | 533 img/s |
+| `Q200` | `--num-queries 200` | 200 | −0.184 | 560 img/s |
+| `C300→150` | `--cascade 1:150` | 150 | −0.230 | 564 img/s |
+| `C300→100` | `--cascade 1:100` | 100 | −0.497 | 576 img/s |
+| `Q200→C100` | `--num-queries 200 --cascade 1:100` | 100 | −0.515 | 585 img/s |
 
-There is no `--preset fast` CLI alias. Apply the required export flags explicitly so the resulting sidecar records the changed query/layer contract. Use the [research matrix](RESEARCH_MATRIX.md) for full accuracy, throughput, and hardware scope before shipping one of these variants.
+Accuracy is full COCO `val2017` on TensorRT `slim`; throughput is the matching batch-8 native C++
+comparison on RTX 4070 Ti SUPER (median of five idle-gated interleaved rounds). The
+[benchmark table](BENCHMARKS.md#preset-surface) adds recall and object-size deltas plus the CUDA
+Graph and batch-8-profile runtime modes; the
+[sweep](VALIDATION.md#sweep-your-checkpoint) runs the same comparison on a custom checkpoint and
+dataset in one command.
+
+`--eval-idx` is an additional graph slider with a larger accuracy cost (the measured `max` preset
+in [Benchmarks](BENCHMARKS.md#runtime-modes-and-serving-profile) uses `--eval-idx 2`). Apply every
+graph change explicitly so the sidecar records the query and decoder contract.
 
 ## Reproducibility and release gates
 
-`uv.lock` pins the Python toolchain; `trt-files/DFINE_SEG_REVISION` pins the tested model source. Byte comparison is meaningful only when tool versions, checkpoint hash, model-source state, export flags, and simplification path match. A dirty model-source checkout is not a release input. Runtime correctness does not rely on byte identity alone: validate the produced engine against the expected detections and dataset metric.
+`uv.lock` pins the Python toolchain. The sidecar records the upstream revision and a deterministic
+SHA-256 over every bundled model source, in addition to the exporter and checkpoint hashes. Byte
+comparison is meaningful only when those hashes, tool versions, export flags, and simplification path
+match. Runtime correctness does not rely on byte identity alone: validate the produced engine against
+the expected detections and dataset metric.
 
 Release gates cover three boundaries:
 

@@ -13,7 +13,7 @@
 ![TensorRT](https://img.shields.io/badge/TensorRT-10.x-76B900?logo=nvidia&logoColor=white)
 ![CUDA](https://img.shields.io/badge/CUDA-12.x-76B900?logo=nvidia&logoColor=white)
 
-D-FINE can export and compile successfully while producing inaccurate TensorRT detections. On COCO val2017, the stock `grid_sample` deformable-attention path fell from 0.5509 PyTorch AP to 0.4455 TensorRT AP. D-FINE-cpp replaces that path with equivalent gather-bilinear operations, preserves the precision-sensitive box decoder under FP16, and runs the verified model through an OpenCV-free C++/CUDA library.
+D-FINE can export and compile successfully while producing inaccurate TensorRT detections. On COCO val2017, the stock `grid_sample` deformable-attention path fell from 0.5509 PyTorch AP to 0.4455 TensorRT AP. D-FINE-cpp replaces that path with equivalent gather-bilinear operations, keeps the precision-sensitive box decoder in FP32 inside the FP16 engine, and runs the verified model through an OpenCV-free C++/CUDA library.
 
 ## Why this project exists
 
@@ -28,22 +28,22 @@ The fix uses standard ONNX and TensorRT operations: no custom plugin and no Pyth
 
 ## Quickstart
 
-This path uses the latest published release, v0.4.0: the Linux x86_64 wheel and the D-FINE-M ONNX artifact. It requires CUDA 12, TensorRT 10.13, and an Ada or Blackwell GPU; build from source on Turing or Ampere. TensorRT engines are compiled locally for the target GPU.
+This path uses the latest published release, v0.5.0: the Linux x86_64 wheel and the D-FINE-M ONNX artifact. It requires CUDA 12, TensorRT 10.13, and an Ada or Blackwell GPU; build from source on Turing or Ampere. TensorRT engines are compiled locally for the target GPU.
 
 `pip` installs the released `dfine` wheel. Maintainer model tooling, dataset validation, and release
 workflows use the root `uv.lock`.
 
 ```sh
 python -m venv .venv && source .venv/bin/activate
-python -m pip install "dfine[cli,tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/dfine-0.4.0-py3-none-linux_x86_64.whl"
-curl -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/dfine_m_slim.onnx \
-     -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.4.0/dfine_m_slim.json
+python -m pip install "dfine[cli,tensorrt] @ https://github.com/PogChamper/dfine-cpp/releases/download/v0.5.0/dfine-0.5.0-py3-none-linux_x86_64.whl"
+curl -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.5.0/dfine_m_slim.onnx \
+     -fLO https://github.com/PogChamper/dfine-cpp/releases/download/v0.5.0/dfine_m_slim.json
 dfine doctor
 dfine build --model m --onnx dfine_m_slim.onnx --output dfine_m_slim.engine
 dfine predict --engine dfine_m_slim.engine --image image.jpg --out result.jpg
 ```
 
-Use any JPEG or PNG as `image.jpg`. The build is a one-time operation and normally takes 1–3 minutes. For source builds, C++ integration, custom checkpoints, and artifact verification, see [Getting started](docs/GETTING_STARTED.md). What changed in this release is in the [v0.4.0 notes](docs/releases/v0.4.0.md).
+Use any JPEG or PNG as `image.jpg`. The build is a one-time operation and normally takes 1–3 minutes. For source builds, C++ integration, custom checkpoints, and artifact verification, see [Getting started](docs/GETTING_STARTED.md). What changed in this release is in the [v0.5.0 notes](docs/releases/v0.5.0.md).
 
 ## Build correctly
 
@@ -94,19 +94,28 @@ Correctness is gated at each boundary:
 | Hardware | Reproducible validation report |
 
 The default `slim` recipe is full-val lossless on all five published sizes: N 0.4272, S 0.5060,
-M 0.5500, L 0.5723, and X 0.5926 AP. D-FINE-M FP16 throughput after surgical conversion, measured
-as medians of three interleaved 500-iteration rounds (steady-state pipeline p50; preprocess,
-TensorRT, transfer, and CPU decode):
+M 0.5500, L 0.5723, and X 0.5926 AP.
 
-| GPU | Recipe | b1 img/s | b8 img/s |
-|---|---|---:|---:|
-| RTX 3090 | `slim` | 310 | 487 |
-| RTX 4070 Ti SUPER | `surgical` | 288 | 526 |
-| RTX 5080 | `slim` | 456 | 676 |
+The v0.5 study measured five D-FINE-M operating points on RTX 4070 Ti SUPER. Throughput is native
+C++ image-to-detections at batch 8; accuracy is full COCO `val2017` on the corresponding strongly
+typed `slim` graph.
 
-The Ampere and Blackwell matrices and Ada compatibility report are in
-[Validation](docs/VALIDATION.md). The Ada full-methodology ladder, accuracy-traded presets, and
-closed FP8, INT8, BF16, and plugin experiments are in the [research matrix](docs/RESEARCH_MATRIX.md).
+| Graph | b8 img/s | Throughput | COCO AP | ΔAP |
+|---|---:|---:|---:|---:|
+| `base` | 533 | — | 55.033 | — |
+| `Q200` | 560 | +5.1% | 54.849 | −0.184 |
+| `C300→150` | 564 | +5.9% | 54.804 | −0.230 |
+| `C300→100` | 576 | +8.1% | 54.536 | −0.497 |
+| `Q200→C100` | 585 | +9.7% | 54.518 | −0.515 |
+
+`Q200` is the conservative measured point; `Q200→C100` is the fastest preset. On top of any
+preset, the batch-8-optimized engine profile and full-pipeline CUDA Graph reach 662 img/s at
+batch 8 and 1.99 ms at batch 1 on the same GPU (two runtime modes of the `max` graph,
+−0.96 COCO AP). The complete
+[benchmark tables](docs/BENCHMARKS.md) add runtime modes, object-size, recall, class, PyTorch
+compiler, and cross-GPU results. The [preset report](docs/reports/v0.5.0-preset-evaluation.md)
+records the cross-domain study and evidence boundary. `dfine sweep` builds the same decision
+table for your own checkpoint and dataset in one command ([Validation](docs/VALIDATION.md)).
 
 ## Supported contract
 
@@ -132,6 +141,8 @@ The release wheel contains an `sm_89` native build with forward PTX and was vali
 | Export a custom checkpoint or build an engine | [Conversion](docs/CONVERSION.md) |
 | Embed and tune the native library | [Runtime](docs/RUNTIME.md) |
 | Understand artifact names and sidecars | [Artifact identity](docs/NAMING.md) |
+| Compare published accuracy and throughput | [Benchmarks](docs/BENCHMARKS.md) |
+| Pick an operating point for your checkpoint and dataset | [Validation](docs/VALIDATION.md#sweep-your-checkpoint) |
 | Reproduce accuracy and performance | [Validation](docs/VALIDATION.md) |
 | Inspect precision research and rejected paths | [Research matrix](docs/RESEARCH_MATRIX.md) |
 | See current priorities | [Roadmap](docs/ROADMAP.md) |
@@ -144,6 +155,6 @@ current contract.
 
 ## Credits and license
 
-D-FINE-cpp ports [D-FINE](https://github.com/Peterande/D-FINE) (Peng et al.) to TensorRT and uses [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) for the current export source. Initial runtime scaffolding was derived from [rf-detr-cpp](https://github.com/infracv/rf-detr-cpp) and substantially adapted. The explicit-gather export, surgical FP16 conversion, GPU decode, frozen-memory contract, and full-pipeline CUDA Graph are original to this project.
+D-FINE-cpp ports [D-FINE](https://github.com/Peterande/D-FINE) (Peng et al.) to TensorRT. Checkpoint export uses the bundled detection-only model definition; [D-FINE-seg](https://github.com/ArgoHA/D-FINE-seg) remains the training implementation and pinned differential reference. Initial runtime scaffolding was derived from [rf-detr-cpp](https://github.com/infracv/rf-detr-cpp) and substantially adapted. The explicit-gather export, surgical FP16 conversion, GPU decode, frozen-memory contract, and full-pipeline CUDA Graph are original to this project.
 
 The repository is licensed under Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Vendored `stb_image` is public domain; nlohmann/json is MIT-licensed and discovered or fetched at build time. NVIDIA TensorRT and CUDA are installed separately.

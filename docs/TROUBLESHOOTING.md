@@ -232,16 +232,19 @@ Export serialization depends on the complete toolchain and source tree. Use the 
 uv sync --frozen --extra gpu --extra torch
 ```
 
-Compare the sidecars' `tool_versions`, `model_source`, checkpoint hash, opset, precision recipe, and export flags. A dirty D-FINE source checkout is recorded and should not produce a release artifact.
+Compare the sidecars' `tool_versions`, bundled model-source hash, checkpoint hash, opset, precision
+recipe, and export flags.
 
 ### `ModuleNotFoundError` during export
 
-Install the checkpoint-export chain and point to a compatible D-FINE-seg checkout:
+Install the checkpoint-export chain:
 
 ```sh
 uv sync --frozen --extra gpu --extra torch
-export DFINE_SEG_DIR=/path/to/D-FINE-seg
 ```
+
+No D-FINE or D-FINE-seg checkout belongs on `PYTHONPATH`. If the bundled `dfine_model` package is
+missing, restore the repository checkout.
 
 ### Checkpoint tensors are missing or shape-mismatched
 

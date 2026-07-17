@@ -343,6 +343,9 @@ cmp "$RELEASE_DIR/native-detections.json" "$RELEASE_DIR/wheel-detections.json"
       their pinned published SHA-256 instead; the wheel is still fully validated, and any byte drift
       fails. Use the canonical form above only for a freshly exported pack.
 - [ ] Tag the release commit and upload the contents of `$RELEASE_DIR/upload` without rebuilding.
+- [ ] The release body must not contain relative links — GitHub release pages do not resolve
+      them. Rewrite `](../` to `](https://github.com/PogChamper/dfine-cpp/blob/v$VERSION/docs/`
+      before `gh release create`, and click every link on the published page.
 
 ```sh
 "$PY" trt-files/scripts/release_assets.py verify --tag "v$VERSION"
